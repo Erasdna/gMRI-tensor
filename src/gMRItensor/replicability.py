@@ -27,7 +27,7 @@ def half_half_split_replicability(
         fms = factor_match_score(
             half_half_factors[0],
             half_half_factors[1],
-            skip_mode=1,
+            skip_mode=0,
             consider_weights=False,
         )
 
