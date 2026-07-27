@@ -4,16 +4,15 @@ requires = ["setuptools>=61.0.0", "wheel"]
  # See https://python-poetry.org/docs/pyproject/ for more keywords for the project table
 [project]
  # Name of your package
-name = "mypackage"
+name = "gMRI-tensor"
 authors = [
-    {name = "Jørgen S. Dokken", email = "dokken@simula.no"},
-    {name = "Henrik N. Finsberg", email = "henriknf@simula.no"}
+    {name = "Andreas R. Solheim", email = "solheim@simula.no"},
     ]
-version = "0.2.0.dev0"
+version = "0.1.0"
 description = "Minimal package for adding two numbers"
 # "readme" the description field in your package, see: https://python-poetry.org/docs/pyproject/#readme
 readme = "README.md"
-requires-python = ">=3.8"
+requires-python = ">=3.10"
  # Path to license file, see: https://spdx.org/licenses/ for options
 license = {file = "LICENSE"}
 # Direct dependencies
@@ -30,21 +29,9 @@ test = [
    "pytest-cov" # Coverage reports
 ]
 
-docs = [
-    "jupyter-book", # Required to build documentation
-    "jupytext", # Required to convert .py to .ipynb files
-    "ipython!=8.7.0" # https://github.com/ipython/ipython/issues/13845
-]
+dev = ["pre-commit"]
 
-binder = [ # Required to interface with Binder when having a Dockerfile in root
-    "jupyterlab",
-    "notebook"
-]
-pypi = [
-    "build" # Used for building wheels and uploading to pypi
-]
-
-all = ["mypackage[test,docs,binder,pypi]"]
+all = ["mypackage[test,dev]"]
 
 [tool.mypy]
 ignore_missing_imports = true # Does not show errors when importing untyped libraries

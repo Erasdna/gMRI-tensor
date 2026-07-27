@@ -41,5 +41,4 @@ sphinx:
   - 'sphinx.ext.viewcode'
 
 
-exclude_patterns: ["README.md","src/*", "test/*",
-"CONTRIBUTING.md", ".pytest_cache/*", "*.py"]
+exclude_patterns: ["README.md","src/*", "test/*","CONTRIBUTING.md", ".pytest_cache/*", "*.py"]
