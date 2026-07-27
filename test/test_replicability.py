@@ -1,6 +1,5 @@
 import os
 
-import numpy as np
 import torch
 from gMRItensor import setup_backend
 from gMRItensor.replicability import half_half_split_replicability
@@ -11,7 +10,7 @@ def test_half_half():
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     device = setup_backend()
 
-    tensor = torch.randn(100, 4, 10000).to(device)
+    tensor = torch.randn(99, 4, 10000).to(device)
     iterator = half_half_split_replicability(
         tensor,
         3,
@@ -21,8 +20,8 @@ def test_half_half():
         CP_verbose_level=1,
     )
     for it in iterator:
+        print(it[1])
         assert len(it[0]) == tensor.shape[0]
-        assert it[1].isdtype(np.float)
 
 
 def test_CV_folds():

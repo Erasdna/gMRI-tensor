@@ -20,11 +20,12 @@ def half_half_split_replicability(
             weights, factors, best_error = run_CP_decomposition_repeated(
                 use_tensor, rank, device=tensor.device, **kwargs
             )
-            half_half_factors.append((weights, factors[1:]))
+            half_half_factors.append((weights, factors))
 
         fms = factor_match_score(
             half_half_factors[0],
             half_half_factors[1],
+            skip_mode=0,
             consider_weights=False,
         )
 
