@@ -4,10 +4,11 @@
 # SPDX-License-Identifier:    MIT
 import importlib.metadata
 
-from .functions import addition
-from .functions import print_add
+from .decomposition import compute_CP_decomposition
+from .decomposition import run_CP_decomposition_repeated
+from .decomposition import setup_backend
 
 __version__ = importlib.metadata.version(__package__)
 
 
-__all__ = ["addition", "print_add"]
+__all__ = ["compute_CP_decomposition", "run_CP_decomposition_repeated", "setup_backend"]

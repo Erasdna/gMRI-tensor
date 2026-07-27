@@ -4,7 +4,7 @@ requires = ["setuptools>=61.0.0", "wheel"]
  # See https://python-poetry.org/docs/pyproject/ for more keywords for the project table
 [project]
  # Name of your package
-name = "gMRI-tensor"
+name = "gMRItensor"
 authors = [
     {name = "Andreas R. Solheim", email = "solheim@simula.no"},
     ]
@@ -17,7 +17,13 @@ requires-python = ">=3.10"
 license = {file = "LICENSE"}
 # Direct dependencies
 dependencies = [
-    'numpy'
+    "h5py>=3.16.0",
+    'numpy',
+    "scikit-learn>=1.7.2",
+    "tensorly>=0.9.0",
+    "tlviz>=0.1.1",
+    "torch>=2.13.0",
+    "tqdm>=4.69.1",
 ]
 
 
@@ -31,7 +37,7 @@ test = [
 
 dev = ["pre-commit"]
 
-all = ["mypackage[test,dev]"]
+all = ["gMRItensor[test,dev]"]
 
 [tool.mypy]
 ignore_missing_imports = true # Does not show errors when importing untyped libraries
@@ -47,7 +53,7 @@ files = [  # Folder to which files that should be checked by mypy
 [tool.pytest.ini_options]
 addopts = [
     "--import-mode=importlib",
-    "--cov=mypackage",
+    "--cov=gMRI-tensor",
     "--cov-report=html",
     "--cov-report=term-missing",
     "-v"]
