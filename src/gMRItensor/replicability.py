@@ -9,6 +9,7 @@ def half_half_split_replicability(
     tensor: torch.Tensor, rank: int, splits: int, seed=0, **kwargs
 ):  # Split tensor along first dimension
     torch.manual_seed(seed)
+    np.random.seed(seed)
     for n in range(splits):
         n_total = tensor.shape[0]
         shuffled_indices = torch.randperm(n_total).tolist()
@@ -35,7 +36,9 @@ def half_half_split_replicability(
 def repeated_CV_replicability(
     tensor: torch.Tensor, rank: int, CV_repeats: int, CV_splits: int, seed=0, **kwargs
 ):
-    rskf = RepeatedKFold(n_splits=CV_splits, n_repeats=CV_repeats, random_state=0)
+    torch.manual_seed(seed)
+    np.random.seed(seed)
+    rskf = RepeatedKFold(n_splits=CV_splits, n_repeats=CV_repeats, random_state=seed)
 
     CV_dict: dict = {"repeat": [], "fold": [], "ids": [], "factors": []}
     for i, el in enumerate(rskf.split(torch.arange(tensor.shape[0]))):
