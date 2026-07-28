@@ -45,7 +45,7 @@ def repeated_CV_replicability(
 
         use_tensor = tensor[el[0]]
 
-        weights, factors, best_error = run_CP_decomposition_repeated(
+        weights, factors, _ = run_CP_decomposition_repeated(
             use_tensor,
             rank,
             device=tensor.device,
@@ -57,17 +57,30 @@ def repeated_CV_replicability(
     assert nb == len(CV_dict["repeat"])
     for i in range(nb):
         for j in range(i + 1, nb):
-            subject_intersection = list(set(CV_dict["ids"][i]) & set(CV_dict["ids"][j]))
+            common_subjects = np.intersect1d(CV_dict["ids"][i], CV_dict["ids"][j])
+
+            # Skip if no overlap
+            if len(common_subjects) == 0:
+                continue
+
             weights = torch.ones(rank)
             comps = []
             for ind in [i, j]:
-                subject_iids = np.isin(CV_dict["ids"][ind], subject_intersection)
+                id_to_idx = {
+                    sub_id: idx for idx, sub_id in enumerate(CV_dict["ids"][ind])
+                }
+                aligned_row_indices = [id_to_idx[sub_id] for sub_id in common_subjects]
 
                 fac = CV_dict["factors"][ind]
-                factors = [fac[0][subject_iids]] + [
-                    fac[i] for i in range(1, len(tensor.shape))
-                ]
-                comps.append((weights, factors))
+
+                # Re-order and slice subject factor (Mode 0) according to sorted common_subjects
+                subject_factor_aligned = fac[0][aligned_row_indices]
+
+                # Keep remaining modes intact (Modes 1 to N-1)
+                other_mode_factors = [fac[m] for m in range(1, len(tensor.shape))]
+
+                aligned_factors = [subject_factor_aligned] + other_mode_factors
+                comps.append((weights, aligned_factors))
 
             fms = factor_match_score(comps[0], comps[1], consider_weights=False)
-            yield subject_intersection, i, j, fms
+            yield common_subjects, i, j, fms
