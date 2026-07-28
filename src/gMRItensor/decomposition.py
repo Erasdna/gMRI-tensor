@@ -23,12 +23,13 @@ def compute_CP_decomposition(
     func=tl.decomposition.non_negative_parafac,
     init="random",
     CP_verbose_level=0,
+    CP_tolerance=1e-5,
 ):
     decomp, errors = func(
         tensor,
         rank=rank,
         n_iter_max=CP_max_iter,
-        tol=1e-5,  # Computing this tensor decomp is quite expensive...
+        tol=CP_tolerance,  # Computing this tensor decomp is quite expensive...
         return_errors=True,
         random_state=random_state,
         verbose=CP_verbose_level,
@@ -56,6 +57,7 @@ def run_CP_decomposition_repeated(
     device: torch.device = torch.device("cpu"),
     use_memory_efficient_khatri_rao: bool = True,
     CP_verbose_level=0,
+    CP_tolerance=1e-5,
 ):
     if use_memory_efficient_khatri_rao:
         tl.tenalg.register_backend_method(
@@ -78,6 +80,7 @@ def run_CP_decomposition_repeated(
                 i,
                 func,
                 CP_verbose_level=CP_verbose_level,
+                CP_tolerance=CP_tolerance,
             )
         except ConvergenceError as e:
             print(e)
