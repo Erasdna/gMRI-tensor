@@ -1,7 +1,7 @@
 import numpy as np
 import torch
 from gMRItensor import run_CP_decomposition_repeated
-from sklearn.model_selection import RepeatedKFold
+from sklearn.model_selection import RepeatedStratifiedKFold
 from tlviz.factor_tools import factor_match_score
 
 
@@ -34,14 +34,27 @@ def half_half_split_replicability(
 
 
 def repeated_CV_replicability(
-    tensor: torch.Tensor, rank: int, CV_repeats: int, CV_splits: int, seed=0, **kwargs
+    tensor: torch.Tensor,
+    rank: int,
+    CV_repeats: int,
+    CV_splits: int,
+    seed=0,
+    stratification=None,
+    **kwargs,
 ):
     torch.manual_seed(seed)
     np.random.seed(seed)
-    rskf = RepeatedKFold(n_splits=CV_splits, n_repeats=CV_repeats, random_state=seed)
+    rskf = RepeatedStratifiedKFold(
+        n_splits=CV_splits,
+        n_repeats=CV_repeats,
+        random_state=seed,
+    )
+
+    if stratification is None:
+        stratification = torch.ones(tensor.shape[0])
 
     CV_dict: dict = {"repeat": [], "fold": [], "ids": [], "factors": []}
-    for i, el in enumerate(rskf.split(torch.arange(tensor.shape[0]))):
+    for i, el in enumerate(rskf.split(torch.arange(tensor.shape[0]), stratification)):
         CV_dict["repeat"].append(i // CV_splits)
         CV_dict["fold"].append(i % CV_splits)
         CV_dict["ids"].append(el[0])
