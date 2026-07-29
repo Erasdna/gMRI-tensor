@@ -87,7 +87,8 @@ def run_CP_decomposition_repeated(
                 CP_tolerance=CP_tolerance,
             )
         except ConvergenceError as e:
-            print(e)
+            if CP_verbose_level > 0:
+                print(e)
             continue
 
         if error[-1] < best_error:
