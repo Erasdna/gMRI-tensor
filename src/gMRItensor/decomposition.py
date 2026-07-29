@@ -15,17 +15,22 @@ class ConvergenceError(Exception):
     pass
 
 
+@torch.no_grad()
+@torch.compile(dynamic=True)
+def non_negative_parafac_compiled(tensor, **kwargs):
+    return tl.decomposition.non_negative_parafac(tensor, **kwargs)
+
+
 def compute_CP_decomposition(
     tensor: torch.Tensor,
     rank: int,
     CP_max_iter: int = 500,
     random_state: int = 0,
-    func=tl.decomposition.non_negative_parafac,
     init="random",
     CP_verbose_level=0,
     CP_tolerance=1e-5,
 ):
-    decomp, errors = func(
+    decomp, errors = non_negative_parafac_compiled(
         tensor,
         rank=rank,
         n_iter_max=CP_max_iter,
@@ -58,6 +63,7 @@ def run_CP_decomposition_repeated(
     use_memory_efficient_khatri_rao: bool = True,
     CP_verbose_level=0,
     CP_tolerance=1e-5,
+    progress_bar: bool = True,
 ):
     if use_memory_efficient_khatri_rao:
         tl.tenalg.register_backend_method(
@@ -70,15 +76,13 @@ def run_CP_decomposition_repeated(
     best_factors = None
     best_weights = None
 
-    func = torch.compile(tl.decomposition.non_negative_parafac, dynamic=True)
-    for i in tqdm(range(CP_init_repeats)):
+    for i in tqdm(range(CP_init_repeats), disable=not progress_bar):
         try:
             decomp, error = compute_CP_decomposition(
                 tensor,
                 rank,
                 CP_max_iter,
-                i,
-                func,
+                random_state=i,
                 CP_verbose_level=CP_verbose_level,
                 CP_tolerance=CP_tolerance,
             )
@@ -94,11 +98,19 @@ def run_CP_decomposition_repeated(
             best_factors = [f.float().cpu() for f in factors]
 
         del decomp, error
-        gc.collect()
-        # Force PyTorch to release its internal cached memory back to the OS/GPU
+
+        # Reduce some memory issues by clearing cache when memory usage is high
         if device.type == "cuda":
-            torch.cuda.empty_cache()
+            mem_reserved = torch.cuda.memory_reserved(device)
+            total_mem = torch.cuda.get_device_properties(device).total_memory
+            if mem_reserved / total_mem > 0.85:
+                torch.cuda.empty_cache()
         sys.stdout.flush()
+
+    gc.collect()
+    # Force PyTorch to release its internal cached memory back to the OS/GPU
+    if device.type == "cuda":
+        torch.cuda.empty_cache()
     return best_weights, best_factors, best_error.float().cpu()
 
 
