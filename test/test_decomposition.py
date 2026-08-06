@@ -18,8 +18,8 @@ def test_backend():
         assert device.type == "cpu"
 
 
-def test_CP():
-    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+def run_CP(use_gpu):
+    os.environ["GMRITENSOR_USE_GPU"] = use_gpu
     device = setup_backend()
 
     tensor_1 = np.outer(np.array([0, 0, 1, 0]), np.array([0, 1, 0, 0])).astype(float)
@@ -30,3 +30,11 @@ def test_CP():
     print(weights)
 
     assert torch.allclose(weights, torch.ones(1, dtype=weights.dtype, device=device))
+
+
+def test_CP_cpu():
+    run_CP("FALSE")
+
+
+def test_CP_gpu():
+    run_CP("TRUE")

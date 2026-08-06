@@ -1,11 +1,11 @@
 import os
 
-import numpy as np
 import torch
 from gMRItensor import setup_backend
 from gMRItensor.replicability import CrossValidationEngine
 from gMRItensor.replicability import evaluate_replicability_multiproc
 from gMRItensor.replicability import HalfHalfEngine
+from scipy.special import comb
 
 
 def test_half_half_engine_input():
@@ -45,8 +45,8 @@ def run_replicability(procs):
     device = setup_backend()
     tensor = torch.randn(30, 4, 10000).to(device)
 
-    CV_splits = 5
-    CV_repeats = 2
+    CV_splits = 10
+    CV_repeats = 10
     CV_engine = CrossValidationEngine(
         splits=CV_splits,
         repeats=CV_repeats,
@@ -84,7 +84,9 @@ def run_replicability(procs):
         CP_tolerance=1e-7,
         progress_bar=False,
     )
-    assert len(CV_fms) == np.cumsum(np.arange(CV_splits * CV_repeats))[-1]
+    print(CV_fms)
+    print(len(CV_fms))
+    assert len(CV_fms) == CV_repeats * comb(CV_splits, 2, exact=True)
 
 
 def test_replicability_serial():

@@ -121,38 +121,39 @@ class CrossValidationEngine(ReplicabilityEngine):
 
     def compute_fms(self, decomposition_results: dict) -> list:
         fms_results = []
-        for i in range(self.nb_folds):  # Total nb of folds
-            print(decomposition_results[i])
-            ids_i, weights_i, fac_i = decomposition_results[i]
+        for repeat in range(self.repeats):
+            for split in range(self.splits):  # Total nb of folds
+                i = repeat * self.splits + split
+                ids_i, weights_i, fac_i = decomposition_results[i]
+                fold_limit = (repeat + 1) * self.splits
+                for j in range(
+                    i + 1,
+                    fold_limit,
+                ):  # Compare only with not yet seen combinations
+                    ids_j, weights_j, fac_j = decomposition_results[j]
 
-            for j in range(
-                i + 1,
-                self.nb_folds,
-            ):  # Compare only with not yet seen combinations
-                ids_j, weights_j, fac_j = decomposition_results[j]
+                    common_subjects = np.intersect1d(ids_i, ids_j)
+                    if len(common_subjects) == 0:
+                        continue
 
-                common_subjects = np.intersect1d(ids_i, ids_j)
-                if len(common_subjects) == 0:
-                    continue
+                    # Align Mode 0 indices
+                    id_map_i = {sub_id: idx for idx, sub_id in enumerate(ids_i)}
+                    id_map_j = {sub_id: idx for idx, sub_id in enumerate(ids_j)}
 
-                # Align Mode 0 indices
-                id_map_i = {sub_id: idx for idx, sub_id in enumerate(ids_i)}
-                id_map_j = {sub_id: idx for idx, sub_id in enumerate(ids_j)}
+                    # Take only overlapping subjects when comparing factors
+                    fac_i_aligned = [
+                        fac_i[0][[id_map_i[s] for s in common_subjects]],
+                    ] + fac_i[1:]
+                    fac_j_aligned = [
+                        fac_j[0][[id_map_j[s] for s in common_subjects]],
+                    ] + fac_j[1:]
 
-                # Take only overlapping subjects when comparing factors
-                fac_i_aligned = [
-                    fac_i[0][[id_map_i[s] for s in common_subjects]],
-                ] + fac_i[1:]
-                fac_j_aligned = [
-                    fac_j[0][[id_map_j[s] for s in common_subjects]],
-                ] + fac_j[1:]
-
-                score = factor_match_score(
-                    (weights_i, fac_i_aligned),
-                    (weights_j, fac_j_aligned),
-                    consider_weights=False,
-                )
-                fms_results.append((common_subjects, i, j, score))
+                    score = factor_match_score(
+                        (weights_i, fac_i_aligned),
+                        (weights_j, fac_j_aligned),
+                        consider_weights=False,
+                    )
+                    fms_results.append((common_subjects, i, j, score))
 
         return fms_results
 
