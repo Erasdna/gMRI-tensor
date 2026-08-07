@@ -151,6 +151,7 @@ def plot_subject_mode(
     subject_mode_df["subjects"] = subjects
     plotting_df = pd.merge(subject_mode_df, subject_info, how="inner", on="subjects")
 
+    print(plotting_df)
     fig, axs = plt.subplots(
         subject_mode.shape[1],
         1 + len(plotting_variables),
