@@ -181,7 +181,7 @@ def make_variable_correlation(
         palette=colors,
         legend=legend,
         ax=ax,
-        alpha=0.7,
+        alpha=1,
     )
     for k, cat in enumerate(df[category].unique()):
         cat_df = df.query(f"{category}=='{cat}'")
@@ -224,6 +224,96 @@ def make_variable_correlation(
     ax.set_ylabel("")
 
 
+def _prepare_plotting_dataframe(
+    subject_mode: np.ndarray,
+    subjects: list[str],
+    subject_info: pd.DataFrame,
+    group_variable: str,
+    additional_variables: list[str] | None = None,
+) -> pd.DataFrame:
+    """Prepare a merged DataFrame for plotting subject mode data.
+
+    Parameters
+    ----------
+    subject_mode : np.ndarray
+        Subject mode matrix with shape (n_subjects, n_components)
+    subjects : list[str]
+        List of subject identifiers
+    subject_info : pd.DataFrame
+        DataFrame containing subject metadata
+    group_variable : str
+        Column name in subject_info to use for grouping
+    additional_variables : list[str] | None, optional
+        Additional column names in subject_info to validate, by default None
+
+    Returns
+    -------
+    pd.DataFrame
+        Merged DataFrame with scaled subject mode components and metadata
+
+    Raises
+    ------
+    ValueError
+        If input validation fails
+    """
+    # Validate input dimensions
+    if subject_mode.shape[0] != len(subjects):
+        raise ValueError(
+            f"""Number of subjects ({len(subjects)}) does not
+            match subject_mode rows ({subject_mode.shape[0]},
+        )""",
+        )
+
+    # Validate that required columns exist in subject_info
+    required_columns = [group_variable]
+    if additional_variables is not None:
+        required_columns.extend(additional_variables)
+
+    missing_columns = [
+        col for col in required_columns if col not in subject_info.columns
+    ]
+    if missing_columns:
+        raise ValueError(
+            f"The following columns are missing from subject_info: {missing_columns}",
+        )
+
+    # Validate that 'subjects' column exists in subject_info
+    if "subjects" not in subject_info.columns:
+        raise ValueError("subject_info must contain a 'subjects' column")
+
+    # Scale and create DataFrame
+    scaled_subject_mode = scale_mode(subject_mode)
+    subject_mode_df = pd.DataFrame(
+        scaled_subject_mode,
+        columns=[f"comp_{i}" for i in range(subject_mode.shape[1])],
+    )
+    subject_mode_df["subjects"] = subjects
+    plotting_df = pd.merge(subject_mode_df, subject_info, how="inner", on="subjects")
+
+    # Validate merge results
+    if len(plotting_df) == 0:
+        raise ValueError(
+            "Merge resulted in empty DataFrame. Check that subject identifiers match "
+            "between 'subjects' list and 'subjects' column in subject_info",
+        )
+
+    if len(plotting_df) < len(subjects):
+        missing_count = len(subjects) - len(plotting_df)
+        raise ValueError(
+            f"{missing_count} subject(s) from the subjects list were not found in subject_info",
+        )
+
+    # Validate that group_variable has at least 2 unique values for comparison
+    n_groups = plotting_df[group_variable].nunique()
+    if n_groups < 2:
+        raise ValueError(
+            f"group_variable '{group_variable}' must have at least 2 unique values, "
+            f"found {n_groups}",
+        )
+
+    return plotting_df
+
+
 def plot_subject_mode(
     subject_mode: np.ndarray,
     subjects: list[str],
@@ -260,56 +350,14 @@ def plot_subject_mode(
     ValueError
         If input validation fails
     """
-    # Validate input dimensions
-    if subject_mode.shape[0] != len(subjects):
-        raise ValueError(
-            f"""Number of subjects ({len(subjects)}) does not
-            match subject_mode rows ({subject_mode.shape[0]},
-        )""",
-        )
-
-    # Validate that required columns exist in subject_info
-    required_columns = [group_variable] + plotting_variables
-    missing_columns = [
-        col for col in required_columns if col not in subject_info.columns
-    ]
-    if missing_columns:
-        raise ValueError(
-            f"The following columns are missing from subject_info: {missing_columns}",
-        )
-
-    # Validate that 'subjects' column exists in subject_info
-    if "subjects" not in subject_info.columns:
-        raise ValueError("subject_info must contain a 'subjects' column")
-
-    scaled_subject_mode = scale_mode(subject_mode)
-    subject_mode_df = pd.DataFrame(
-        scaled_subject_mode,
-        columns=[f"comp_{i}" for i in range(subject_mode.shape[1])],
+    # Prepare plotting DataFrame with validation
+    plotting_df = _prepare_plotting_dataframe(
+        subject_mode,
+        subjects,
+        subject_info,
+        group_variable,
+        plotting_variables,
     )
-    subject_mode_df["subjects"] = subjects
-    plotting_df = pd.merge(subject_mode_df, subject_info, how="inner", on="subjects")
-
-    # Validate merge results
-    if len(plotting_df) == 0:
-        raise ValueError(
-            "Merge resulted in empty DataFrame. Check that subject identifiers match "
-            "between 'subjects' list and 'subjects' column in subject_info",
-        )
-
-    if len(plotting_df) < len(subjects):
-        missing_count = len(subjects) - len(plotting_df)
-        raise ValueError(
-            f"{missing_count} subject(s) from the subjects list were not found in subject_info",
-        )
-
-    # Validate that group_variable has at least 2 unique values for comparison
-    n_groups = plotting_df[group_variable].nunique()
-    if n_groups < 2:
-        raise ValueError(
-            f"group_variable '{group_variable}' must have at least 2 unique values, "
-            f"found {n_groups}",
-        )
 
     # Compute figsize if not provided
     if figsize is None:
@@ -375,11 +423,55 @@ def plot_subject_mode(
 
 def plot_subject_mode_correlation(
     subject_mode: np.ndarray,
-    subjects: list,
+    subjects: list[str],
     subject_info: pd.DataFrame,
     group_variable: str,
     figsize: tuple[float, float] | None = None,
-):
+) -> tuple[matplotlib.figure.Figure, np.ndarray]:
+    """Plot correlation matrix of subject mode components with group comparisons.
+
+    Creates a grid of plots showing pairwise correlations between all components.
+    The diagonal shows boxplots comparing component values across groups, while
+    off-diagonal plots show scatter plots with regression lines for each group.
+
+    Parameters
+    ----------
+    subject_mode : np.ndarray
+        Subject mode matrix with shape (n_subjects, n_components)
+    subjects : list[str]
+        List of subject identifiers
+    subject_info : pd.DataFrame
+        DataFrame containing subject metadata
+    group_variable : str
+        Column name in subject_info to use for grouping and color-coding
+    figsize : tuple[float, float] | None, optional
+        Figure size (width, height). If None, automatically computed based on
+        number of components and font size. By default None.
+
+    Returns
+    -------
+    tuple[matplotlib.figure.Figure, np.ndarray]
+        Figure and 2D array of axes
+
+    Raises
+    ------
+    ValueError
+        If input validation fails
+
+    Notes
+    -----
+    The resulting plot is a symmetric matrix where:
+    - Diagonal elements (i, i): Boxplots of component i values by group
+    - Off-diagonal elements (i, j): Scatter plot of component i vs component j
+      with separate regression lines for each group
+    """
+    # Prepare plotting DataFrame with validation
+    plotting_df = _prepare_plotting_dataframe(
+        subject_mode,
+        subjects,
+        subject_info,
+        group_variable,
+    )
 
     # Compute figsize if not provided
     n_components = subject_mode.shape[1]
@@ -393,14 +485,6 @@ def plot_subject_mode_correlation(
         figsize=figsize,
     )
     fig.tight_layout()
-
-    scaled_subject_mode = scale_mode(subject_mode)
-    subject_mode_df = pd.DataFrame(
-        scaled_subject_mode,
-        columns=[f"comp_{i}" for i in range(subject_mode.shape[1])],
-    )
-    subject_mode_df["subjects"] = subjects
-    plotting_df = pd.merge(subject_mode_df, subject_info, how="inner", on="subjects")
 
     ylims_list = []
     xlim_list = []
@@ -446,8 +530,10 @@ def plot_subject_mode_correlation(
     print(xlim_list, max_xlim)
     for i, ax in enumerate(axs):
         ax[i].set_xlim(-0.25, max_xlim)
-        for axx in ax:
+        for j, axx in enumerate(ax):
             axx.set_ylim(*ylims_list[i])
+            if i != j:
+                axx.set_xlim(*ylims_list[j])
 
     return fig, axs
 
