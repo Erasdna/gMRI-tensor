@@ -51,8 +51,8 @@ def make_subject_boxplot(
     )
 
     # Set tick positions and labels BEFORE annotation to establish baseline
-    ax.set_xticks(range(n_categories))
-    ax.set_xticklabels(categories)
+    # ax.set_xticks(range(n_categories))
+    # ax.set_xticklabels(categories)
 
     # Add statistical annotation for pairwise comparisons
     if n_categories >= 2:
@@ -74,12 +74,6 @@ def make_subject_boxplot(
             hide_non_significant=True,
         )
         annotator.apply_and_annotate()
-
-        # Re-enforce tick positions after annotation to prevent shifting
-        ax.set_xticks(range(n_categories))
-        ax.set_xticklabels(categories)
-
-    ax.set_xlabel(x_column)
 
     # Add legend inside plot area if requested
     if legend:
@@ -116,6 +110,10 @@ def make_subject_boxplot(
     else:
         # No legend, use standard xlim
         ax.set_xlim(-0.25, 1.5)
+
+    ax.set_xticks(range(n_categories))
+    ax.set_xticklabels(categories)
+    ax.set_xlabel(x_column)
 
     return ax.get_ylim()
 
