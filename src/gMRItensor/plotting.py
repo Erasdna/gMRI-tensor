@@ -43,7 +43,7 @@ def make_subject_boxplot(
         ax=ax,
         palette=colors,
         width=0.25,
-        legend=False,  # We'll add legend manually for better control
+        legend=False,
         boxprops=dict(alpha=0.7),
         patch_artist=True,
         linewidth=1.5,
@@ -103,13 +103,9 @@ def make_subject_boxplot(
         legend_width = legend_bbox_data.x1 - legend_bbox_data.x0
 
         # Calculate required xlim:
-        # We've explicitly set positions to 0, 1, 2, ... for categories
-        # - Rightmost tick is at n_categories - 1
+        print(legend_width)
         rightmost_tick = n_categories - 1
-        # - Box width is 0.25, so half extends beyond the tick
-        # - Add margin of 0.2
-        # - Add legend width
-        required_xlim = rightmost_tick + 0.125 + 0.2 + legend_width
+        required_xlim = rightmost_tick + 0.5 + legend_width
 
         ax.set_xlim(-0.5, required_xlim)
     else:
