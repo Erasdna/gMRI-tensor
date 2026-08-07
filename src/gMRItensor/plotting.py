@@ -85,11 +85,11 @@ def make_subject_boxplot(
             1.5,
             legend_right + 0.1,
         )  # At least 1.5, or legend width + margin
-
-        ax.set_xlim(-0.5, required_xlim)
+        print(required_xlim)
+        ax.set_xlim(-0.25, required_xlim)
     else:
         # No legend, use standard xlim
-        ax.set_xlim(-0.5, 1.5)
+        ax.set_xlim(-0.25, 1.5)
 
     return ax.get_ylim()
 
