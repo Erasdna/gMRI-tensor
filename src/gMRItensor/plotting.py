@@ -269,6 +269,7 @@ def plot_subject_mode(
         1 + len(plotting_variables),
         figsize=figsize,
     )
+    fig.tight_layout()
 
     # First pass: create all plots and collect required xlims
     ylims_list = []
