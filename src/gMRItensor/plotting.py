@@ -26,9 +26,18 @@ def make_subject_boxplot(
     legend=True,
     colors=["blue", "red"],
 ):
+    # Get unique categories and create a mapping to integer positions
+    categories = df[x_column].unique()
+    n_categories = len(categories)
+
+    # Create a temporary column with integer positions
+    df_plot = df.copy()
+    category_to_position = {cat: i for i, cat in enumerate(categories)}
+    df_plot["_x_position"] = df_plot[x_column].map(category_to_position)
+
     boxplot = sns.boxplot(
-        data=df,
-        x=x_column,
+        data=df_plot,
+        x="_x_position",
         y=y_column,
         hue=x_column,
         ax=ax,
@@ -41,29 +50,41 @@ def make_subject_boxplot(
         saturation=1,
     )
 
-    annotator = Annotator(
-        boxplot,
-        [(df[x_column].unique()[0], df[x_column].unique()[1])],
-        data=df,
-        x=x_column,
-        y=y_column,
-    )
-    annotator.configure(
-        test="Mann-Whitney",
-        text_format="star",
-        hide_non_significant=True,
-    )
-    annotator.apply_and_annotate()
+    # Set tick positions and labels explicitly
+    ax.set_xticks(range(n_categories))
+    ax.set_xticklabels(categories)
+    ax.set_xlabel(x_column)
+
+    # Add statistical annotation for pairwise comparisons
+    if n_categories >= 2:
+        # Generate all pairwise comparisons using integer positions
+        pairs = [
+            (i, j) for i in range(n_categories) for j in range(i + 1, n_categories)
+        ]
+
+        annotator = Annotator(
+            boxplot,
+            pairs,
+            data=df_plot,
+            x="_x_position",
+            y=y_column,
+        )
+        annotator.configure(
+            test="Mann-Whitney",
+            text_format="star",
+            hide_non_significant=True,
+        )
+        annotator.apply_and_annotate()
 
     # Add legend inside plot area if requested
     if legend:
         handles = [
             plt.Rectangle((0, 0), 1, 1, fc=colors[i], alpha=0.7)
-            for i in range(len(df[x_column].unique()))
+            for i in range(n_categories)
         ]
         leg = ax.legend(
             handles,
-            df[x_column].unique(),
+            categories,
             loc="upper right",
             frameon=True,
             framealpha=0.9,
@@ -82,11 +103,13 @@ def make_subject_boxplot(
         legend_width = legend_bbox_data.x1 - legend_bbox_data.x0
 
         # Calculate required xlim:
-        # - Rightmost tick is at 1
-        # - Box width is 0.25, so half extends to 1.125
+        # We've explicitly set positions to 0, 1, 2, ... for categories
+        # - Rightmost tick is at n_categories - 1
+        rightmost_tick = n_categories - 1
+        # - Box width is 0.25, so half extends beyond the tick
         # - Add margin of 0.2
         # - Add legend width
-        required_xlim = 1 + 0.125 + 0.2 + legend_width
+        required_xlim = rightmost_tick + 0.125 + 0.2 + legend_width
 
         ax.set_xlim(-0.5, required_xlim)
     else:
