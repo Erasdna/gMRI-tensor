@@ -68,11 +68,15 @@ def make_subject_boxplot(
     x_column,
     y_column,
     legend=True,
-    colors=["blue", "red"],
+    colors=None,
 ):
     # Get unique categories and create a mapping to integer positions
     categories = df[x_column].unique()
     n_categories = len(categories)
+
+    # Generate colors if not provided
+    if colors is None:
+        colors = sns.color_palette("colorblind", n_colors=n_categories)
 
     # Create a temporary column with integer positions
     df_plot = df.copy()
@@ -163,11 +167,16 @@ def make_variable_correlation(
     y_column: str,
     category: str,
     legend=True,
-    colors=["blue", "red"],
+    colors=None,
 ):
     def fit_values(xs, ys, cat=""):
         fit = linregress(xs, ys)
         return fit
+
+    # Generate colors if not provided
+    if colors is None:
+        n_categories = df[category].nunique()
+        colors = sns.color_palette("colorblind", n_colors=n_categories)
 
     line_plots = []
     legends = []
