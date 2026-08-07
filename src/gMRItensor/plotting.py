@@ -56,9 +56,11 @@ def compute_figsize(
     # Calculate width: account for legend space in first column
     # First column needs extra space for legend
     width = (
-        base_width_per_col * font_scale * (n_columns - 1)
-        + base_width_per_col * font_scale * 1.4
-    )  # 40% extra for boxplot column
+        base_width_per_col
+        * font_scale
+        * (n_columns)
+        # + base_width_per_col * font_scale * 1.4
+    )
 
     # Calculate height: scale by number of rows
     height = base_height_per_row * font_scale * n_components
@@ -322,7 +324,7 @@ def plot_subject_mode(
     fig, axs = plt.subplots(
         subject_mode.shape[1],
         1 + len(plotting_variables),
-        width_ratios=[1.4] + [1] * len(plotting_variables),
+        width_ratios=[1] + [1] * len(plotting_variables),
         figsize=figsize,
     )
     fig.tight_layout()
