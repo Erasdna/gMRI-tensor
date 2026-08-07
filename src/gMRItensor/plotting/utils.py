@@ -25,6 +25,7 @@ def compute_figsize(
     n_columns: int,
     base_width_per_col: float = 3.0,
     base_height_per_row: float = 2.5,
+    width_ratios: list[float] | None = None,
 ) -> tuple[float, float]:
     """Compute appropriate figure size based on subplot grid dimensions.
 
@@ -32,6 +33,7 @@ def compute_figsize(
     - Number of subplot rows (components) and columns
     - Current matplotlib font size settings
     - Space needed for legends, labels, and annotations
+    - Custom width ratios for columns (e.g., for images with different aspect ratios)
 
     Parameters
     ----------
@@ -43,6 +45,11 @@ def compute_figsize(
         Base width per column in inches, by default 3.0
     base_height_per_row : float, optional
         Base height per row in inches, by default 2.5
+    width_ratios : list[float] | None, optional
+        Relative width ratios for each column. If provided, these ratios
+        are used to scale the width of each column. For example, [1, 0.5, 0.5, 0.1]
+        means the first column is full width, second and third are half width,
+        and fourth (colorbar) is 10% width.
 
     Returns
     -------
@@ -55,9 +62,14 @@ def compute_figsize(
     # Scale base dimensions by font size relative to default (10pt)
     font_scale = fontsize / 10.0
 
-    # Calculate width: account for legend space in first column
-    # First column needs extra space for legend
-    width = base_width_per_col * font_scale * (n_columns)
+    # Calculate width based on width_ratios if provided
+    if width_ratios is not None:
+        # Normalize ratios and scale by base width
+        total_ratio = sum(width_ratios)
+        width = base_width_per_col * font_scale * total_ratio
+    else:
+        # Default: uniform column widths
+        width = base_width_per_col * font_scale * n_columns
 
     # Calculate height: scale by number of rows
     height = base_height_per_row * font_scale * n_components

@@ -2,6 +2,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import scienceplots  # noqa: F401
+from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import scale_mode
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
@@ -101,6 +102,8 @@ def plot_spatial_mode(
     background: np.ndarray,
     slices: list,
     figsize: tuple[float, float] | None = None,
+    base_width_per_col: float = 4.0,
+    base_height_per_row: float = 4.0,
 ):
     """Plot spatial mode components mapped onto brain slices.
 
@@ -118,13 +121,18 @@ def plot_spatial_mode(
         Background image
     slices : list
         List of slice indices to plot
-    transform : Callable
-        Transform function to apply to spatial data
+    figsize : tuple[float, float] | None, optional
+        Figure size in inches. If None, automatically computed based on
+        image dimensions and number of components.
+    base_width_per_col : float, optional
+        Base width per column in inches for automatic sizing, by default 4.0
+    base_height_per_row : float, optional
+        Base height per row in inches for automatic sizing, by default 4.0
 
-    Raises
+    Yields
     ------
-    NotImplementedError
-        This function is not yet implemented
+    tuple
+        (figure, axes, name) for each tissue type (CSF, Parenchyma)
     """
     assert spatial_mode.shape[0] == index_list.shape[0]
 
@@ -133,10 +141,20 @@ def plot_spatial_mode(
     width_ratios = [
         1,
         background_shape[0] / background_shape[1],
-        background_shape[0] / background_shape[1],
-        0.03,
+        background_shape[0] / background_shape[2],
+        0.1,
     ]
     n_components = spatial_mode.shape[1]
+
+    # Compute figsize if not provided
+    if figsize is None:
+        figsize = compute_figsize(
+            n_components=n_components,
+            n_columns=4,
+            base_width_per_col=base_width_per_col,
+            base_height_per_row=base_height_per_row,
+            width_ratios=width_ratios,
+        )
     for i, (name, ids_mask) in enumerate(
         zip(["CSF", "Parenchyma"], [csf_index_mask, parenchyma_index_mask]),
     ):
