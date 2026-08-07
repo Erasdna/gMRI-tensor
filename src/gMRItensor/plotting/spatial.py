@@ -154,8 +154,8 @@ def plot_spatial_mode(
                 background,
                 "plasma",
                 slices,
-                vmin=0,
-                vmax=2,
+                vmin=np.percentile(scaled_spatial_mode[ids_mask, component], 5),
+                vmax=np.percentile(scaled_spatial_mode[ids_mask, component], 95),
                 label="Coefficient",
             )
         yield big_fig, big_ax, name
