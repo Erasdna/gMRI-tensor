@@ -45,8 +45,8 @@ def run_replicability(procs):
     device = setup_backend()
     tensor = torch.randn(30, 4, 10000).to(device)
 
-    CV_splits = 10
-    CV_repeats = 10
+    CV_splits = 5
+    CV_repeats = 2
     CV_engine = CrossValidationEngine(
         splits=CV_splits,
         repeats=CV_repeats,

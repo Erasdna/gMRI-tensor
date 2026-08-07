@@ -5,7 +5,7 @@ on:
     # The CI is executed on every pull request to the main branch
     branches:
       - main
-  
+
   # This workflow can be executed inside another workfow file
   workflow_call:
 

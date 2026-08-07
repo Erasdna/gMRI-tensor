@@ -4,6 +4,12 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+import scienceplots  # noqa: F401
+import seaborn as sns
+from scipy.stats import linregress
+from statannotations.Annotator import Annotator
+
+plt.style.use(["science", "no-latex"])
 
 matplotlib.use("Agg")
 
@@ -12,39 +18,179 @@ def scale_mode(arr):
     return arr / np.linalg.norm(arr, ax=0)[None, :]
 
 
-def plot_subject_mode(subject_mode: np.ndarray, subject_info: pd.DataFrame):
+def make_subject_boxplot(
+    ax,
+    df,
+    x_column,
+    y_column,
+    legend=True,
+    colors=["blue", "red"],
+):
+    boxplot = sns.boxplot(
+        data=df,
+        x=x_column,
+        y=y_column,
+        hue=x_column,
+        ax=ax,
+        palette=colors,
+        width=0.25,
+        legend=legend,
+        boxprops=dict(alpha=0.7),
+        patch_artist=True,
+        linewidth=1.5,
+        saturation=1,
+    )
+
+    annotator = Annotator(
+        boxplot,
+        [(df[x_column].unique()[0], df[x_column].unique()[1])],
+        data=df,
+        x=x_column,
+        y=y_column,
+    )
+    annotator.configure(
+        test="Mann-Whitney",
+        text_format="star",
+        hide_non_significant=True,
+    )
+    annotator.apply_and_annotate()
+    ax.set_xlim(-0.75, 1.75)
+
+    return ax.get_ylim()
+
+
+def make_variable_correlation(
+    ax,
+    df: pd.DataFrame,
+    x_column: str,
+    y_column: str,
+    category: str,
+    legend=True,
+    colors=["blue", "red"],
+):
+    def fit_values(xs, ys, cat=""):
+        fit = linregress(xs, ys)
+        significant = " <== Significant" if fit.pvalue < 0.05 else ""
+        print(
+            f"{x_column} {cat}: R-value:{fit.rvalue:.3f} slope: {fit.slope:.3f} p-value: {fit.pvalue:.3f}"  # noqa: E501
+            + significant,
+        )
+        return fit
+
+    line_plots = []
+    legends = []
+    pvalue_list = []
+
+    sns.scatterplot(
+        df,
+        x=x_column,
+        y=y_column,
+        hue=category,
+        palette=colors,
+        legend=legend,
+        ax=ax,
+        alpha=0.7,
+    )
+    for k, cat in enumerate(df[category].unique()):
+        cat_df = df.query(f"{category}=='{cat}'")
+        xs = cat_df[x_column]
+        ys = cat_df[y_column]
+
+        fit = fit_values(xs, ys, cat)
+
+        x_range = np.linspace(np.min(df[x_column]), np.max(df[x_column]))
+        (line,) = ax.plot(
+            x_range,
+            fit.slope * x_range + fit.intercept,
+            color=colors[k],
+        )
+        line_plots.append(line)
+        pvalue_list.append(fit.pvalue)
+        legends.append(rf"$R^2={fit.rvalue**2:.2f}$, $p={fit.pvalue:.1g} $")
+
+    fit = fit_values(df[x_column], df[y_column], "all")
+
+    if legend:
+        leg = ax.legend(
+            line_plots,
+            legends,
+        )
+        for p_val, text in zip(pvalue_list, leg.get_texts()):
+            try:
+                if p_val < 0.05:
+                    text.set_bbox(
+                        dict(
+                            facecolor="none",  # (0.5, 0.5, 0.5, 0.2),
+                            edgecolor="black",
+                            linewidth=0.5,
+                            boxstyle="square,pad=0.2",
+                        ),
+                    )
+            except ValueError:
+                pass  # Skip if the text doesn't contain a parseable p-value
+    ax.set_xlabel("")
+    ax.set_ylabel("")
+
+
+def plot_subject_mode(
+    subject_mode: np.ndarray,
+    subjects: list[str],
+    subject_info: pd.DataFrame,
+    group_variable: str,
+    plotting_variables: list[str],
+):
+
+    # TODO: Throw error if plotting variables are not among subject_info columns
+
+    scaled_subject_mode = scale_mode(subject_mode)
+    subject_mode_df = pd.DataFrame(
+        scaled_subject_mode,
+        columns=[f"comp_{i}" for i in range(subject_mode.shape[1])],
+    )
+    subject_mode_df["subjects"] = subjects
+    plotting_df = pd.merge(subject_mode_df, subject_info, how="inner", on="subjects")
+
+    fig, axs = plt.subplots(subject_mode.shape[1], 1 + len(plotting_variables))
+    for i, ax in enumerate(axs):
+        ylims = make_subject_boxplot(
+            ax[0],
+            plotting_df,
+            x_column=group_variable,
+            y_column=f"comp_{i}",
+        )
+
+        ax[0].set_xlim(-0.25, 2)
+        ax[0].set_ylabel(rf"Component {i+1}")
+        ax[0].set_xlabel("")
+
+        if i == 0:
+            ax[0].set_title(f"Subject mode v {group_variable}")
+        ax[0].legend(subject_info[group_variable].unique(), loc="upper right")
+
+        for j, var in enumerate(plotting_variables):
+            make_variable_correlation(
+                ax[1 + j],
+                plotting_df,
+                x_column=var,
+                y_column=f"comp_{i}",
+                category=group_variable,
+            )
+            if i == 0:
+                ax[j + 1].set_title(f"Subject mode v {var}")
+
+            if i == subject_mode.shape[1] - 1:
+                ax[j + 1].set_xlabel(var)
+        for axx in ax:
+            axx.set_ylim(*ylims)
+    return fig, axs
+
+
+def plot_subject_mode_correlation(
+    subject_mode: np.ndarray,
+    subject_info: pd.DataFrame,
+    group_variable: str,
+):
     raise NotImplementedError
-
-
-def plot_time_mode(
-    time_mode: np.ndarray, time_points: list
-) -> tuple[plt.Figure, np.ndarray]:
-    """Plot time modes across components.
-
-    Args:
-        time_mode: Array of shape (n_timepoints, n_components)
-        time_points: List of time point values for x-axis
-
-    Returns:
-        Tuple of (figure, axes array)
-    """
-    n_components = time_mode.shape[1]
-    
-    fig, axes = plt.subplots(1, n_components, figsize=(5 * n_components, 4))
-    
-    # Handle single component case (axes won't be an array)
-    if n_components == 1:
-        axes = np.array([axes])
-    
-    for i, ax in enumerate(axes):
-        ax.plot(time_points, time_mode[:, i])
-        ax.set_xlabel("Time")
-        ax.set_ylabel("Time Mode")
-        ax.set_title(f"Component {i + 1}")
-        ax.grid(True, alpha=0.3)
-    
-    fig.tight_layout()
-    return fig, axes
 
 
 def plot_spatial_mode(
@@ -56,4 +202,6 @@ def plot_spatial_mode(
     slices: list,
     transform: Callable,
 ):
+    assert spatial_mode.shape[0] == index_list.shape[0]
+
     raise NotImplementedError
