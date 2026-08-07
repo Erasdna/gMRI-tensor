@@ -111,6 +111,7 @@ def make_subject_boxplot(
         # No legend, use standard xlim
         ax.set_xlim(-0.25, 1.5)
 
+    print(required_xlim)
     ax.set_xticks(range(n_categories))
     ax.set_xticklabels(categories)
     ax.set_xlabel(x_column)
@@ -129,11 +130,11 @@ def make_variable_correlation(
 ):
     def fit_values(xs, ys, cat=""):
         fit = linregress(xs, ys)
-        significant = " <== Significant" if fit.pvalue < 0.05 else ""
-        print(
-            f"{x_column} {cat}: R-value:{fit.rvalue:.3f} slope: {fit.slope:.3f} p-value: {fit.pvalue:.3f}"  # noqa: E501
-            + significant,
-        )
+        # significant = " <== Significant" if fit.pvalue < 0.05 else ""
+        # print(
+        #    f"{x_column} {cat}: R-value:{fit.rvalue:.3f} slope: {fit.slope:.3f} p-value: {fit.pvalue:.3f}"  # noqa: E501
+        #    + significant,
+        # )
         return fit
 
     line_plots = []
@@ -277,7 +278,6 @@ def plot_subject_mode(
             f"found {n_groups}",
         )
 
-    print(plotting_df)
     fig, axs = plt.subplots(
         subject_mode.shape[1],
         1 + len(plotting_variables),
