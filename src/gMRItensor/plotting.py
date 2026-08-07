@@ -69,6 +69,11 @@ def make_subject_boxplot(
             framealpha=0.9,
         )
 
+    # Extend xlim to the right to make space for legend
+    # The boxplot has 2 categories at positions 0 and 1
+    # We extend to ~2.0 to provide consistent space for the legend
+    ax.set_xlim(-0.5, 2.0)
+
     return ax.get_ylim()
 
 
