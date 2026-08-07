@@ -150,7 +150,9 @@ def make_subject_boxplot(
 
         # Calculate required xlim:
         rightmost_tick = n_categories - 1
-        required_xlim = rightmost_tick + 0.5 + legend_width
+        # We compute the right limit of the plot:
+        # Use 0.2 as a buffer + half of box width + legend width
+        required_xlim = rightmost_tick + 0.2 + 0.125 + legend_width
 
     # Set tick positions and labels
     ax.set_xticks(range(n_categories))
