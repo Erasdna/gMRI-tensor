@@ -78,15 +78,17 @@ def make_subject_boxplot(
         # Transform to data coordinates
         legend_bbox_data = legend_bbox.transformed(ax.transData.inverted())
 
-        # Calculate required xlim extension
-        # We want the legend to fit comfortably, so add a small margin
-        legend_right = legend_bbox_data.x1
-        required_xlim = max(
-            1.5,
-            legend_right + 0.1,
-        )  # At least 1.5, or legend width + margin
-        print(required_xlim)
-        ax.set_xlim(-0.25, required_xlim)
+        # Calculate legend width in data coordinates
+        legend_width = legend_bbox_data.x1 - legend_bbox_data.x0
+
+        # Calculate required xlim:
+        # - Rightmost tick is at 1
+        # - Box width is 0.25, so half extends to 1.125
+        # - Add margin of 0.2
+        # - Add legend width
+        required_xlim = 1 + 0.125 + 0.2 + legend_width
+
+        ax.set_xlim(-0.5, required_xlim)
     else:
         # No legend, use standard xlim
         ax.set_xlim(-0.25, 1.5)
