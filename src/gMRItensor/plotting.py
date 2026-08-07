@@ -445,7 +445,7 @@ def plot_subject_mode_correlation(
     max_xlim = max(xlim_list) if xlim_list else 1.5
     print(xlim_list, max_xlim)
     for i, ax in enumerate(axs):
-        ax[0].set_xlim(-0.25, max_xlim)
+        ax[i].set_xlim(-0.25, max_xlim)
         for axx in ax:
             axx.set_ylim(*ylims_list[i])
 
