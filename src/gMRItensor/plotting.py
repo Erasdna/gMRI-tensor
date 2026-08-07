@@ -138,6 +138,7 @@ def plot_subject_mode(
     subject_info: pd.DataFrame,
     group_variable: str,
     plotting_variables: list[str],
+    figsize: tuple[int, int],
 ):
 
     # TODO: Throw error if plotting variables are not among subject_info columns
@@ -150,7 +151,11 @@ def plot_subject_mode(
     subject_mode_df["subjects"] = subjects
     plotting_df = pd.merge(subject_mode_df, subject_info, how="inner", on="subjects")
 
-    fig, axs = plt.subplots(subject_mode.shape[1], 1 + len(plotting_variables))
+    fig, axs = plt.subplots(
+        subject_mode.shape[1],
+        1 + len(plotting_variables),
+        figsize=figsize,
+    )
     for i, ax in enumerate(axs):
         ylims = make_subject_boxplot(
             ax[0],
