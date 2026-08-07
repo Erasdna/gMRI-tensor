@@ -18,6 +18,54 @@ def scale_mode(arr):
     return arr / np.linalg.norm(arr, axis=0)[None, :]
 
 
+def compute_figsize(
+    n_components: int,
+    n_columns: int,
+    base_width_per_col: float = 3.0,
+    base_height_per_row: float = 2.5,
+) -> tuple[float, float]:
+    """Compute appropriate figure size based on subplot grid dimensions.
+
+    This function calculates a figure size that accounts for:
+    - Number of subplot rows (components) and columns
+    - Current matplotlib font size settings
+    - Space needed for legends, labels, and annotations
+
+    Parameters
+    ----------
+    n_components : int
+        Number of components (rows in the subplot grid)
+    n_columns : int
+        Number of columns in the subplot grid
+    base_width_per_col : float, optional
+        Base width per column in inches, by default 3.0
+    base_height_per_row : float, optional
+        Base height per row in inches, by default 2.5
+
+    Returns
+    -------
+    tuple[float, float]
+        Figure size as (width, height) in inches
+    """
+    # Get current font size from matplotlib rcParams
+    fontsize = plt.rcParams.get("font.size", 10)
+
+    # Scale base dimensions by font size relative to default (10pt)
+    font_scale = fontsize / 10.0
+
+    # Calculate width: account for legend space in first column
+    # First column needs extra space for legend
+    width = (
+        base_width_per_col * font_scale * (n_columns - 1)
+        + base_width_per_col * font_scale * 1.4
+    )  # 40% extra for boxplot column
+
+    # Calculate height: scale by number of rows
+    height = base_height_per_row * font_scale * n_components
+
+    return (width, height)
+
+
 def make_subject_boxplot(
     ax,
     df,
@@ -184,7 +232,7 @@ def plot_subject_mode(
     subject_info: pd.DataFrame,
     group_variable: str,
     plotting_variables: list[str],
-    figsize: tuple[int, int],
+    figsize: tuple[float, float] | None = None,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """Plot subject mode components against group variables and plotting variables.
 
@@ -200,8 +248,9 @@ def plot_subject_mode(
         Column name in subject_info to use for grouping
     plotting_variables : list[str]
         List of column names in subject_info to correlate with components
-    figsize : tuple[int, int]
-        Figure size (width, height)
+    figsize : tuple[int, int] | None, optional
+        Figure size (width, height). If None, automatically computed based on
+        subplot grid dimensions and font size. By default None.
 
     Returns
     -------
@@ -263,6 +312,12 @@ def plot_subject_mode(
             f"group_variable '{group_variable}' must have at least 2 unique values, "
             f"found {n_groups}",
         )
+
+    # Compute figsize if not provided
+    if figsize is None:
+        n_components = subject_mode.shape[1]
+        n_columns = 1 + len(plotting_variables)
+        figsize = compute_figsize(n_components, n_columns)
 
     fig, axs = plt.subplots(
         subject_mode.shape[1],
