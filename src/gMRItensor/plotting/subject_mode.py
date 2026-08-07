@@ -1,65 +1,18 @@
-from typing import Callable
-
+"""Plotting functions for subject mode analysis."""
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scienceplots  # noqa: F401
 import seaborn as sns
+from gMRItensor.plotting.utils import compute_figsize
+from gMRItensor.plotting.utils import get_color_palette
+from gMRItensor.plotting.utils import scale_mode
 from scipy.stats import linregress
 from statannotations.Annotator import Annotator
 
 plt.style.use(["science", "no-latex"])
 matplotlib.use("Agg")
-
-
-def scale_mode(arr):
-    return arr / np.linalg.norm(arr, axis=0)[None, :]
-
-
-def compute_figsize(
-    n_components: int,
-    n_columns: int,
-    base_width_per_col: float = 3.0,
-    base_height_per_row: float = 2.5,
-) -> tuple[float, float]:
-    """Compute appropriate figure size based on subplot grid dimensions.
-
-    This function calculates a figure size that accounts for:
-    - Number of subplot rows (components) and columns
-    - Current matplotlib font size settings
-    - Space needed for legends, labels, and annotations
-
-    Parameters
-    ----------
-    n_components : int
-        Number of components (rows in the subplot grid)
-    n_columns : int
-        Number of columns in the subplot grid
-    base_width_per_col : float, optional
-        Base width per column in inches, by default 3.0
-    base_height_per_row : float, optional
-        Base height per row in inches, by default 2.5
-
-    Returns
-    -------
-    tuple[float, float]
-        Figure size as (width, height) in inches
-    """
-    # Get current font size from matplotlib rcParams
-    fontsize = plt.rcParams.get("font.size", 10)
-
-    # Scale base dimensions by font size relative to default (10pt)
-    font_scale = fontsize / 10.0
-
-    # Calculate width: account for legend space in first column
-    # First column needs extra space for legend
-    width = base_width_per_col * font_scale * (n_columns)
-
-    # Calculate height: scale by number of rows
-    height = base_height_per_row * font_scale * n_components
-
-    return (width, height)
 
 
 def make_subject_boxplot(
@@ -115,7 +68,7 @@ def make_subject_boxplot(
 
     # Generate colors if not provided
     if colors is None:
-        colors = sns.color_palette("tab10", n_colors=n_categories)
+        colors = get_color_palette(n_categories)
 
     # Create a temporary column with integer positions
     df_plot = df.copy()
@@ -200,14 +153,35 @@ def make_subject_boxplot(
 
 
 def make_variable_correlation(
-    ax,
+    ax: matplotlib.axes.Axes,
     df: pd.DataFrame,
     x_column: str,
     y_column: str,
     category: str,
-    legend=True,
-    colors=None,
-):
+    legend: bool = True,
+    colors: list | None = None,
+) -> None:
+    """Create scatter plot with regression lines for each category.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes object to plot on
+    df : pd.DataFrame
+        DataFrame containing the data to plot
+    x_column : str
+        Column name for x-axis variable
+    y_column : str
+        Column name for y-axis variable
+    category : str
+        Column name for categorical grouping variable
+    legend : bool, optional
+        Whether to display a legend with R² and p-values, by default True
+    colors : list | None, optional
+        List of colors for each category. If None, uses tab10 palette.
+        By default None.
+    """
+
     def fit_values(xs, ys, cat=""):
         fit = linregress(xs, ys)
         return fit
@@ -215,7 +189,7 @@ def make_variable_correlation(
     # Generate colors if not provided
     if colors is None:
         n_categories = df[category].nunique()
-        colors = sns.color_palette("tab10", n_colors=n_categories)
+        colors = get_color_palette(n_categories)
 
     line_plots = []
     legends = []
@@ -584,17 +558,3 @@ def plot_subject_mode_correlation(
                 axx.set_xlim(*ylims_list[j])
 
     return fig, axs
-
-
-def plot_spatial_mode(
-    spatial_mode: np.ndarray,
-    index_list,
-    csf_indices,
-    parenchyma_indices,
-    background,
-    slices: list,
-    transform: Callable,
-):
-    assert spatial_mode.shape[0] == index_list.shape[0]
-
-    raise NotImplementedError
