@@ -55,7 +55,7 @@ def make_subject_boxplot(
     )
     annotator.apply_and_annotate()
 
-    # Add legend outside plot area if requested
+    # Add legend inside plot area if requested
     if legend:
         handles = [
             plt.Rectangle((0, 0), 1, 1, fc=colors[i], alpha=0.7)
@@ -64,10 +64,9 @@ def make_subject_boxplot(
         ax.legend(
             handles,
             df[x_column].unique(),
-            loc="upper left",
-            bbox_to_anchor=(1.02, 1),
-            borderaxespad=0,
+            loc="upper right",
             frameon=True,
+            framealpha=0.9,
         )
 
     return ax.get_ylim()
@@ -237,15 +236,15 @@ def plot_subject_mode(
         subject_mode.shape[1],
         1 + len(plotting_variables),
         figsize=figsize,
-        constrained_layout=True,  # Automatically adjust spacing for legends
     )
+    fig.tight_layout()
     for i, ax in enumerate(axs):
         ylims = make_subject_boxplot(
             ax[0],
             plotting_df,
             x_column=group_variable,
             y_column=f"comp_{i}",
-            legend=(i == 0),  # Only show legend on first row
+            legend=True,  # Show legend on every row
         )
 
         ax[0].set_ylabel(rf"Component {i+1}")
