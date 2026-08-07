@@ -103,8 +103,8 @@ def plot_spatial_mode(
     background: np.ndarray,
     slices: list,
     figsize: tuple[float, float] | None = None,
-    base_width_per_col: float = 4.0,
-    base_height_per_row: float = 4.0,
+    base_width_per_col: float = 2.0,
+    base_height_per_row: float = 2.0,
 ):
     """Plot spatial mode components mapped onto brain slices.
 
@@ -126,9 +126,9 @@ def plot_spatial_mode(
         Figure size in inches. If None, automatically computed based on
         image dimensions and number of components.
     base_width_per_col : float, optional
-        Base width per column in inches for automatic sizing, by default 4.0
+        Base width per column in inches for automatic sizing, by default 2.0
     base_height_per_row : float, optional
-        Base height per row in inches for automatic sizing, by default 4.0
+        Base height per row in inches for automatic sizing, by default 2.0
 
     Yields
     ------
