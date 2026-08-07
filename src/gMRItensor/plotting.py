@@ -34,7 +34,7 @@ def make_subject_boxplot(
         ax=ax,
         palette=colors,
         width=0.25,
-        legend=legend,
+        legend=False,  # We'll add legend manually for better control
         boxprops=dict(alpha=0.7),
         patch_artist=True,
         linewidth=1.5,
@@ -54,7 +54,21 @@ def make_subject_boxplot(
         hide_non_significant=True,
     )
     annotator.apply_and_annotate()
-    ax.set_xlim(-0.75, 1.75)
+
+    # Add legend outside plot area if requested
+    if legend:
+        handles = [
+            plt.Rectangle((0, 0), 1, 1, fc=colors[i], alpha=0.7)
+            for i in range(len(df[x_column].unique()))
+        ]
+        ax.legend(
+            handles,
+            df[x_column].unique(),
+            loc="upper left",
+            bbox_to_anchor=(1.02, 1),
+            borderaxespad=0,
+            frameon=True,
+        )
 
     return ax.get_ylim()
 
@@ -139,9 +153,55 @@ def plot_subject_mode(
     group_variable: str,
     plotting_variables: list[str],
     figsize: tuple[int, int],
-):
+) -> tuple[matplotlib.figure.Figure, np.ndarray]:
+    """Plot subject mode components against group variables and plotting variables.
 
-    # TODO: Throw error if plotting variables are not among subject_info columns
+    Parameters
+    ----------
+    subject_mode : np.ndarray
+        Subject mode matrix with shape (n_subjects, n_components)
+    subjects : list[str]
+        List of subject identifiers
+    subject_info : pd.DataFrame
+        DataFrame containing subject metadata
+    group_variable : str
+        Column name in subject_info to use for grouping
+    plotting_variables : list[str]
+        List of column names in subject_info to correlate with components
+    figsize : tuple[int, int]
+        Figure size (width, height)
+
+    Returns
+    -------
+    tuple[matplotlib.figure.Figure, np.ndarray]
+        Figure and axes array
+
+    Raises
+    ------
+    ValueError
+        If input validation fails
+    """
+    # Validate input dimensions
+    if subject_mode.shape[0] != len(subjects):
+        raise ValueError(
+            f"""Number of subjects ({len(subjects)}) does not
+            match subject_mode rows ({subject_mode.shape[0]},
+        )""",
+        )
+
+    # Validate that required columns exist in subject_info
+    required_columns = [group_variable] + plotting_variables
+    missing_columns = [
+        col for col in required_columns if col not in subject_info.columns
+    ]
+    if missing_columns:
+        raise ValueError(
+            f"The following columns are missing from subject_info: {missing_columns}",
+        )
+
+    # Validate that 'subjects' column exists in subject_info
+    if "subjects" not in subject_info.columns:
+        raise ValueError("subject_info must contain a 'subjects' column")
 
     scaled_subject_mode = scale_mode(subject_mode)
     subject_mode_df = pd.DataFrame(
@@ -151,11 +211,33 @@ def plot_subject_mode(
     subject_mode_df["subjects"] = subjects
     plotting_df = pd.merge(subject_mode_df, subject_info, how="inner", on="subjects")
 
+    # Validate merge results
+    if len(plotting_df) == 0:
+        raise ValueError(
+            "Merge resulted in empty DataFrame. Check that subject identifiers match "
+            "between 'subjects' list and 'subjects' column in subject_info",
+        )
+
+    if len(plotting_df) < len(subjects):
+        missing_count = len(subjects) - len(plotting_df)
+        raise ValueError(
+            f"{missing_count} subject(s) from the subjects list were not found in subject_info",
+        )
+
+    # Validate that group_variable has at least 2 unique values for comparison
+    n_groups = plotting_df[group_variable].nunique()
+    if n_groups < 2:
+        raise ValueError(
+            f"group_variable '{group_variable}' must have at least 2 unique values, "
+            f"found {n_groups}",
+        )
+
     print(plotting_df)
     fig, axs = plt.subplots(
         subject_mode.shape[1],
         1 + len(plotting_variables),
         figsize=figsize,
+        constrained_layout=True,  # Automatically adjust spacing for legends
     )
     for i, ax in enumerate(axs):
         ylims = make_subject_boxplot(
@@ -163,16 +245,14 @@ def plot_subject_mode(
             plotting_df,
             x_column=group_variable,
             y_column=f"comp_{i}",
-            legend=False,
+            legend=(i == 0),  # Only show legend on first row
         )
 
-        ax[0].set_xlim(-0.25, 2)
         ax[0].set_ylabel(rf"Component {i+1}")
         ax[0].set_xlabel("")
 
         if i == 0:
             ax[0].set_title(f"Subject mode v {group_variable}")
-        ax[0].legend(plotting_df[group_variable].unique(), loc="upper right")
 
         for j, var in enumerate(plotting_variables):
             make_variable_correlation(
