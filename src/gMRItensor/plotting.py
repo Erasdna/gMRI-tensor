@@ -172,7 +172,7 @@ def plot_subject_mode(
 
         if i == 0:
             ax[0].set_title(f"Subject mode v {group_variable}")
-        ax[0].legend(subject_info[group_variable].unique(), loc="upper right")
+        ax[0].legend(plotting_df[group_variable].unique(), loc="upper right")
 
         for j, var in enumerate(plotting_variables):
             make_variable_correlation(
