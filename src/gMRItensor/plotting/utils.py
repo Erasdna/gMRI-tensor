@@ -3,6 +3,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import seaborn as sns
 
+plt.style.use(["science", "no-latex"])
+
 
 def scale_mode(arr: np.ndarray) -> np.ndarray:
     """Scale mode by L2 norm along first axis.
