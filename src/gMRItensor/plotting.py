@@ -121,11 +121,6 @@ def make_variable_correlation(
 ):
     def fit_values(xs, ys, cat=""):
         fit = linregress(xs, ys)
-        # significant = " <== Significant" if fit.pvalue < 0.05 else ""
-        # print(
-        #    f"{x_column} {cat}: R-value:{fit.rvalue:.3f} slope: {fit.slope:.3f} p-value: {fit.pvalue:.3f}"  # noqa: E501
-        #    + significant,
-        # )
         return fit
 
     line_plots = []
@@ -315,7 +310,7 @@ def plot_subject_mode(
 
     # Second pass: apply consistent xlim and ylim to all rows
     max_xlim = max(xlim_list) if xlim_list else 1.5
-
+    print(xlim_list, max_xlim)
     for i, ax in enumerate(axs):
         ax[0].set_xlim(-0.25, max_xlim)
         for axx in ax:
