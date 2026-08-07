@@ -63,20 +63,59 @@ def compute_figsize(
 
 
 def make_subject_boxplot(
-    ax,
-    df,
-    x_column,
-    y_column,
-    legend=True,
-    colors=None,
-):
+    ax: matplotlib.axes.Axes,
+    df: pd.DataFrame,
+    x_column: str,
+    y_column: str,
+    legend: bool = True,
+    colors: list | None = None,
+) -> tuple[tuple[float, float], float | None]:
+    """Create a boxplot with statistical annotations and optional legend.
+
+    Creates a boxplot comparing values across categories with Mann-Whitney U test
+    annotations for pairwise comparisons. Automatically generates colorblind-friendly
+    colors if not provided.
+
+    Parameters
+    ----------
+    ax : matplotlib.axes.Axes
+        Axes object to plot on
+    df : pd.DataFrame
+        DataFrame containing the data to plot
+    x_column : str
+        Column name for categorical x-axis (grouping variable)
+    y_column : str
+        Column name for continuous y-axis values
+    legend : bool, optional
+        Whether to display a legend, by default True
+    colors : list | None, optional
+        List of colors for each category. If None, uses seaborn's colorblind
+        palette with automatic scaling to number of categories. By default None.
+
+    Returns
+    -------
+    tuple[tuple[float, float], float | None]
+        A tuple containing:
+        - ylim: Tuple of (ymin, ymax) for the y-axis limits
+        - required_xlim: Required x-axis upper limit to accommodate legend,
+          or None if legend is False
+
+    Notes
+    -----
+    The function performs the following:
+    - Creates boxplots for each category with semi-transparent boxes
+    - Adds Mann-Whitney U test annotations for all pairwise comparisons
+    - Places legend in upper right if requested
+    - Calculates required x-axis limit to prevent legend overlap
+    - Uses integer positions for x-axis to ensure proper spacing
+    """
     # Get unique categories and create a mapping to integer positions
     categories = df[x_column].unique()
     n_categories = len(categories)
 
     # Generate colors if not provided
     if colors is None:
-        colors = sns.color_palette("colorblind", n_colors=n_categories)
+        colors = sns.color_palette("tab10", n_colors=n_categories)
 
     # Create a temporary column with integer positions
     df_plot = df.copy()
@@ -176,7 +215,7 @@ def make_variable_correlation(
     # Generate colors if not provided
     if colors is None:
         n_categories = df[category].nunique()
-        colors = sns.color_palette("colorblind", n_colors=n_categories)
+        colors = sns.color_palette("tab10", n_colors=n_categories)
 
     line_plots = []
     legends = []
