@@ -50,10 +50,6 @@ def make_subject_boxplot(
         saturation=1,
     )
 
-    # Set tick positions and labels BEFORE annotation to establish baseline
-    # ax.set_xticks(range(n_categories))
-    # ax.set_xticklabels(categories)
-
     # Add statistical annotation for pairwise comparisons
     if n_categories >= 2:
         # Generate all pairwise comparisons using integer positions
@@ -76,6 +72,7 @@ def make_subject_boxplot(
         annotator.apply_and_annotate()
 
     # Add legend inside plot area if requested
+    required_xlim = None
     if legend:
         handles = [
             plt.Rectangle((0, 0), 1, 1, fc=colors[i], alpha=0.7)
@@ -102,21 +99,15 @@ def make_subject_boxplot(
         legend_width = legend_bbox_data.x1 - legend_bbox_data.x0
 
         # Calculate required xlim:
-        print(legend_width)
         rightmost_tick = n_categories - 1
         required_xlim = rightmost_tick + 0.5 + legend_width
 
-        ax.set_xlim(-0.25, required_xlim)
-    else:
-        # No legend, use standard xlim
-        ax.set_xlim(-0.25, 1.5)
-
-    print(required_xlim)
+    # Set tick positions and labels
     ax.set_xticks(range(n_categories))
     ax.set_xticklabels(categories)
     ax.set_xlabel(x_column)
 
-    return ax.get_ylim()
+    return ax.get_ylim(), required_xlim
 
 
 def make_variable_correlation(
@@ -284,14 +275,22 @@ def plot_subject_mode(
         figsize=figsize,
     )
     fig.tight_layout()
+
+    # First pass: create all plots and collect required xlims
+    ylims_list = []
+    xlim_list = []
+
     for i, ax in enumerate(axs):
-        ylims = make_subject_boxplot(
+        ylims, required_xlim = make_subject_boxplot(
             ax[0],
             plotting_df,
             x_column=group_variable,
             y_column=f"comp_{i}",
             legend=True,  # Show legend on every row
         )
+        ylims_list.append(ylims)
+        if required_xlim is not None:
+            xlim_list.append(required_xlim)
 
         ax[0].set_ylabel(rf"Component {i+1}")
         ax[0].set_xlabel("")
@@ -313,8 +312,15 @@ def plot_subject_mode(
 
             if i == subject_mode.shape[1] - 1:
                 ax[j + 1].set_xlabel(var)
+
+    # Second pass: apply consistent xlim and ylim to all rows
+    max_xlim = max(xlim_list) if xlim_list else 1.5
+
+    for i, ax in enumerate(axs):
+        ax[0].set_xlim(-0.25, max_xlim)
         for axx in ax:
-            axx.set_ylim(*ylims)
+            axx.set_ylim(*ylims_list[i])
+
     return fig, axs
 
 
