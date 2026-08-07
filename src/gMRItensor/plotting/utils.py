@@ -74,7 +74,8 @@ def compute_figsize(
         width = base_width_per_col * font_scale * n_columns
 
     # Calculate height: scale by number of rows
-    height = base_height_per_row * font_scale * n_components
+    # Reduce height slightly to account for title space with tight layout
+    height = base_height_per_row * font_scale * n_components * 0.9
 
     return (width, height)
 

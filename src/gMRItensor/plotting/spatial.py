@@ -143,7 +143,7 @@ def plot_spatial_mode(
         1,
         background_shape[0] / background_shape[1],
         background_shape[0] / background_shape[2],
-        0.1,
+        0.05,
     ]
     n_components = spatial_mode.shape[1]
 
