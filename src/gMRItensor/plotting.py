@@ -61,7 +61,7 @@ def make_subject_boxplot(
             plt.Rectangle((0, 0), 1, 1, fc=colors[i], alpha=0.7)
             for i in range(len(df[x_column].unique()))
         ]
-        ax.legend(
+        leg = ax.legend(
             handles,
             df[x_column].unique(),
             loc="upper right",
@@ -69,10 +69,27 @@ def make_subject_boxplot(
             framealpha=0.9,
         )
 
-    # Extend xlim to the right to make space for legend
-    # The boxplot has 2 categories at positions 0 and 1
-    # We extend to ~2.0 to provide consistent space for the legend
-    ax.set_xlim(-0.5, 2.0)
+        # Draw the canvas to get accurate legend dimensions
+        ax.figure.canvas.draw()
+
+        # Get legend bounding box in display coordinates
+        legend_bbox = leg.get_window_extent()
+
+        # Transform to data coordinates
+        legend_bbox_data = legend_bbox.transformed(ax.transData.inverted())
+
+        # Calculate required xlim extension
+        # We want the legend to fit comfortably, so add a small margin
+        legend_right = legend_bbox_data.x1
+        required_xlim = max(
+            1.5,
+            legend_right + 0.1,
+        )  # At least 1.5, or legend width + margin
+
+        ax.set_xlim(-0.5, required_xlim)
+    else:
+        # No legend, use standard xlim
+        ax.set_xlim(-0.5, 1.5)
 
     return ax.get_ylim()
 
