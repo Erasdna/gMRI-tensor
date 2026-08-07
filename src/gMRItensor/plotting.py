@@ -322,6 +322,7 @@ def plot_subject_mode(
     fig, axs = plt.subplots(
         subject_mode.shape[1],
         1 + len(plotting_variables),
+        width_ratios=[1.4] + [1] * len(plotting_variables),
         figsize=figsize,
     )
     fig.tight_layout()
