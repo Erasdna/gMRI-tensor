@@ -6,6 +6,7 @@ from gMRItensor.plotting.utils import scale_mode
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 matplotlib.use("Agg")
+plt.style.use(["science", "no-latex"])
 
 
 def plot_enhancement_with_background(ax, background, signal, cmap, vmin, vmax):
@@ -27,20 +28,19 @@ def plot_enhancement_with_background(ax, background, signal, cmap, vmin, vmax):
 
 
 def make_colorbar(fig, ax, cax, cax_divider, label, shrink):
+    formatter = matplotlib.ticker.ScalarFormatter(useMathText=True)
+    formatter.set_scientific(True)
+    formatter.set_powerlimits((0, 0))
+
     cbar = fig.colorbar(
         cax,
         cax=cax_divider,
         ax=ax,
         use_gridspec=True,
         shrink=shrink,
-        format=matplotlib.ticker.ScalarFormatter(useMathText=True),
+        format=formatter,
     )
-    cbar.formatter.set_scientific(True)
-    cbar.formatter.set_powerlimits((0, 0))
-    cbar.formatter.set_useOffset(False)
-    cbar.ax.yaxis.set_major_formatter(
-        matplotlib.ticker.FuncFormatter(lambda x, p: f"{x:.0e}"),
-    )
+    cbar.ax.yaxis.offsetText.set_visible(True)
     cbar.set_label(label=label)
 
 
