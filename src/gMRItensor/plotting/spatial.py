@@ -42,6 +42,7 @@ def make_colorbar(fig, ax, cax, cax_divider, label, shrink):
         format=formatter,
     )
     cbar.ax.yaxis.offsetText.set_visible(True)
+    cbar.ax.yaxis.offsetText.set_horizontalalignment("right")
     cbar.set_label(label=label)
 
 
