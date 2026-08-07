@@ -2,6 +2,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import scienceplots  # noqa: F401
+from gMRItensor.plotting.utils import scale_mode
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 matplotlib.use("Agg")
@@ -93,7 +94,7 @@ def plot_spatial_mode(
     background: np.ndarray,
     slices: list,
     figsize: tuple[float, float] | None = None,
-) -> None:
+):
     """Plot spatial mode components mapped onto brain slices.
 
     Parameters
@@ -120,6 +121,7 @@ def plot_spatial_mode(
     """
     assert spatial_mode.shape[0] == index_list.shape[0]
 
+    scaled_spatial_mode = scale_mode(spatial_mode)
     background_shape = background.shape
     width_ratios = [
         1,
@@ -141,7 +143,10 @@ def plot_spatial_mode(
 
         for component in range(n_components):
             spatial_component = np.zeros(background_shape)
-            spatial_component[index_list[ids_mask]] = spatial_mode[ids_mask, component]
+            spatial_component[*index_list[ids_mask].T] = scaled_spatial_mode[
+                ids_mask,
+                component,
+            ]
             plot_brain(
                 big_fig,
                 big_ax[component],
@@ -153,5 +158,5 @@ def plot_spatial_mode(
                 vmax=2,
                 label="Coefficient",
             )
-
+        yield big_fig, big_ax, name
     raise NotImplementedError
