@@ -50,11 +50,6 @@ def make_subject_boxplot(
         saturation=1,
     )
 
-    # Set tick positions and labels explicitly
-    ax.set_xticks(range(n_categories))
-    ax.set_xticklabels(categories)
-    ax.set_xlabel(x_column)
-
     # Add statistical annotation for pairwise comparisons
     if n_categories >= 2:
         # Generate all pairwise comparisons using integer positions
@@ -75,6 +70,11 @@ def make_subject_boxplot(
             hide_non_significant=True,
         )
         annotator.apply_and_annotate()
+
+    # Set tick positions and labels explicitly
+    ax.set_xticks(range(n_categories))
+    ax.set_xticklabels(categories)
+    ax.set_xlabel(x_column)
 
     # Add legend inside plot area if requested
     if legend:
