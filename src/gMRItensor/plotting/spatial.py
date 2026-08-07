@@ -159,4 +159,3 @@ def plot_spatial_mode(
                 label="Coefficient",
             )
         yield big_fig, big_ax, name
-    raise NotImplementedError
