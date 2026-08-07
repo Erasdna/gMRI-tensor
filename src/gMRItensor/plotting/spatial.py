@@ -33,6 +33,13 @@ def make_colorbar(fig, ax, cax, cax_divider, label, shrink):
         ax=ax,
         use_gridspec=True,
         shrink=shrink,
+        format=matplotlib.ticker.ScalarFormatter(useMathText=True),
+    )
+    cbar.formatter.set_scientific(True)
+    cbar.formatter.set_powerlimits((0, 0))
+    cbar.formatter.set_useOffset(False)
+    cbar.ax.yaxis.set_major_formatter(
+        matplotlib.ticker.FuncFormatter(lambda x, p: f"{x:.0e}"),
     )
     cbar.set_label(label=label)
 
