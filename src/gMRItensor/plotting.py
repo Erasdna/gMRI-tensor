@@ -162,6 +162,7 @@ def plot_subject_mode(
             plotting_df,
             x_column=group_variable,
             y_column=f"comp_{i}",
+            legend=False,
         )
 
         ax[0].set_xlim(-0.25, 2)
@@ -179,6 +180,7 @@ def plot_subject_mode(
                 x_column=var,
                 y_column=f"comp_{i}",
                 category=group_variable,
+                legend=True,
             )
             if i == 0:
                 ax[j + 1].set_title(f"Subject mode v {var}")
