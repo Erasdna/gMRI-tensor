@@ -10,7 +10,6 @@ from scipy.stats import linregress
 from statannotations.Annotator import Annotator
 
 plt.style.use(["science", "no-latex"])
-
 matplotlib.use("Agg")
 
 
@@ -55,12 +54,7 @@ def compute_figsize(
 
     # Calculate width: account for legend space in first column
     # First column needs extra space for legend
-    width = (
-        base_width_per_col
-        * font_scale
-        * (n_columns)
-        # + base_width_per_col * font_scale * 1.4
-    )
+    width = base_width_per_col * font_scale * (n_columns)
 
     # Calculate height: scale by number of rows
     height = base_height_per_row * font_scale * n_components
@@ -381,10 +375,65 @@ def plot_subject_mode(
 
 def plot_subject_mode_correlation(
     subject_mode: np.ndarray,
+    subjects: list,
     subject_info: pd.DataFrame,
     group_variable: str,
+    figsize: tuple[float, float] | None = None,
 ):
-    raise NotImplementedError
+
+    # Compute figsize if not provided
+    n_components = subject_mode.shape[1]
+    if figsize is None:
+        figsize = compute_figsize(n_components, n_components)
+
+    fig, axs = plt.subplots(
+        subject_mode.shape[1],
+        n_components,
+        width_ratios=[1] * n_components,
+        figsize=figsize,
+    )
+    fig.tight_layout()
+
+    scaled_subject_mode = scale_mode(subject_mode)
+    subject_mode_df = pd.DataFrame(
+        scaled_subject_mode,
+        columns=[f"comp_{i}" for i in range(subject_mode.shape[1])],
+    )
+    subject_mode_df["subjects"] = subjects
+    plotting_df = pd.merge(subject_mode_df, subject_info, how="inner", on="subjects")
+
+    ylims_list = []
+    xlim_list = []
+    for i, ax in enumerate(axs):
+        ylims, required_xlim = make_subject_boxplot(
+            ax[i],
+            plotting_df,
+            x_column=group_variable,
+            y_column=f"comp_{i}",
+            legend=True,  # Show legend on every row
+        )
+        ylims_list.append(ylims)
+        if required_xlim is not None:
+            xlim_list.append(required_xlim)
+
+        ax[0].set_ylabel(rf"Component {i+1}")
+        ax[0].set_xlabel("")
+        for j in range(n_components):
+            if i != j:
+                make_variable_correlation(
+                    ax[j],
+                    plotting_df,
+                    x_column=f"comp_{j}",
+                    y_column=f"comp_{i}",
+                    category=group_variable,
+                    legend=True,
+                )
+            if i == 0:
+                ax[j].set_title(f"Component {j+1}")
+
+            if i == subject_mode.shape[1] - 1:
+                ax[j].set_xlabel(f"Component {j+1}")
+    return fig, axs
 
 
 def plot_spatial_mode(
