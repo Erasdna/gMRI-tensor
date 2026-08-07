@@ -107,7 +107,7 @@ def make_subject_boxplot(
         rightmost_tick = n_categories - 1
         required_xlim = rightmost_tick + 0.5 + legend_width
 
-        ax.set_xlim(-0.5, required_xlim)
+        ax.set_xlim(-0.25, required_xlim)
     else:
         # No legend, use standard xlim
         ax.set_xlim(-0.25, 1.5)
