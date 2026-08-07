@@ -417,7 +417,7 @@ def plot_subject_mode_correlation(
             xlim_list.append(required_xlim)
 
         ax[0].set_ylabel(rf"Component {i+1}")
-        ax[0].set_xlabel("")
+        ax[i].set_xlabel("")
         for j in range(n_components):
             if i != j:
                 make_variable_correlation(
@@ -433,6 +433,15 @@ def plot_subject_mode_correlation(
 
             if i == subject_mode.shape[1] - 1:
                 ax[j].set_xlabel(f"Component {j+1}")
+
+    # Second pass: apply consistent xlim and ylim to all rows
+    max_xlim = max(xlim_list) if xlim_list else 1.5
+    print(xlim_list, max_xlim)
+    for i, ax in enumerate(axs):
+        ax[0].set_xlim(-0.25, max_xlim)
+        for axx in ax:
+            axx.set_ylim(*ylims_list[i])
+
     return fig, axs
 
 
