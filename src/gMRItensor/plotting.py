@@ -155,8 +155,6 @@ def plot_subject_mode(
     fig, axs = plt.subplots(
         subject_mode.shape[1],
         1 + len(plotting_variables),
-        sharey=True,
-        sharex=True,
         figsize=figsize,
     )
     for i, ax in enumerate(axs):
