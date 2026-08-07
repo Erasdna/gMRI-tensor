@@ -15,7 +15,7 @@ matplotlib.use("Agg")
 
 
 def scale_mode(arr):
-    return arr / np.linalg.norm(arr, ax=0)[None, :]
+    return arr / np.linalg.norm(arr, axis=0)[None, :]
 
 
 def make_subject_boxplot(
