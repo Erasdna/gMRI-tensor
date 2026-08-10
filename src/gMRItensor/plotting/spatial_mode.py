@@ -184,7 +184,6 @@ def plot_spatial_mode(
             4,
             figsize=figsize,
             gridspec_kw={"width_ratios": width_ratios},
-            layout="tight",
         )
 
         for component in range(n_components):
