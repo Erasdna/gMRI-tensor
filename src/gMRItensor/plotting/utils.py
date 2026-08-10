@@ -1,7 +1,6 @@
 """Shared utility functions for plotting."""
 import matplotlib.pyplot as plt
 import numpy as np
-import seaborn as sns
 
 plt.style.use(["science", "no-latex"])
 
@@ -99,7 +98,7 @@ def get_color_palette(n_colors: int) -> list:
     list
         List of colors from tab10 palette
     """
-    return sns.color_palette("tab10", n_colors=n_colors)
+    return [f"C{3*i}" for i in range(n_colors)]
 
 
 def create_colorbar_with_offset(
