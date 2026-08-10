@@ -6,8 +6,6 @@ from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import scale_mode
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
-# from gMRItensor.plotting.utils import scale_mode
-
 matplotlib.use("Agg")
 plt.style.use(["science", "no-latex"])
 
