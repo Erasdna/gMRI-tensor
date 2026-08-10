@@ -181,7 +181,7 @@ def plot_spatial_mode(
     ):
         big_fig, big_ax = plt.subplots(
             n_components,
-            4,
+            3,
             figsize=figsize,
             gridspec_kw={"width_ratios": width_ratios},
             layout="tight",
