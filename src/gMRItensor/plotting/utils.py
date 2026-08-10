@@ -19,6 +19,7 @@ def scale_mode(arr: np.ndarray) -> np.ndarray:
     np.ndarray
         Scaled mode array
     """
+    print(np.linalg.norm(arr, axis=0).shape)
     return arr / np.linalg.norm(arr, axis=0)[None, :]
 
 
