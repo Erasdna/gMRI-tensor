@@ -39,7 +39,7 @@ def plot_mode_grid(
     scaled_time_mode = scale_mode(time_mode)
     scaled_subject_mode = scale_mode(subject_mode)
 
-    width_ratios = [1, 1, 1.1, 1.1]
+    width_ratios = [1, 1, 1.2, 1.2]
     figsize = compute_figsize(
         n_components=n_components,
         n_columns=4,
