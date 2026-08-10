@@ -39,7 +39,15 @@ def plot_mode_grid(
     scaled_time_mode = scale_mode(time_mode)
     scaled_subject_mode = scale_mode(subject_mode)
 
-    width_ratios = [1, 1, 1.1, 1.1]
+    # Calculate width ratios based on actual image aspect ratios
+    # Get the shape of the sagittal slice
+    sagittal_shape = background[sagittal_slice].shape  # (height, width)
+    image_aspect_ratio = sagittal_shape[0] / sagittal_shape[1]
+
+    # Time and subject plots are roughly square (aspect ratio ~1)
+    # Spatial images have their natural aspect ratio
+    width_ratios = [1, 1, image_aspect_ratio, image_aspect_ratio]
+
     figsize = compute_figsize(
         n_components=n_components,
         n_columns=4,
@@ -120,12 +128,28 @@ def plot_mode_grid(
                 vmax=np.percentile(spatial_component[spatial_component > 0], 95),
                 mask=np.flip(np.rot90(voxel_mask[sagittal_slice], 1), 1),
             )
-            cax_divider = inset_axes(
+            # Create temporary colorbar to measure exponent text width
+            temp_cax = inset_axes(
                 ax,
                 width="5%",
                 height="80%",
                 loc="center right",
                 bbox_to_anchor=(0.15, 0.0, 1, 1),
+                bbox_transform=ax.transAxes,
+                borderpad=0,
+            )
+            text_width_offset = make_colorbar(fig, ax, im, temp_cax, None)
+
+            # Remove temporary colorbar
+            temp_cax.remove()
+
+            # Create final colorbar with adjusted position
+            cax_divider = inset_axes(
+                ax,
+                width="5%",
+                height="80%",
+                loc="center right",
+                bbox_to_anchor=(0.15 - text_width_offset, 0.0, 1, 1),
                 bbox_transform=ax.transAxes,
                 borderpad=0,
             )

@@ -54,9 +54,24 @@ def make_colorbar(fig, ax, cax, cax_divider, label):
         use_gridspec=True,
         format=formatter,
     )
+    # Center-align the exponent text above the colorbar
     cbar.ax.yaxis.offsetText.set_visible(True)
     cbar.ax.yaxis.offsetText.set_horizontalalignment("center")
     cbar.set_label(label=label)
+
+    # Force draw to get accurate text dimensions
+    fig.canvas.draw()
+
+    # Get the exponent text bounding box in display coordinates
+    offset_text_bbox = cbar.ax.yaxis.offsetText.get_window_extent()
+
+    # Transform to axes coordinates of the parent ax
+    offset_text_bbox_ax = offset_text_bbox.transformed(ax.transAxes.inverted())
+
+    # Calculate required left shift (half the text width in axes coordinates)
+    text_width_ax = offset_text_bbox_ax.width
+
+    return text_width_ax / 2.0
 
 
 def plot_brain(
