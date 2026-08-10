@@ -3,8 +3,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scienceplots  # noqa: F401
 from gMRItensor.plotting.utils import compute_figsize
-from gMRItensor.plotting.utils import scale_mode
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+
+# from gMRItensor.plotting.utils import scale_mode
 
 matplotlib.use("Agg")
 plt.style.use(["science", "no-latex"])
@@ -137,7 +138,8 @@ def plot_spatial_mode(
     """
     assert spatial_mode.shape[0] == index_list.shape[0]
 
-    scaled_spatial_mode = scale_mode(spatial_mode)
+    # scaled_spatial_mode = scale_mode(spatial_mode)
+    scaled_spatial_mode = spatial_mode
     background_shape = background.shape
     width_ratios = [
         1,
