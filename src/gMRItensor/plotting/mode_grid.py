@@ -72,7 +72,8 @@ def plot_mode_grid(
             marker="o",
         )
         time_ax.set_ylabel(f"Component {component+1}")
-        time_ax.set_xlabel("Time after injection [h]")
+        if component == n_components - 1:
+            time_ax.set_xlabel("Time after injection [h]")
         time_ax.set_xticks(time_points)
         time_ax.set_ylim(-0.1, 1.1 * np.max(scaled_time_mode))
 
@@ -87,7 +88,10 @@ def plot_mode_grid(
             legend=False,
         )
         subject_ax.set_ylabel("")
-        subject_ax.set_xlabel("Patient group")
+        if component == n_components - 1:
+            subject_ax.set_xlabel("Patient group")
+        else:
+            subject_ax.set_xlabel("")
 
         # Plot spatial mode
         parenchyma_ax = axs[component, 2]
