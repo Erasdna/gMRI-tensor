@@ -71,6 +71,7 @@ def plot_mode_grid(
             marker="o",
         )
         time_ax.set_ylabel(f"Component {component+1}")
+        time_ax.set_xlabel("Time after injection [h]")
         time_ax.set_xticks(time_points)
         time_ax.set_ylim(-0.1, 1.1 * np.max(scaled_time_mode))
 
@@ -85,6 +86,7 @@ def plot_mode_grid(
             legend=False,
         )
         subject_ax.set_ylabel("")
+        subject_ax.set_xlabel("Patient group")
 
         # Plot spatial mode
         parenchyma_ax = axs[component, 2]
@@ -118,4 +120,17 @@ def plot_mode_grid(
             make_colorbar(fig, ax, im, cax_divider, None, None)
             ax.set_xticks([])
             ax.set_yticks([])
+
+        if component == 0:
+            for ax_obj, title in zip(
+                ax,
+                [
+                    "Time mode",
+                    "Subject mode",
+                    "Spatial mode (Parenchyma)",
+                    "Spatial mode (CSF)",
+                ],
+            ):
+                ax_obj.set_title(title)
+            fig.align_titles()
     return fig, axs
