@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scienceplots  # noqa: F401
 from gMRItensor.plotting.utils import compute_figsize
+from gMRItensor.plotting.utils import create_colorbar_with_offset
 from gMRItensor.plotting.utils import scale_mode
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
@@ -40,38 +41,6 @@ def plot_enhancement_with_background(
         rasterized=True,
     )
     return cax
-
-
-def make_colorbar(fig, ax, cax, cax_divider, label):
-    formatter = matplotlib.ticker.ScalarFormatter(useMathText=True)
-    formatter.set_scientific(True)
-    formatter.set_powerlimits((0, 0))
-
-    cbar = fig.colorbar(
-        cax,
-        cax=cax_divider,
-        ax=ax,
-        use_gridspec=True,
-        format=formatter,
-    )
-    # Center-align the exponent text above the colorbar
-    cbar.ax.yaxis.offsetText.set_visible(True)
-    cbar.ax.yaxis.offsetText.set_horizontalalignment("center")
-    cbar.set_label(label=label)
-
-    # Force draw to get accurate text dimensions
-    fig.canvas.draw()
-
-    # Get the exponent text bounding box in display coordinates
-    offset_text_bbox = cbar.ax.yaxis.offsetText.get_window_extent()
-
-    # Transform to axes coordinates of the parent ax
-    offset_text_bbox_ax = offset_text_bbox.transformed(ax.transAxes.inverted())
-
-    # Calculate required left shift (half the text width in axes coordinates)
-    text_width_ax = offset_text_bbox_ax.width
-
-    return text_width_ax / 2.0
 
 
 def plot_brain(
@@ -122,8 +91,26 @@ def plot_brain(
     )
 
     ax[-1].set_axis_off()
-    cax = inset_axes(ax[-1], width="100%", height="90%", loc="center")
-    make_colorbar(fig, ax[-1], im, cax, label, None)
+
+    # Create temporary colorbar to measure exponent text width
+    temp_cax = inset_axes(ax[-1], width="100%", height="80%", loc="center")
+    text_width_offset = create_colorbar_with_offset(fig, ax[-1], im, temp_cax, label)
+
+    # Remove temporary colorbar
+    temp_cax.remove()
+
+    # Create final colorbar with adjusted position
+    # Shift left by the text width offset to prevent overlap
+    cax = inset_axes(
+        ax[-1],
+        width="100%",
+        height="80%",
+        loc="center",
+        bbox_to_anchor=(text_width_offset, 0.0, 1, 1),
+        bbox_transform=ax[-1].transAxes,
+        borderpad=0,
+    )
+    create_colorbar_with_offset(fig, ax[-1], im, cax, label)
 
     for jj in range(len(ax)):
         ax[jj].set_xticks([])

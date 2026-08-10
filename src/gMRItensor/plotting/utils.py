@@ -100,3 +100,67 @@ def get_color_palette(n_colors: int) -> list:
         List of colors from tab10 palette
     """
     return sns.color_palette("tab10", n_colors=n_colors)
+
+
+def create_colorbar_with_offset(
+    fig,
+    ax,
+    mappable,
+    cax,
+    label: str | None = None,
+) -> float:
+    """Create a colorbar with scientific notation and return required offset.
+
+    This function creates a colorbar with scientific notation formatting and
+    calculates the horizontal offset needed to prevent the exponent text from
+    overlapping with other plot elements.
+
+    Parameters
+    ----------
+    fig : matplotlib.figure.Figure
+        Figure containing the colorbar
+    ax : matplotlib.axes.Axes
+        Axes associated with the colorbar
+    mappable : matplotlib.cm.ScalarMappable
+        Mappable object (e.g., from imshow or pcolormesh)
+    cax : matplotlib.axes.Axes
+        Axes for the colorbar
+    label : str | None, optional
+        Label for the colorbar. By default None.
+
+    Returns
+    -------
+    float
+        Width offset in axes coordinates needed to accommodate the exponent text.
+        This value represents half the text width and can be used to adjust
+        the position of the colorbar to prevent overlap.
+    """
+    formatter = plt.matplotlib.ticker.ScalarFormatter(useMathText=True)
+    formatter.set_scientific(True)
+    formatter.set_powerlimits((0, 0))
+
+    cbar = fig.colorbar(
+        mappable,
+        cax=cax,
+        ax=ax,
+        use_gridspec=True,
+        format=formatter,
+    )
+    # Center-align the exponent text above the colorbar
+    cbar.ax.yaxis.offsetText.set_visible(True)
+    cbar.ax.yaxis.offsetText.set_horizontalalignment("center")
+    cbar.set_label(label=label)
+
+    # Force draw to get accurate text dimensions
+    fig.canvas.draw()
+
+    # Get the exponent text bounding box in display coordinates
+    offset_text_bbox = cbar.ax.yaxis.offsetText.get_window_extent()
+
+    # Transform to axes coordinates of the parent ax
+    offset_text_bbox_ax = offset_text_bbox.transformed(ax.transAxes.inverted())
+
+    # Calculate required left shift (half the text width in axes coordinates)
+    text_width_ax = offset_text_bbox_ax.width
+
+    return text_width_ax / 2.0

@@ -3,11 +3,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scienceplots  # noqa: F401
-from gMRItensor.plotting.spatial_mode import make_colorbar
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
 from gMRItensor.plotting.utils import compute_figsize
+from gMRItensor.plotting.utils import create_colorbar_with_offset
 from gMRItensor.plotting.utils import scale_mode
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
@@ -57,7 +57,13 @@ def plot_mode_grid(
         bbox_transform=temp_ax.transAxes,
         borderpad=0,
     )
-    text_width_offset = make_colorbar(temp_fig, temp_ax, temp_im, temp_cax, None)
+    text_width_offset = create_colorbar_with_offset(
+        temp_fig,
+        temp_ax,
+        temp_im,
+        temp_cax,
+        None,
+    )
 
     # Calculate colorbar width fraction in axes coordinates
     # Colorbar is 5% width + text_width_offset + bbox_to_anchor offset (0.15)
@@ -159,7 +165,7 @@ def plot_mode_grid(
                 bbox_transform=ax.transAxes,
                 borderpad=0,
             )
-            text_width_offset = make_colorbar(fig, ax, im, temp_cax, None)
+            text_width_offset = create_colorbar_with_offset(fig, ax, im, temp_cax, None)
 
             # Remove temporary colorbar
             temp_cax.remove()
@@ -173,7 +179,7 @@ def plot_mode_grid(
                 bbox_transform=ax.transAxes,
                 borderpad=0,
             )
-            make_colorbar(fig, ax, im, cax_divider, None)
+            create_colorbar_with_offset(fig, ax, im, cax_divider, None)
             ax.set_xticks([])
             ax.set_yticks([])
 
