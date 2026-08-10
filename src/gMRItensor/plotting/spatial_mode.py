@@ -52,13 +52,15 @@ def make_colorbar(fig, ax, cax, cax_divider, label, shrink):
         cax=cax_divider,
         ax=ax,
         use_gridspec=True,
-        shrink=shrink,
         format=formatter,
     )
     # Position exponent on the right side below the top edge
     cbar.ax.yaxis.offsetText.set_visible(True)
     cbar.ax.yaxis.set_offset_position("right")
-    cbar.ax.yaxis.offsetText.set_horizontalalignment("right")
+    cbar.ax.yaxis.offsetText.set_horizontalalignment("left")
+    cbar.ax.yaxis.offsetText.set_verticalalignment("top")
+    # Add padding to prevent tick labels from overlapping with exponent
+    cbar.ax.tick_params(axis="y", pad=15)
     cbar.set_label(label=label)
 
 

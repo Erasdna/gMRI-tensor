@@ -9,7 +9,7 @@ from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import scale_mode
-from mpl_toolkits.axes_grid1 import make_axes_locatable
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 matplotlib.use("Agg")
 plt.style.use(["science", "no-latex"])
@@ -120,9 +120,16 @@ def plot_mode_grid(
                 vmax=np.percentile(spatial_component[spatial_component > 0], 95),
                 mask=np.flip(np.rot90(voxel_mask[sagittal_slice], 1), 1),
             )
-            divider = make_axes_locatable(ax)
-            cax_divider = divider.append_axes("right", size="5%", pad=0.1)
-            make_colorbar(fig, ax, im, cax_divider, None, 0.5)
+            cax_divider = inset_axes(
+                ax,
+                width="5%",
+                height="80%",
+                loc="center right",
+                bbox_to_anchor=(0.05, 0.0, 1, 1),
+                bbox_transform=ax.transAxes,
+                borderpad=0,
+            )
+            make_colorbar(fig, ax, im, cax_divider, None, None)
             ax.set_xticks([])
             ax.set_yticks([])
 
