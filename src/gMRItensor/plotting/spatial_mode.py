@@ -42,7 +42,7 @@ def plot_enhancement_with_background(
     return cax
 
 
-def make_colorbar(fig, ax, cax, cax_divider, label, shrink):
+def make_colorbar(fig, ax, cax, cax_divider, label):
     formatter = matplotlib.ticker.ScalarFormatter(useMathText=True)
     formatter.set_scientific(True)
     formatter.set_powerlimits((0, 0))
@@ -59,8 +59,6 @@ def make_colorbar(fig, ax, cax, cax_divider, label, shrink):
     cbar.ax.yaxis.set_offset_position("right")
     cbar.ax.yaxis.offsetText.set_horizontalalignment("left")
     cbar.ax.yaxis.offsetText.set_verticalalignment("top")
-    # Add padding to prevent tick labels from overlapping with exponent
-    cbar.ax.tick_params(axis="y", pad=15)
     cbar.set_label(label=label)
 
 
