@@ -84,6 +84,7 @@ def plot_mode_grid(
             y_column=f"comp_{component}",
             legend=False,
         )
+        subject_ax.set_ylabel("")
 
         # Plot spatial mode
         parenchyma_ax = axs[component, 2]
