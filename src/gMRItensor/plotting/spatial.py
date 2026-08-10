@@ -162,7 +162,6 @@ def plot_spatial_mode(
 
     scaled_spatial_mode = scale_mode(spatial_mode)
 
-    scaled_spatial_mode = spatial_mode
     background_shape = background.shape
     width_ratios = [
         1,
