@@ -149,7 +149,7 @@ def plot_mode_grid(
                 width="5%",
                 height="80%",
                 loc="center right",
-                bbox_to_anchor=(0.15 - text_width_offset, 0.0, 1, 1),
+                bbox_to_anchor=(text_width_offset, 0.0, 1, 1),
                 bbox_transform=ax.transAxes,
                 borderpad=0,
             )
