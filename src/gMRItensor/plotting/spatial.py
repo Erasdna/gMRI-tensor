@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scienceplots  # noqa: F401
 from gMRItensor.plotting.utils import compute_figsize
+from gMRItensor.plotting.utils import scale_mode
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 # from gMRItensor.plotting.utils import scale_mode
@@ -138,7 +139,13 @@ def plot_spatial_mode(
     """
     assert spatial_mode.shape[0] == index_list.shape[0]
 
-    # scaled_spatial_mode = scale_mode(spatial_mode)
+    vmin = np.percentile(spatial_mode, 5, axis=0)
+    vmax = np.percentile(spatial_mode, 95, axis=0)
+    scaling = np.linalg.norm(spatial_mode, axis=0)[None, :]
+    scaled_spatial_mode = scale_mode(spatial_mode)
+    vmin_scaled = vmin / scaling
+    vmax_scaled = vmax / scaling
+
     scaled_spatial_mode = spatial_mode
     background_shape = background.shape
     width_ratios = [
@@ -182,8 +189,8 @@ def plot_spatial_mode(
                 background,
                 "plasma",
                 slices,
-                vmin=np.percentile(spatial_component[spatial_component > 1e-7], 5),
-                vmax=np.percentile(spatial_component[spatial_component > 1e-7], 95),
+                vmin=vmin_scaled[component],
+                vmax=vmax_scaled[component],
                 label="Coefficient",
             )
         yield big_fig, big_ax, name
