@@ -39,7 +39,7 @@ def plot_mode_grid(
     scaled_time_mode = scale_mode(time_mode)
     scaled_subject_mode = scale_mode(subject_mode)
 
-    width_ratios = [1, 1, 1.2, 1.2]
+    width_ratios = [1, 1, 1.1, 1.1]
     figsize = compute_figsize(
         n_components=n_components,
         n_columns=4,
@@ -125,7 +125,7 @@ def plot_mode_grid(
                 width="5%",
                 height="80%",
                 loc="center right",
-                bbox_to_anchor=(0.12, 0.0, 1, 1),
+                bbox_to_anchor=(0.15, 0.0, 1, 1),
                 bbox_transform=ax.transAxes,
                 borderpad=0,
             )
