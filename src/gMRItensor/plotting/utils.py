@@ -69,15 +69,8 @@ def compute_figsize(
     # Use target page width directly
     width = page_width
 
-    # Calculate height based on width and aspect ratio
-    if width_ratios is not None:
-        # Compute average aspect ratio from width_ratios
-        avg_aspect = sum(width_ratios) / len(width_ratios)
-    else:
-        avg_aspect = 1.0
-
     # Height per row should maintain the specified aspect ratio
-    height_per_row = (width / n_columns) * avg_aspect / width_to_height_ratio
+    height_per_row = (width / n_columns) / width_to_height_ratio
 
     # Add extra space for titles, labels (10% per row)
     height = height_per_row * n_components * 1.1
