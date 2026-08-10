@@ -30,6 +30,7 @@ def compute_figsize(
     base_height_per_row: float = 2.5,
     width_ratios: list[float] | None = None,
     page_width: float | None = None,
+    width_to_height_ratio=1.618,
 ) -> tuple[float, float]:
     """Compute appropriate figure size based on subplot grid dimensions.
 
@@ -100,7 +101,7 @@ def compute_figsize(
 
     # Height per row should maintain reasonable aspect ratio
     # Use golden ratio (1.618) as default aspect for each subplot
-    height_per_row = (width / n_columns) * avg_aspect / 1.618
+    height_per_row = (width / n_columns) * avg_aspect / width_to_height_ratio
 
     # Add extra space for titles, labels (10% per row)
     height = height_per_row * n_components * 1.1

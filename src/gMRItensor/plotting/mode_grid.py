@@ -78,6 +78,7 @@ def plot_mode_grid(
         base_height_per_row=base_height_per_row,
         width_ratios=width_ratios,
         page_width=page_width,
+        width_to_height_ratio=1 / image_with_colorbar_ratio,
     )
     fig, axs = plt.subplots(
         n_components,
