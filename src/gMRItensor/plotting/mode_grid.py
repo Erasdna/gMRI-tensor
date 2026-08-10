@@ -28,8 +28,8 @@ def plot_mode_grid(
     subjects: list[str],
     subject_info: pd.DataFrame,
     group_variable: str,
-    base_width_per_col: float = 2.0,
-    base_height_per_row: float = 2.0,
+    base_width_per_col: float = 3.0,
+    base_height_per_row: float = 2.5,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
 
     # TODO: Verify the all inpute modes have same nb of components
