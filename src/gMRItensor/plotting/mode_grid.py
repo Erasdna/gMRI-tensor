@@ -116,4 +116,6 @@ def plot_mode_grid(
             divider = make_axes_locatable(ax)
             cax_divider = divider.append_axes("right", size="5%", pad=0.1)
             make_colorbar(fig, ax, im, cax_divider, None, None)
+            ax.set_xticks([])
+            ax.set_yticks([])
     return fig, axs
