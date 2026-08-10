@@ -172,7 +172,7 @@ def plot_spatial_mode(
         n_components=n_components,
         n_columns=4,
         page_width=page_width,
-        width_ratios=width_ratios,
+        width_ratios=width_ratios[:-1],
         width_to_height_ratio=width_to_height_ratio,
     )
     print(figsize)
