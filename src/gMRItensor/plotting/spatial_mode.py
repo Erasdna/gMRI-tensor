@@ -175,6 +175,7 @@ def plot_spatial_mode(
         width_ratios=width_ratios,
         width_to_height_ratio=width_to_height_ratio,
     )
+    print(figsize)
     for i, (name, ids_mask) in enumerate(
         zip(["CSF", "Parenchyma"], [csf_index_mask, parenchyma_index_mask]),
     ):
