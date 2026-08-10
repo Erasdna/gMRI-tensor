@@ -85,7 +85,6 @@ def plot_mode_grid(
         gridspec_kw={"width_ratios": width_ratios},
         figsize=figsize,
     )
-    fig.tight_layout()
 
     df = _prepare_plotting_dataframe(
         scaled_subject_mode,
