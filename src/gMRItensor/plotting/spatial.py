@@ -12,15 +12,29 @@ matplotlib.use("Agg")
 plt.style.use(["science", "no-latex"])
 
 
-def plot_enhancement_with_background(ax, background, signal, cmap, vmin, vmax):
+def plot_enhancement_with_background(
+    ax,
+    background,
+    signal,
+    cmap,
+    vmin,
+    vmax,
+    mask=None,
+):
     ax.imshow(
         background,
         cmap="gray",
         interpolation="nearest",
         rasterized=True,
     )
+    # If mask is provided, use it; otherwise mask zeros
+    if mask is not None:
+        masked_signal = np.ma.masked_where(~mask, signal)
+    else:
+        masked_signal = np.ma.masked_values(signal, 0)
+
     cax = ax.pcolormesh(
-        np.ma.masked_values(signal, 0),
+        masked_signal,
         cmap=cmap,
         alpha=0.995,
         vmin=vmin,
@@ -58,8 +72,14 @@ def plot_brain(
     vmin=0,
     vmax=2,
     label="Coefficient",
+    mask=None,
 ):
     print(vmin, vmax)
+
+    # Extract mask slices if mask is provided
+    mask_0 = np.flip(np.rot90(mask[slices[0]], 1), 1) if mask is not None else None
+    mask_1 = np.rot90(mask[:, slices[1]]) if mask is not None else None
+    mask_2 = np.rot90(mask[..., slices[2]], 1) if mask is not None else None
 
     plot_enhancement_with_background(
         ax[0],
@@ -68,6 +88,7 @@ def plot_brain(
         cmap,
         vmin,
         vmax,
+        mask=mask_0,
     )
 
     plot_enhancement_with_background(
@@ -77,6 +98,7 @@ def plot_brain(
         cmap,
         vmin,
         vmax,
+        mask=mask_1,
     )
 
     im = plot_enhancement_with_background(
@@ -86,6 +108,7 @@ def plot_brain(
         cmap,
         vmin,
         vmax,
+        mask=mask_2,
     )
 
     ax[-1].set_axis_off()
@@ -173,6 +196,10 @@ def plot_spatial_mode(
 
         for component in range(n_components):
             spatial_component = np.zeros(background_shape)
+            # Create mask of assigned voxels
+            voxel_mask = np.zeros(background_shape, dtype=bool)
+            voxel_mask[*index_list[ids_mask].T] = True
+
             spatial_component[*index_list[ids_mask].T] = scaled_spatial_mode[
                 ids_mask,
                 component,
@@ -187,5 +214,6 @@ def plot_spatial_mode(
                 vmin=np.percentile(spatial_component[spatial_component > 0], 5),
                 vmax=np.percentile(spatial_component[spatial_component > 0], 95),
                 label="Coefficient",
+                mask=voxel_mask,
             )
         yield big_fig, big_ax, name
