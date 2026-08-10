@@ -74,8 +74,6 @@ def plot_brain(
     label="Coefficient",
     mask=None,
 ):
-    print(vmin, vmax)
-
     # Extract mask slices if mask is provided
     mask_0 = np.flip(np.rot90(mask[slices[0]], 1), 1) if mask is not None else None
     mask_1 = np.rot90(mask[:, slices[1]]) if mask is not None else None
