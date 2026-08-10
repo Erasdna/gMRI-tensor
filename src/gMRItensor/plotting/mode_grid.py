@@ -142,7 +142,7 @@ def plot_mode_grid(
 
             # Remove temporary colorbar
             temp_cax.remove()
-
+            print(text_width_offset)
             # Create final colorbar with adjusted position
             cax_divider = inset_axes(
                 ax,
