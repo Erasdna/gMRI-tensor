@@ -139,12 +139,7 @@ def plot_spatial_mode(
     """
     assert spatial_mode.shape[0] == index_list.shape[0]
 
-    vmin = np.percentile(spatial_mode, 5, axis=0)
-    vmax = np.percentile(spatial_mode, 95, axis=0)
-    scaling = np.linalg.norm(spatial_mode, axis=0)
     scaled_spatial_mode = scale_mode(spatial_mode)
-    vmin_scaled = vmin / scaling
-    vmax_scaled = vmax / scaling
 
     scaled_spatial_mode = spatial_mode
     background_shape = background.shape
@@ -189,8 +184,8 @@ def plot_spatial_mode(
                 background,
                 "plasma",
                 slices,
-                vmin=vmin_scaled[component],
-                vmax=vmax_scaled[component],
+                vmin=np.percentile(spatial_component[ids_mask], 5),
+                vmax=np.percentile(spatial_component[ids_mask], 95),
                 label="Coefficient",
             )
         yield big_fig, big_ax, name
