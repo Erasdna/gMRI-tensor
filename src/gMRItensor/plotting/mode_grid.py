@@ -126,16 +126,16 @@ def plot_mode_grid(
             ax.set_xticks([])
             ax.set_yticks([])
 
-        if component == 0:
-            for ax_obj, title in zip(
-                axs[component],
-                [
-                    "Time mode",
-                    "Subject mode",
-                    "Spatial mode (Parenchyma)",
-                    "Spatial mode (CSF)",
-                ],
-            ):
-                ax_obj.set_title(title)
-            fig.align_titles()
+        # if component == 0:
+        #     for ax_obj, title in zip(
+        #         axs[component],
+        #         [
+        #             "Time mode",
+        #             "Subject mode",
+        #             "Spatial mode (Parenchyma)",
+        #             "Spatial mode (CSF)",
+        #         ],
+        #     ):
+        #         ax_obj.set_title(title)
+        #     fig.align_titles()
     return fig, axs
