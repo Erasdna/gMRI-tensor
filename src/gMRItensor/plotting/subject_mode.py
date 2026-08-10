@@ -342,8 +342,8 @@ def plot_subject_mode(
     subject_info: pd.DataFrame,
     group_variable: str,
     plotting_variables: list[str],
-    figsize: tuple[float, float] | None = None,
-    page_width: float | None = None,
+    page_width: float = 7.0,
+    width_to_height_ratio: float = 1.618,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """Plot subject mode components against group variables and plotting variables.
 
@@ -359,12 +359,11 @@ def plot_subject_mode(
         Column name in subject_info to use for grouping
     plotting_variables : list[str]
         List of column names in subject_info to correlate with components
-    figsize : tuple[float, float] | None, optional
-        Figure size (width, height). If None, automatically computed based on
-        subplot grid dimensions and font size. By default None.
-    page_width : float | None, optional
+    page_width : float, optional
         Target page width in inches (e.g., 3.5 for single column, 7.0 for double column).
-        If provided, overrides figsize. By default None.
+        By default 7.0.
+    width_to_height_ratio : float, optional
+        Desired width-to-height ratio for each subplot. By default 1.618 (golden ratio).
 
     Returns
     -------
@@ -385,11 +384,15 @@ def plot_subject_mode(
         plotting_variables,
     )
 
-    # Compute figsize if not provided
-    if figsize is None:
-        n_components = subject_mode.shape[1]
-        n_columns = 1 + len(plotting_variables)
-        figsize = compute_figsize(n_components, n_columns, page_width=page_width)
+    # Compute figsize
+    n_components = subject_mode.shape[1]
+    n_columns = 1 + len(plotting_variables)
+    figsize = compute_figsize(
+        n_components,
+        n_columns,
+        page_width=page_width,
+        width_to_height_ratio=width_to_height_ratio,
+    )
 
     fig, axs = plt.subplots(
         subject_mode.shape[1],
@@ -452,8 +455,8 @@ def plot_subject_mode_correlation(
     subjects: list[str],
     subject_info: pd.DataFrame,
     group_variable: str,
-    figsize: tuple[float, float] | None = None,
-    page_width: float | None = None,
+    page_width: float = 7.0,
+    width_to_height_ratio: float = 1.0,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """Plot correlation matrix of subject mode components with group comparisons.
 
@@ -471,12 +474,11 @@ def plot_subject_mode_correlation(
         DataFrame containing subject metadata
     group_variable : str
         Column name in subject_info to use for grouping and color-coding
-    figsize : tuple[float, float] | None, optional
-        Figure size (width, height). If None, automatically computed based on
-        number of components and font size. By default None.
-    page_width : float | None, optional
+    page_width : float, optional
         Target page width in inches (e.g., 3.5 for single column, 7.0 for double column).
-        If provided, overrides figsize. By default None.
+        By default 7.0.
+    width_to_height_ratio : float, optional
+        Desired width-to-height ratio for each subplot. By default 1.0 (square subplots).
 
     Returns
     -------
@@ -503,10 +505,14 @@ def plot_subject_mode_correlation(
         group_variable,
     )
 
-    # Compute figsize if not provided
+    # Compute figsize
     n_components = subject_mode.shape[1]
-    if figsize is None:
-        figsize = compute_figsize(n_components, n_components, page_width=page_width)
+    figsize = compute_figsize(
+        n_components,
+        n_components,
+        page_width=page_width,
+        width_to_height_ratio=width_to_height_ratio,
+    )
 
     fig, axs = plt.subplots(
         subject_mode.shape[1],

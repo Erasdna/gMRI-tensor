@@ -26,20 +26,17 @@ def scale_mode(arr: np.ndarray) -> np.ndarray:
 def compute_figsize(
     n_components: int,
     n_columns: int,
-    base_width_per_col: float = 3.0,
-    base_height_per_row: float = 2.5,
+    page_width: float,
     width_ratios: list[float] | None = None,
-    page_width: float | None = None,
-    width_to_height_ratio=1.618,
+    width_to_height_ratio: float = 1.618,
 ) -> tuple[float, float]:
-    """Compute appropriate figure size based on subplot grid dimensions.
+    """Compute appropriate figure size based on page width and aspect ratio.
 
     This function calculates a figure size that accounts for:
-    - Number of subplot rows (components) and columns
-    - Current matplotlib font size settings
-    - Space needed for legends, labels, and annotations
-    - Custom width ratios for columns (e.g., for images with different aspect ratios)
     - Target page width for journal submissions
+    - Number of subplot rows (components) and columns
+    - Custom width ratios for columns (e.g., for images with different aspect ratios)
+    - Desired width-to-height ratio for individual subplots
 
     Parameters
     ----------
@@ -47,20 +44,16 @@ def compute_figsize(
         Number of components (rows in the subplot grid)
     n_columns : int
         Number of columns in the subplot grid
-    base_width_per_col : float, optional
-        Base width per column in inches, by default 3.0
-        Only used if page_width is None
-    base_height_per_row : float, optional
-        Base height per row in inches, by default 2.5
+    page_width : float
+        Target page width in inches (e.g., 3.5 for single column, 7.0 for double column)
     width_ratios : list[float] | None, optional
         Relative width ratios for each column. If provided, these ratios
         are used to scale the width of each column. For example, [1, 0.5, 0.5, 0.1]
         means the first column is full width, second and third are half width,
-        and fourth (colorbar) is 10% width.
-    page_width : float | None, optional
-        Target page width in inches (e.g., 3.5 for single column, 7.0 for double column).
-        If provided, overrides base_width_per_col and computes optimal dimensions
-        to fit this width. By default None.
+        and fourth (colorbar) is 10% width. By default None.
+    width_to_height_ratio : float, optional
+        Desired width-to-height ratio for each subplot (width/height).
+        Default is 1.618 (golden ratio). By default 1.618.
 
     Returns
     -------
@@ -74,23 +67,8 @@ def compute_figsize(
     - 1.5 column: 5.5 inches
     - Double column: 7.0 inches
     """
-    # Get current font size from matplotlib rcParams
-    fontsize = plt.rcParams.get("font.size", 10)
-
-    # Scale base dimensions by font size relative to default (10pt)
-    font_scale = fontsize / 10.0
-
-    # Calculate width
-    if page_width is not None:
-        # Use target page width directly
-        width = page_width
-    elif width_ratios is not None:
-        # Normalize ratios and scale by base width
-        total_ratio = sum(width_ratios)
-        width = base_width_per_col * font_scale * total_ratio
-    else:
-        # Default: uniform column widths
-        width = base_width_per_col * font_scale * n_columns
+    # Use target page width directly
+    width = page_width
 
     # Calculate height based on width and aspect ratio
     if width_ratios is not None:
@@ -99,8 +77,7 @@ def compute_figsize(
     else:
         avg_aspect = 1.0
 
-    # Height per row should maintain reasonable aspect ratio
-    # Use golden ratio (1.618) as default aspect for each subplot
+    # Height per row should maintain the specified aspect ratio
     height_per_row = (width / n_columns) * avg_aspect / width_to_height_ratio
 
     # Add extra space for titles, labels (10% per row)

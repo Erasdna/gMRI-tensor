@@ -28,9 +28,8 @@ def plot_mode_grid(
     subjects: list[str],
     subject_info: pd.DataFrame,
     group_variable: str,
-    page_width: float | None = None,
-    base_width_per_col: float = 3.0,
-    base_height_per_row: float = 2.5,
+    page_width: float = 7.0,
+    width_to_height_ratio: float = 1.618,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
 
     # TODO: Verify the all inpute modes have same nb of components
@@ -74,11 +73,9 @@ def plot_mode_grid(
     figsize = compute_figsize(
         n_components=n_components,
         n_columns=4,
-        base_width_per_col=base_width_per_col,
-        base_height_per_row=base_height_per_row,
-        width_ratios=width_ratios,
         page_width=page_width,
-        width_to_height_ratio=image_with_colorbar_ratio,
+        width_ratios=width_ratios,
+        width_to_height_ratio=width_to_height_ratio,
     )
     fig, axs = plt.subplots(
         n_components,

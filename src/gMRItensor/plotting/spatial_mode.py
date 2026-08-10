@@ -137,10 +137,8 @@ def plot_spatial_mode(
     parenchyma_index_mask: np.ndarray,
     background: np.ndarray,
     slices: list,
-    figsize: tuple[float, float] | None = None,
-    page_width: float | None = None,
-    base_width_per_col: float = 2.0,
-    base_height_per_row: float = 2.0,
+    page_width: float = 7.0,
+    width_to_height_ratio: float = 1.618,
 ):
     """Plot spatial mode components mapped onto brain slices.
 
@@ -158,17 +156,11 @@ def plot_spatial_mode(
         Background image
     slices : list
         List of slice indices to plot
-    figsize : tuple[float, float] | None, optional
-        Figure size in inches. If None, automatically computed based on
-        image dimensions and number of components.
-    page_width : float | None, optional
+    page_width : float, optional
         Target page width in inches (e.g., 3.5 for single column, 7.0 for double column).
-        If provided, overrides figsize. By default None.
-    base_width_per_col : float, optional
-        Base width per column in inches for automatic sizing, by default 2.0
-        Only used if page_width is None.
-    base_height_per_row : float, optional
-        Base height per row in inches for automatic sizing, by default 2.0
+        By default 7.0.
+    width_to_height_ratio : float, optional
+        Desired width-to-height ratio for each subplot. By default 1.618 (golden ratio).
 
     Yields
     ------
@@ -188,16 +180,14 @@ def plot_spatial_mode(
     ]
     n_components = spatial_mode.shape[1]
 
-    # Compute figsize if not provided
-    if figsize is None:
-        figsize = compute_figsize(
-            n_components=n_components,
-            n_columns=4,
-            base_width_per_col=base_width_per_col,
-            base_height_per_row=base_height_per_row,
-            width_ratios=width_ratios,
-            page_width=page_width,
-        )
+    # Compute figsize
+    figsize = compute_figsize(
+        n_components=n_components,
+        n_columns=4,
+        page_width=page_width,
+        width_ratios=width_ratios,
+        width_to_height_ratio=width_to_height_ratio,
+    )
     for i, (name, ids_mask) in enumerate(
         zip(["CSF", "Parenchyma"], [csf_index_mask, parenchyma_index_mask]),
     ):
