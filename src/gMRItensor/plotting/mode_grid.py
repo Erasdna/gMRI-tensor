@@ -127,7 +127,7 @@ def plot_mode_grid(
                 loc="center right",
                 bbox_to_anchor=(0.05, 0.0, 1, 1),
                 bbox_transform=ax.transAxes,
-                borderpad=0.1,
+                borderpad=0.5,
             )
             make_colorbar(fig, ax, im, cax_divider, None)
             ax.set_xticks([])
