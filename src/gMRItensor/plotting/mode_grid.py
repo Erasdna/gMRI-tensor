@@ -39,7 +39,7 @@ def plot_mode_grid(
     scaled_time_mode = scale_mode(time_mode)
     scaled_subject_mode = scale_mode(subject_mode)
 
-    width_ratios = [1, 1, 1.2, 1.2]
+    width_ratios = [1, 1, 1.05, 1.05]
     figsize = compute_figsize(
         n_components=n_components,
         n_columns=4,
@@ -133,16 +133,16 @@ def plot_mode_grid(
             ax.set_xticks([])
             ax.set_yticks([])
 
-        # if component == 0:
-        #     for ax_obj, title in zip(
-        #         axs[component],
-        #         [
-        #             "Time mode",
-        #             "Subject mode",
-        #             "Spatial mode (Parenchyma)",
-        #             "Spatial mode (CSF)",
-        #         ],
-        #     ):
-        #         ax_obj.set_title(title)
-        #     fig.align_titles()
+        if component == 0:
+            for ax_obj, title in zip(
+                axs[component],
+                [
+                    "Time mode",
+                    "Subject mode",
+                    "Spatial mode (Parenchyma)",
+                    "Spatial mode (CSF)",
+                ],
+            ):
+                ax_obj.set_title(title)
+            fig.align_titles()
     return fig, axs
