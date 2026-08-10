@@ -44,9 +44,31 @@ def plot_mode_grid(
     sagittal_shape = background[sagittal_slice].shape  # (height, width)
     image_aspect_ratio = sagittal_shape[0] / sagittal_shape[1]
 
+    # Create temporary figure to measure colorbar width
+    temp_fig, temp_ax = plt.subplots(1, 1, figsize=(5, 5))
+    temp_data = np.random.rand(10, 10)
+    temp_im = temp_ax.imshow(temp_data)
+    temp_cax = inset_axes(
+        temp_ax,
+        width="5%",
+        height="80%",
+        loc="center right",
+        bbox_to_anchor=(0.15, 0.0, 1, 1),
+        bbox_transform=temp_ax.transAxes,
+        borderpad=0,
+    )
+    text_width_offset = make_colorbar(temp_fig, temp_ax, temp_im, temp_cax, None)
+
+    # Calculate colorbar width fraction in axes coordinates
+    # Colorbar is 5% width + text_width_offset + bbox_to_anchor offset (0.15)
+    colorbar_width_fraction = 0.05 + text_width_offset + 0.15
+    plt.close(temp_fig)
+
     # Time and subject plots are roughly square (aspect ratio ~1)
-    # Spatial images have their natural aspect ratio
-    width_ratios = [1, 1, image_aspect_ratio, image_aspect_ratio]
+    # Spatial images need extra width for colorbar
+    image_with_colorbar_ratio = image_aspect_ratio * (1 + colorbar_width_fraction)
+
+    width_ratios = [1, 1, image_with_colorbar_ratio, image_with_colorbar_ratio]
 
     figsize = compute_figsize(
         n_components=n_components,
