@@ -125,7 +125,7 @@ def plot_mode_grid(
                 width="5%",
                 height="80%",
                 loc="center right",
-                bbox_to_anchor=(0.1, 0.0, 1, 1),
+                bbox_to_anchor=(0.12, 0.0, 1, 1),
                 bbox_transform=ax.transAxes,
                 borderpad=0,
             )

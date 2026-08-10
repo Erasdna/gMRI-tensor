@@ -54,11 +54,8 @@ def make_colorbar(fig, ax, cax, cax_divider, label):
         use_gridspec=True,
         format=formatter,
     )
-    # Position exponent on the right side below the top edge
     cbar.ax.yaxis.offsetText.set_visible(True)
-    # cbar.ax.yaxis.set_offset_position("left")
     cbar.ax.yaxis.offsetText.set_horizontalalignment("center")
-    # cbar.ax.yaxis.offsetText.set_verticalalignment("top")
     cbar.set_label(label=label)
 
 
