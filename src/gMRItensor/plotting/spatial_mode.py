@@ -94,7 +94,7 @@ def plot_brain(
 
     # Create temporary colorbar to measure exponent text width
     temp_cax = inset_axes(ax[-1], width="100%", height="80%", loc="center")
-    text_width_offset = create_colorbar_with_offset(fig, ax[-1], im, temp_cax, label)
+    # text_width_offset = create_colorbar_with_offset(fig, ax[-1], im, temp_cax, label)
 
     # Remove temporary colorbar
     temp_cax.remove()
@@ -106,7 +106,7 @@ def plot_brain(
         width="100%",
         height="80%",
         loc="center",
-        bbox_to_anchor=(-text_width_offset, 0.0, 1, 1),
+        bbox_to_anchor=(0, 0.0, 1, 1),
         bbox_transform=ax[-1].transAxes,
         borderpad=0,
     )
