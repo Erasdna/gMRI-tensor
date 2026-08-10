@@ -29,6 +29,7 @@ def compute_figsize(
     base_width_per_col: float = 3.0,
     base_height_per_row: float = 2.5,
     width_ratios: list[float] | None = None,
+    page_width: float | None = None,
 ) -> tuple[float, float]:
     """Compute appropriate figure size based on subplot grid dimensions.
 
@@ -37,6 +38,7 @@ def compute_figsize(
     - Current matplotlib font size settings
     - Space needed for legends, labels, and annotations
     - Custom width ratios for columns (e.g., for images with different aspect ratios)
+    - Target page width for journal submissions
 
     Parameters
     ----------
@@ -46,6 +48,7 @@ def compute_figsize(
         Number of columns in the subplot grid
     base_width_per_col : float, optional
         Base width per column in inches, by default 3.0
+        Only used if page_width is None
     base_height_per_row : float, optional
         Base height per row in inches, by default 2.5
     width_ratios : list[float] | None, optional
@@ -53,11 +56,22 @@ def compute_figsize(
         are used to scale the width of each column. For example, [1, 0.5, 0.5, 0.1]
         means the first column is full width, second and third are half width,
         and fourth (colorbar) is 10% width.
+    page_width : float | None, optional
+        Target page width in inches (e.g., 3.5 for single column, 7.0 for double column).
+        If provided, overrides base_width_per_col and computes optimal dimensions
+        to fit this width. By default None.
 
     Returns
     -------
     tuple[float, float]
         Figure size as (width, height) in inches
+
+    Notes
+    -----
+    Common journal page widths:
+    - Single column: 3.5 inches
+    - 1.5 column: 5.5 inches
+    - Double column: 7.0 inches
     """
     # Get current font size from matplotlib rcParams
     fontsize = plt.rcParams.get("font.size", 10)
@@ -65,8 +79,11 @@ def compute_figsize(
     # Scale base dimensions by font size relative to default (10pt)
     font_scale = fontsize / 10.0
 
-    # Calculate width based on width_ratios if provided
-    if width_ratios is not None:
+    # Calculate width
+    if page_width is not None:
+        # Use target page width directly
+        width = page_width
+    elif width_ratios is not None:
         # Normalize ratios and scale by base width
         total_ratio = sum(width_ratios)
         width = base_width_per_col * font_scale * total_ratio
@@ -74,9 +91,19 @@ def compute_figsize(
         # Default: uniform column widths
         width = base_width_per_col * font_scale * n_columns
 
-    # Calculate height: scale by number of rows
-    # Reduce height slightly to account for title space with tight layout
-    height = base_height_per_row * font_scale * n_components * 1.1
+    # Calculate height based on width and aspect ratio
+    if width_ratios is not None:
+        # Compute average aspect ratio from width_ratios
+        avg_aspect = sum(width_ratios) / len(width_ratios)
+    else:
+        avg_aspect = 1.0
+
+    # Height per row should maintain reasonable aspect ratio
+    # Use golden ratio (1.618) as default aspect for each subplot
+    height_per_row = (width / n_columns) * avg_aspect / 1.618
+
+    # Add extra space for titles, labels (10% per row)
+    height = height_per_row * n_components * 1.1
 
     return (width, height)
 

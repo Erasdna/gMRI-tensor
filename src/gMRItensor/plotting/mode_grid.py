@@ -28,6 +28,7 @@ def plot_mode_grid(
     subjects: list[str],
     subject_info: pd.DataFrame,
     group_variable: str,
+    page_width: float | None = None,
     base_width_per_col: float = 3.0,
     base_height_per_row: float = 2.5,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
@@ -76,6 +77,7 @@ def plot_mode_grid(
         base_width_per_col=base_width_per_col,
         base_height_per_row=base_height_per_row,
         width_ratios=width_ratios,
+        page_width=page_width,
     )
     fig, axs = plt.subplots(
         n_components,
@@ -164,7 +166,6 @@ def plot_mode_grid(
 
             # Remove temporary colorbar
             temp_cax.remove()
-            print(text_width_offset)
             # Create final colorbar with adjusted position
             cax_divider = inset_axes(
                 ax,

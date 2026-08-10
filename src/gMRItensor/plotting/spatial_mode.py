@@ -138,6 +138,7 @@ def plot_spatial_mode(
     background: np.ndarray,
     slices: list,
     figsize: tuple[float, float] | None = None,
+    page_width: float | None = None,
     base_width_per_col: float = 2.0,
     base_height_per_row: float = 2.0,
 ):
@@ -160,8 +161,12 @@ def plot_spatial_mode(
     figsize : tuple[float, float] | None, optional
         Figure size in inches. If None, automatically computed based on
         image dimensions and number of components.
+    page_width : float | None, optional
+        Target page width in inches (e.g., 3.5 for single column, 7.0 for double column).
+        If provided, overrides figsize. By default None.
     base_width_per_col : float, optional
         Base width per column in inches for automatic sizing, by default 2.0
+        Only used if page_width is None.
     base_height_per_row : float, optional
         Base height per row in inches for automatic sizing, by default 2.0
 
@@ -191,6 +196,7 @@ def plot_spatial_mode(
             base_width_per_col=base_width_per_col,
             base_height_per_row=base_height_per_row,
             width_ratios=width_ratios,
+            page_width=page_width,
         )
     for i, (name, ids_mask) in enumerate(
         zip(["CSF", "Parenchyma"], [csf_index_mask, parenchyma_index_mask]),

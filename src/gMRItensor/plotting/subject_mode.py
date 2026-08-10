@@ -343,6 +343,7 @@ def plot_subject_mode(
     group_variable: str,
     plotting_variables: list[str],
     figsize: tuple[float, float] | None = None,
+    page_width: float | None = None,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """Plot subject mode components against group variables and plotting variables.
 
@@ -358,9 +359,12 @@ def plot_subject_mode(
         Column name in subject_info to use for grouping
     plotting_variables : list[str]
         List of column names in subject_info to correlate with components
-    figsize : tuple[int, int] | None, optional
+    figsize : tuple[float, float] | None, optional
         Figure size (width, height). If None, automatically computed based on
         subplot grid dimensions and font size. By default None.
+    page_width : float | None, optional
+        Target page width in inches (e.g., 3.5 for single column, 7.0 for double column).
+        If provided, overrides figsize. By default None.
 
     Returns
     -------
@@ -385,7 +389,7 @@ def plot_subject_mode(
     if figsize is None:
         n_components = subject_mode.shape[1]
         n_columns = 1 + len(plotting_variables)
-        figsize = compute_figsize(n_components, n_columns)
+        figsize = compute_figsize(n_components, n_columns, page_width=page_width)
 
     fig, axs = plt.subplots(
         subject_mode.shape[1],
@@ -449,6 +453,7 @@ def plot_subject_mode_correlation(
     subject_info: pd.DataFrame,
     group_variable: str,
     figsize: tuple[float, float] | None = None,
+    page_width: float | None = None,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """Plot correlation matrix of subject mode components with group comparisons.
 
@@ -469,6 +474,9 @@ def plot_subject_mode_correlation(
     figsize : tuple[float, float] | None, optional
         Figure size (width, height). If None, automatically computed based on
         number of components and font size. By default None.
+    page_width : float | None, optional
+        Target page width in inches (e.g., 3.5 for single column, 7.0 for double column).
+        If provided, overrides figsize. By default None.
 
     Returns
     -------
@@ -498,7 +506,7 @@ def plot_subject_mode_correlation(
     # Compute figsize if not provided
     n_components = subject_mode.shape[1]
     if figsize is None:
-        figsize = compute_figsize(n_components, n_components)
+        figsize = compute_figsize(n_components, n_components, page_width=page_width)
 
     fig, axs = plt.subplots(
         subject_mode.shape[1],
