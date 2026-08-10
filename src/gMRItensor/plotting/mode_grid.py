@@ -53,6 +53,7 @@ def plot_mode_grid(
         gridspec_kw={"width_ratios": width_ratios},
         figsize=figsize,
     )
+    fig.tight_layout()
 
     df = _prepare_plotting_dataframe(
         scaled_subject_mode,
@@ -123,7 +124,7 @@ def plot_mode_grid(
 
         if component == 0:
             for ax_obj, title in zip(
-                ax,
+                axs[component],
                 [
                     "Time mode",
                     "Subject mode",
