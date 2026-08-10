@@ -170,7 +170,7 @@ def plot_spatial_mode(
     # Compute figsize
     figsize = compute_figsize(
         n_components=n_components,
-        n_columns=3,
+        n_columns=sum(width_ratios),
         page_width=page_width,
         width_ratios=width_ratios[:-1],
         width_to_height_ratio=width_to_height_ratio,
