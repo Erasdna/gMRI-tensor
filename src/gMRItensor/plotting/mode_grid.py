@@ -88,7 +88,7 @@ def plot_mode_grid(
         4,
         gridspec_kw={"width_ratios": width_ratios},
         figsize=figsize,
-        layout="compressed",
+        layout="constrained",
     )
 
     df = _prepare_plotting_dataframe(
