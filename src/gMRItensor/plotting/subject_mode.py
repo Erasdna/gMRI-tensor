@@ -402,6 +402,7 @@ def plot_subject_mode(
         1 + len(plotting_variables),
         width_ratios=[1] + [1] * len(plotting_variables),
         figsize=figsize,
+        layout="compressed",
     )
     fig.tight_layout()
 
