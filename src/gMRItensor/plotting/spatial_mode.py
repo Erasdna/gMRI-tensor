@@ -205,7 +205,7 @@ def plot_spatial_mode(
                 slices,
                 vmin=np.percentile(spatial_component[spatial_component > 0], 5),
                 vmax=np.percentile(spatial_component[spatial_component > 0], 95),
-                label="Coefficient",
+                label="",
                 mask=voxel_mask,
             )
         yield big_fig, big_ax, name
