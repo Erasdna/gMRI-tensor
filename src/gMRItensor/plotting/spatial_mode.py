@@ -185,7 +185,6 @@ def plot_spatial_mode(
             figsize=figsize,
             gridspec_kw={"width_ratios": width_ratios},
         )
-        big_fig.tight_layout()
 
         for component in range(n_components):
             spatial_component = np.zeros(background_shape)
