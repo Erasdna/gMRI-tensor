@@ -522,8 +522,8 @@ def plot_subject_mode_correlation(
         n_components,
         width_ratios=[1] * n_components,
         figsize=figsize,
+        layout="compressed",
     )
-    fig.tight_layout()
 
     ylims_list = []
     xlim_list = []

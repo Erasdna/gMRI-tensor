@@ -90,6 +90,11 @@ def plot_mode_grid(
         figsize=figsize,
         layout="constrained",
     )
+    fig.set_layout_engine(
+        "constrained",
+        w_pad=0.02,  # Width padding between axes
+        h_pad=0.02,  # Height padding between axes
+    )
 
     df = _prepare_plotting_dataframe(
         scaled_subject_mode,

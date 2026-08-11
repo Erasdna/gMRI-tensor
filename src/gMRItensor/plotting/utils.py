@@ -28,6 +28,7 @@ def compute_figsize(
     page_width: float,
     width_ratios: list[float] | None = None,
     width_to_height_ratio: float = 1.618,
+    add_title_margin=True,
 ) -> tuple[float, float]:
     """Compute appropriate figure size based on page width and aspect ratio.
 
@@ -73,7 +74,7 @@ def compute_figsize(
     height_per_row = (width / n_columns) / width_to_height_ratio
 
     # Add extra space for titles, labels (10% per row)
-    height = height_per_row * n_components * 1.1
+    height = height_per_row * n_components * (1.1 if add_title_margin else 1.0)
 
     return (width, height)
 
