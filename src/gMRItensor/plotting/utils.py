@@ -141,7 +141,7 @@ def create_colorbar_with_offset(
         class PrecisionScalarFormatter(plt.matplotlib.ticker.ScalarFormatter):
             def _set_format(self):
                 # Override to set custom precision
-                self.format = f"%1.{precision}e"
+                self.format = f"%.{precision}f"
 
         formatter = PrecisionScalarFormatter(useMathText=True)
         formatter.set_scientific(True)
