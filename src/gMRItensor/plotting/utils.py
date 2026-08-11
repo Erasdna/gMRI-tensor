@@ -100,6 +100,8 @@ def create_colorbar_with_offset(
     mappable,
     cax,
     label: str | None = None,
+    format_string: str | None = None,
+    precision: int = 1,
 ) -> float:
     """Create a colorbar with scientific notation and return required offset.
 
@@ -119,6 +121,13 @@ def create_colorbar_with_offset(
         Axes for the colorbar
     label : str | None, optional
         Label for the colorbar. By default None.
+    format_string : str | None, optional
+        Format string for colorbar tick labels (e.g., ':.2f', ':.1e').
+        If provided, this overrides the precision parameter.
+        By default None.
+    precision : int, optional
+        Number of decimal places to show in scientific notation.
+        Only used when format_string is None. By default 2.
 
     Returns
     -------
@@ -127,9 +136,36 @@ def create_colorbar_with_offset(
         This value represents half the text width and can be used to adjust
         the position of the colorbar to prevent overlap.
     """
-    formatter = plt.matplotlib.ticker.ScalarFormatter(useMathText=True)
-    formatter.set_scientific(True)
-    formatter.set_powerlimits((0, 0))
+    if format_string is None:
+        formatter = plt.matplotlib.ticker.ScalarFormatter(useMathText=True)
+        formatter.set_scientific(True)
+        formatter.set_powerlimits((0, 0))
+        formatter.set_useOffset(False)
+        # Set the format to show 'precision' decimal places
+        formatter.set_useMathText(True)
+
+        # Create a custom format function to control precision
+        def format_func(x, pos):
+            if x == 0:
+                return "0"
+            exponent = int(np.floor(np.log10(abs(x))))
+            mantissa = x / 10**exponent
+            return f"{{:.{precision}f}}".format(mantissa)
+
+        # We need to use FuncFormatter for precise control
+        formatter = plt.matplotlib.ticker.FuncFormatter(
+            lambda x, pos: format_func(x, pos) if x != 0 else "0",
+        )
+
+        # Actually, ScalarFormatter with format specification is simpler
+        formatter = plt.matplotlib.ticker.ScalarFormatter(useMathText=True)
+        formatter.set_scientific(True)
+        formatter.set_powerlimits((0, 0))
+        formatter.set_useOffset(False)
+        # This sets the number of decimal places
+        formatter.format = f"%.{precision}e"
+    else:
+        formatter = plt.matplotlib.ticker.StrMethodFormatter(format_string)
 
     cbar = fig.colorbar(
         mappable,
