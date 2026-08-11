@@ -105,7 +105,7 @@ def plot_brain(
         ax[-1],
         width="100%",
         height="70%",
-        loc="center",
+        loc="center right",
         bbox_to_anchor=(text_width_offset, 0.0, 1, 1),
         bbox_transform=ax[-1].transAxes,
         borderpad=0,
