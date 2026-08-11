@@ -516,13 +516,12 @@ def plot_subject_mode_correlation(
         page_width=page_width,
         width_to_height_ratio=width_to_height_ratio,
     )
-
+    print(figsize)
     fig, axs = plt.subplots(
         subject_mode.shape[1],
         n_components,
         width_ratios=[1] * n_components,
         figsize=figsize,
-        layout="tight",
     )
 
     ylims_list = []
