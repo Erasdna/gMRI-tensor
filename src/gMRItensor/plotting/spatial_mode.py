@@ -116,7 +116,7 @@ def plot_brain(
         im,
         cax,
         label,
-        horizontal_alignment="right",
+        horizontal_alignment="left",
     )
 
     for jj in range(len(ax)):
