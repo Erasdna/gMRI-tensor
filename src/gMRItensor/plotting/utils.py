@@ -102,6 +102,7 @@ def create_colorbar_with_offset(
     label: str | None = None,
     format_string: str | None = None,
     precision: int = 1,
+    horizontal_alignment="center",
 ) -> float:
     """Create a colorbar with scientific notation and return required offset.
 
@@ -159,7 +160,7 @@ def create_colorbar_with_offset(
     )
     # Center-align the exponent text above the colorbar
     cbar.ax.yaxis.offsetText.set_visible(True)
-    cbar.ax.yaxis.offsetText.set_horizontalalignment("center")
+    cbar.ax.yaxis.offsetText.set_horizontalalignment(horizontal_alignment)
     cbar.set_label(label=label)
 
     # Force draw to get accurate text dimensions

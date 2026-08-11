@@ -110,7 +110,14 @@ def plot_brain(
         bbox_transform=ax[-1].transAxes,
         borderpad=0,
     )
-    create_colorbar_with_offset(fig, ax[-1], im, cax, label)
+    create_colorbar_with_offset(
+        fig,
+        ax[-1],
+        im,
+        cax,
+        label,
+        horizontal_alignment="right",
+    )
 
     for jj in range(len(ax)):
         ax[jj].set_xticks([])
