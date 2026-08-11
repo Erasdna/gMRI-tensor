@@ -137,33 +137,16 @@ def create_colorbar_with_offset(
         the position of the colorbar to prevent overlap.
     """
     if format_string is None:
-        formatter = plt.matplotlib.ticker.ScalarFormatter(useMathText=True)
+        # Subclass ScalarFormatter to control precision
+        class PrecisionScalarFormatter(plt.matplotlib.ticker.ScalarFormatter):
+            def _set_format(self):
+                # Override to set custom precision
+                self.format = f"%1.{precision}e"
+
+        formatter = PrecisionScalarFormatter(useMathText=True)
         formatter.set_scientific(True)
         formatter.set_powerlimits((0, 0))
         formatter.set_useOffset(False)
-        # Set the format to show 'precision' decimal places
-        formatter.set_useMathText(True)
-
-        # Create a custom format function to control precision
-        def format_func(x, pos):
-            if x == 0:
-                return "0"
-            exponent = int(np.floor(np.log10(abs(x))))
-            mantissa = x / 10**exponent
-            return f"{{:.{precision}f}}".format(mantissa)
-
-        # We need to use FuncFormatter for precise control
-        formatter = plt.matplotlib.ticker.FuncFormatter(
-            lambda x, pos: format_func(x, pos) if x != 0 else "0",
-        )
-
-        # Actually, ScalarFormatter with format specification is simpler
-        formatter = plt.matplotlib.ticker.ScalarFormatter(useMathText=True)
-        formatter.set_scientific(True)
-        formatter.set_powerlimits((0, 0))
-        formatter.set_useOffset(False)
-        # This sets the number of decimal places
-        formatter.format = f"%.{precision}e"
     else:
         formatter = plt.matplotlib.ticker.StrMethodFormatter(format_string)
 
