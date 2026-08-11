@@ -97,6 +97,7 @@ def plot_mode_grid(
         subject_info,
         group_variable,
     )
+
     for component in range(n_components):
 
         # Plot time mode
@@ -123,6 +124,7 @@ def plot_mode_grid(
             y_column=f"comp_{component}",
             legend=False,
         )
+
         subject_ax.set_ylabel("")
         if component == n_components - 1:
             subject_ax.set_xlabel("Patient group")
@@ -196,4 +198,5 @@ def plot_mode_grid(
             ):
                 ax_obj.set_title(title)
             fig.align_titles()
+
     return fig, axs

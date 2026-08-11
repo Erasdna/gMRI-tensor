@@ -149,6 +149,9 @@ def make_subject_boxplot(
     ax.set_xticklabels(categories)
     ax.set_xlabel(x_column)
 
+    if required_xlim is None:
+        ax.set_xlim(-0.25, (n_categories - 1) + 0.25)
+
     return ax.get_ylim(), required_xlim
 
 
