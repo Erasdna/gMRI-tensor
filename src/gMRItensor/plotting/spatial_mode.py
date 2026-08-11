@@ -93,7 +93,7 @@ def plot_brain(
     ax[-1].set_axis_off()
 
     # Create temporary colorbar to measure exponent text width
-    temp_cax = inset_axes(ax[-1], width="100%", height="80%", loc="center")
+    temp_cax = inset_axes(ax[-1], width="100%", height="70%", loc="center right")
     text_width_offset = create_colorbar_with_offset(fig, ax[-1], im, temp_cax, label)
 
     # Remove temporary colorbar
