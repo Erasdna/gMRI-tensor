@@ -1,3 +1,4 @@
+from itertools import starmap
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Callable
@@ -99,4 +100,18 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
                 }
 
                 results_dict.append(tmp_dict)
+    else:
+        for i, (labels, values) in tenumerate(
+            starmap(_compute_tracer_worker, args_list),
+            total=len(args_list),
+            desc="Computing tracer signal sequential",
+        ):
+            tmp_dict = {
+                "labels": labels,
+                "values": values,
+                "subject": args_list[i]["subject"],
+                "time_point": args_list[i]["time_point"],
+            }
+
+            results_dict.append(tmp_dict)
     return results_dict
