@@ -102,7 +102,7 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
                 results_dict.append(tmp_dict)
     else:
         for i, (labels, values) in tenumerate(
-            starmap(_compute_tracer_worker, args_list),
+            list(starmap(_compute_tracer_worker, args_list)),
             total=len(args_list),
             desc="Computing tracer signal sequential",
         ):
