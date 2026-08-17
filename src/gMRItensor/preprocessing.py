@@ -60,7 +60,7 @@ def compute_tracer_from_image(
         values = labeled_comprehension(
             tracer,
             segmentation,
-            unique_labels,
+            unique_labels[unique_labels > 1e-6],
             func,
             default=np.nan,
             out_dtype=float,
