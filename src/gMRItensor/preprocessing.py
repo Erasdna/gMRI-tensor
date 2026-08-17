@@ -6,7 +6,7 @@ import nibabel as nib
 import numexpr as ne
 import numpy as np
 from scipy.ndimage import labeled_comprehension
-from tqdm import tqdm
+from tqdm.contrib import tenumerate
 
 
 def compute_tracer(baseline: np.ndarray, post_injection: np.ndarray, signal_type: str):
@@ -86,8 +86,8 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
     if n_procs > 1:
         ne.set_num_threads(1)
         with Pool(n_procs) as pool:
-            for i, labels, values in tqdm(
-                enumerate(pool.imap(_compute_tracer_worker, args_list)),
+            for i, labels, values in tenumerate(
+                pool.imap(_compute_tracer_worker, args_list),
                 total=len(args_list),
                 desc="Computing tracer signal in parallel",
             ):
