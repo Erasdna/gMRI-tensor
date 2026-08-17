@@ -18,6 +18,8 @@ license = {file = "LICENSE"}
 # Direct dependencies
 dependencies = [
     "h5py>=3.16.0",
+    "nibabel>=5.4.2",
+    "numexpr>=2.14.1",
     'numpy',
     "scienceplots>=2.2.2",
     "scikit-learn>=1.7.2",
