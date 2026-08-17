@@ -65,7 +65,7 @@ def compute_tracer_from_image(
             default=np.nan,
             out_dtype=float,
         )
-        return unique_labels, values
+        return unique_labels.astype(int), values
     else:
         return None, tracer
 
