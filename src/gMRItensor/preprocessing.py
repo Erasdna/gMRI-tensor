@@ -62,6 +62,7 @@ def compute_tracer_from_image(
             unique_labels,
             func,
             default=np.nan,
+            out_dtype=float,
         )
         return unique_labels, values
     else:
