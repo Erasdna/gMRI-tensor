@@ -216,4 +216,6 @@ def plot_spatial_mode(
                 label="",
                 mask=voxel_mask,
             )
+            big_ax[component][0].set_ylabel(f"Component {component+1}")
+
         yield big_fig, big_ax, name
