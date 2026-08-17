@@ -87,7 +87,6 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
         with Pool(n_procs) as pool:
             for i, labels, values in tqdm(
                 enumerate(pool.imap(_compute_tracer_worker, args_list)),
-                total=len(args_list),
                 desc="Computing tracer signal in parallel",
             ):
                 tmp_dict = {
