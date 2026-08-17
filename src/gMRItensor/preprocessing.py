@@ -5,6 +5,7 @@ from typing import Callable
 import nibabel as nib
 import numexpr as ne
 import numpy as np
+import pandas as pd
 from scipy.ndimage import labeled_comprehension
 from tqdm.contrib import tenumerate
 
@@ -96,7 +97,7 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
                 "time_point": args["time_point"],
             }
 
-            results_dict.append(tmp_dict)
+            results_dict.append(pd.DataFrame(tmp_dict))
     else:
         ne.set_num_threads(1)
         with Pool(n_procs) as pool:
@@ -112,5 +113,5 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
                     "time_point": args_list[i]["time_point"],
                 }
 
-                results_dict.append(tmp_dict)
+                results_dict.append(pd.DataFrame(tmp_dict))
     return results_dict
