@@ -114,4 +114,4 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
                 }
 
                 results_dict.append(pd.DataFrame(tmp_dict))
-    return results_dict
+    return pd.concat(results_dict, ignore_index=True)
