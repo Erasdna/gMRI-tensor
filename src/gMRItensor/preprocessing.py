@@ -57,10 +57,11 @@ def compute_tracer_from_image(
         assert np.allclose(baseline_nifti.affine, segmentation_nifti.affine)
         segmentation = segmentation_nifti.get_fdata()[mask > 0]
         unique_labels = np.unique(segmentation)
+        unique_labels = unique_labels[unique_labels > 1e-6]
         values = labeled_comprehension(
             tracer,
             segmentation,
-            unique_labels[unique_labels > 1e-6],
+            unique_labels,
             func,
             default=np.nan,
             out_dtype=float,
