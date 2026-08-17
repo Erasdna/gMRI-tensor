@@ -70,12 +70,12 @@ def compute_tracer_from_image(
 
 def _compute_tracer_worker(args):
     return compute_tracer_from_image(
-        args.baseline_path,
-        args.post_injection_path,
-        args.signal_type,
-        args.mask_path,
-        args.segmentation_path,
-        func=args.func,
+        args["baseline_path"],
+        args["post_injection_path"],
+        args["signal_type"],
+        args["mask_path"],
+        args["segmentation_path"],
+        func=args["func"],
     )
 
 
@@ -93,8 +93,8 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
                 tmp_dict = {
                     "labels": labels,
                     "values": values,
-                    "subject": args_list[i].subject,
-                    "time_point": args_list[i].time_point,
+                    "subject": args_list[i]["subject"],
+                    "time_point": args_list[i]["time_point"],
                 }
 
                 results_dict.append(tmp_dict)
