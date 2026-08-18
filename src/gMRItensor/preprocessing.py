@@ -116,3 +116,49 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
 
                 results_dict.append(pd.DataFrame(tmp_dict))
     return pd.concat(results_dict, ignore_index=True)
+
+
+def prepare_tensor(df: pd.DataFrame, group_filtering: tuple[str, str] | None = None):
+    if group_filtering is not None:
+        df = df.query(f"{group_filtering[0]}=='{group_filtering[1]}'")
+
+    # Make pivot table
+    pivot_df = df.pivot_table(
+        index=["subject", "time_point"],
+        columns="labels",
+        values="values",
+        aggfunc="first",  # Handles single value per cell
+    )
+
+    # Find all subjects with all time points
+    subjects_by_tp = pivot_df.unstack(level="time_point")
+    complete_subjects_mask = ~subjects_by_tp.isna().all(axis=1)
+    valid_subjects = subjects_by_tp[complete_subjects_mask].index
+
+    # Filter the pivoted dataframe to valid subjects only
+    pivot_df = pivot_df.loc[
+        pivot_df.index.get_level_values("subject").isin(valid_subjects)
+    ]
+
+    # Drop nan values
+    valid_pivot = pivot_df.dropna(axis=1, how="any")
+
+    # Find all subjects, time points and labels remaining
+    retained_subjects = sorted(valid_pivot.index.get_level_values("subject").unique())
+    retained_timepoints = sorted(
+        valid_pivot.index.get_level_values("time_point").unique(),
+    )
+    retained_labels = valid_pivot.columns.tolist()
+
+    # Reshape to (subjects x time_points x labels)
+    numpy_3d = valid_pivot.to_numpy().reshape(
+        len(retained_subjects),
+        len(retained_timepoints),
+        len(retained_labels),
+    )
+    return (
+        numpy_3d,
+        np.array(retained_subjects).astype(str),
+        np.array(retained_timepoints).astype(int),
+        np.array(retained_labels).astype(int),
+    )
