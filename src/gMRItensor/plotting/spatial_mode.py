@@ -193,6 +193,8 @@ def plot_spatial_mode(
             gridspec_kw={"width_ratios": width_ratios},
             layout="compressed",
         )
+        if n_components == 1:
+            big_ax = [big_ax]
 
         for component in range(n_components):
             spatial_component = np.zeros(background_shape)
