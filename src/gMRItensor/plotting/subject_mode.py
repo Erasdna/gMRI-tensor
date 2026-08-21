@@ -22,6 +22,7 @@ def make_subject_boxplot(
     y_column: str,
     legend: bool = True,
     colors: list | None = None,
+    violinplot=False,
 ) -> tuple[tuple[float, float], float | None]:
     """Create a boxplot with statistical annotations and optional legend.
 
@@ -75,20 +76,47 @@ def make_subject_boxplot(
     category_to_position = {cat: i for i, cat in enumerate(categories)}
     df_plot["_x_position"] = df_plot[x_column].map(category_to_position)
 
-    boxplot = sns.boxplot(
-        data=df_plot,
-        x="_x_position",
-        y=y_column,
-        hue=x_column,
-        ax=ax,
-        palette=colors,
-        width=0.25,
-        legend=False,
-        boxprops=dict(alpha=0.7),
-        patch_artist=True,
-        linewidth=1.5,
-        saturation=1,
-    )
+    if not violinplot:
+        plot = sns.boxplot(
+            data=df_plot,
+            x="_x_position",
+            y=y_column,
+            hue=x_column,
+            ax=ax,
+            palette=colors,
+            width=0.25,
+            legend=False,
+            boxprops=dict(alpha=0.7),
+            patch_artist=True,
+            linewidth=1.5,
+            saturation=1,
+        )
+    else:
+        plot = sns.violinplot(
+            data=df_plot,
+            x="_x_position",
+            y=y_column,
+            hue=x_column,
+            ax=ax,
+            palette=colors,
+            inner=None,
+            color=".9",
+            density_norm="count",
+            legend=False,
+        )
+        # 2. Overlay individual points with jitter
+        sns.stripplot(
+            data=df_plot,
+            x="_x_position",
+            y=y_column,
+            hue=x_column,
+            ax=ax,
+            palette=colors,
+            size=4,
+            jitter=0.2,
+            alpha=0.6,
+        )
+        # raise NotImplementedError
 
     # Add statistical annotation for pairwise comparisons
     if n_categories >= 2:
@@ -98,7 +126,7 @@ def make_subject_boxplot(
         ]
 
         annotator = Annotator(
-            boxplot,
+            plot,
             pairs,
             data=df_plot,
             x="_x_position",
@@ -151,7 +179,7 @@ def make_subject_boxplot(
 
     if required_xlim is None:
         ax.set_xlim(-0.25, (n_categories - 1) + 0.25)
-
+    ax.set_ylim(0)
     return ax.get_ylim(), required_xlim
 
 
@@ -347,6 +375,7 @@ def plot_subject_mode(
     plotting_variables: list[str],
     page_width: float = 7.0,
     width_to_height_ratio: float = 1.618,
+    violinplot=False,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """Plot subject mode components against group variables and plotting variables.
 
@@ -417,6 +446,7 @@ def plot_subject_mode(
             x_column=group_variable,
             y_column=f"comp_{i}",
             legend=True,  # Show legend on every row
+            violinplot=violinplot,
         )
         ylims_list.append(ylims)
         if required_xlim is not None:
