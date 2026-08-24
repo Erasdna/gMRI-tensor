@@ -66,7 +66,7 @@ def plot_mode_grid(
 
     # Calculate colorbar width fraction in axes coordinates
     # Colorbar is 5% width + text_width_offset + bbox_to_anchor offset (0.15)
-    colorbar_width_fraction = 0.05 + text_width_offset + 0.15
+    colorbar_width_fraction = 0.05 + text_width_offset + 0.25
     plt.close(temp_fig)
 
     # Time and subject plots are roughly square (aspect ratio ~1)
