@@ -29,6 +29,7 @@ def compute_CP_decomposition(
     init="random",
     CP_verbose_level=0,
     CP_tolerance=1e-5,
+    normalize_factors=False,
 ):
     decomp, errors = non_negative_parafac_compiled(
         tensor,
@@ -39,6 +40,7 @@ def compute_CP_decomposition(
         random_state=random_state,
         verbose=CP_verbose_level,
         init=init,
+        normalize_factors=normalize_factors,
     )
     if len(errors) > CP_max_iter - 1:
         raise ConvergenceError(
@@ -64,6 +66,7 @@ def run_CP_decomposition_repeated(
     CP_verbose_level=0,
     CP_tolerance=1e-5,
     progress_bar: bool = True,
+    normalize=False,
 ):
     if use_memory_efficient_khatri_rao:
         tl.tenalg.register_backend_method(
@@ -85,6 +88,7 @@ def run_CP_decomposition_repeated(
                 random_state=i,
                 CP_verbose_level=CP_verbose_level,
                 CP_tolerance=CP_tolerance,
+                normalize_factors=normalize,
             )
         except ConvergenceError as e:
             if CP_verbose_level > 0:
@@ -112,6 +116,7 @@ def run_CP_decomposition_repeated(
     # Force PyTorch to release its internal cached memory back to the OS/GPU
     if device.type == "cuda":
         torch.cuda.empty_cache()
+
     return best_weights, best_factors, best_error.float().cpu()
 
 
