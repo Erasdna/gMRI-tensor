@@ -26,10 +26,10 @@ def compute_CP_decomposition(
     rank: int,
     CP_max_iter: int = 500,
     random_state: int = 0,
-    init="random",
-    CP_verbose_level=0,
-    CP_tolerance=1e-5,
-    normalize_factors=False,
+    init: str = "random",
+    CP_verbose_level: int = 0,
+    CP_tolerance: float = 1e-5,
+    normalize_factors: bool = False,
 ):
     decomp, errors = non_negative_parafac_compiled(
         tensor,
@@ -63,10 +63,10 @@ def run_CP_decomposition_repeated(
     CP_init_repeats: int = 50,
     device: torch.device = torch.device("cpu"),
     use_memory_efficient_khatri_rao: bool = True,
-    CP_verbose_level=0,
-    CP_tolerance=1e-5,
+    CP_verbose_level: int = 0,
+    CP_tolerance: float = 1e-5,
     progress_bar: bool = True,
-    normalize=False,
+    normalize: bool = False,
 ):
     if use_memory_efficient_khatri_rao:
         tl.tenalg.register_backend_method(
@@ -75,9 +75,9 @@ def run_CP_decomposition_repeated(
         )
         tl.tenalg.use_dynamic_dispatch()
 
-    best_error = torch.inf
-    best_factors = None
-    best_weights = None
+    best_error: torch.Tensor | float = torch.inf
+    best_factors: list[torch.Tensor] | None = None
+    best_weights: torch.Tensor | None = None
 
     for i in tqdm(range(CP_init_repeats), disable=not progress_bar):
         try:
@@ -116,6 +116,12 @@ def run_CP_decomposition_repeated(
     # Force PyTorch to release its internal cached memory back to the OS/GPU
     if device.type == "cuda":
         torch.cuda.empty_cache()
+
+    if best_weights is None or best_factors is None:
+        raise ConvergenceError(
+            f"No decomposition converged within {CP_init_repeats} repeats",
+        )
+    assert isinstance(best_error, torch.Tensor)  # guaranteed once best_weights is set
 
     return best_weights, best_factors, best_error.float().cpu()
 

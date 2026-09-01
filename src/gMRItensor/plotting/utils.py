@@ -90,9 +90,10 @@ def get_color_palette(n_colors: int) -> list:
     Returns
     -------
     list
-        List of colors from tab10 palette
+        List of colors from matplotlib's tab10 palette, cycling if
+        n_colors exceeds 10.
     """
-    return [f"C{3*i}" for i in range(n_colors)]
+    return [f"C{i % 10}" for i in range(n_colors)]
 
 
 def create_colorbar_with_offset(
@@ -138,6 +139,7 @@ def create_colorbar_with_offset(
         This value represents half the text width and can be used to adjust
         the position of the colorbar to prevent overlap.
     """
+    formatter: plt.matplotlib.ticker.Formatter
     if format_string is None:
         # Subclass ScalarFormatter to control precision
         class PrecisionScalarFormatter(plt.matplotlib.ticker.ScalarFormatter):
@@ -145,10 +147,11 @@ def create_colorbar_with_offset(
                 # Override to set custom precision
                 self.format = f"%.{precision}f"
 
-        formatter = PrecisionScalarFormatter(useMathText=True)
-        formatter.set_scientific(True)
-        formatter.set_powerlimits((0, 0))
-        formatter.set_useOffset(False)
+        precision_formatter = PrecisionScalarFormatter(useMathText=True)
+        precision_formatter.set_scientific(True)
+        precision_formatter.set_powerlimits((0, 0))
+        precision_formatter.set_useOffset(False)
+        formatter = precision_formatter
     else:
         formatter = plt.matplotlib.ticker.StrMethodFormatter(format_string)
 

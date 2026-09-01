@@ -22,13 +22,12 @@ def make_subject_boxplot(
     y_column: str,
     legend: bool = True,
     colors: list | None = None,
-    violinplot=False,
 ) -> tuple[tuple[float, float], float | None]:
     """Create a boxplot with statistical annotations and optional legend.
 
     Creates a boxplot comparing values across categories with Mann-Whitney U test
-    annotations for pairwise comparisons. Automatically generates colorblind-friendly
-    colors if not provided.
+    annotations for pairwise comparisons. Automatically generates a tab10-based
+    color palette if not provided.
 
     Parameters
     ----------
@@ -43,7 +42,7 @@ def make_subject_boxplot(
     legend : bool, optional
         Whether to display a legend, by default True
     colors : list | None, optional
-        List of colors for each category. If None, uses seaborn's colorblind
+        List of colors for each category. If None, uses a tab10-based
         palette with automatic scaling to number of categories. By default None.
 
     Returns
@@ -76,47 +75,20 @@ def make_subject_boxplot(
     category_to_position = {cat: i for i, cat in enumerate(categories)}
     df_plot["_x_position"] = df_plot[x_column].map(category_to_position)
 
-    if not violinplot:
-        plot = sns.boxplot(
-            data=df_plot,
-            x="_x_position",
-            y=y_column,
-            hue=x_column,
-            ax=ax,
-            palette=colors,
-            width=0.25,
-            legend=False,
-            boxprops=dict(alpha=0.7),
-            patch_artist=True,
-            linewidth=1.5,
-            saturation=1,
-        )
-    else:
-        plot = sns.violinplot(
-            data=df_plot,
-            x="_x_position",
-            y=y_column,
-            hue=x_column,
-            ax=ax,
-            palette=colors,
-            inner=None,
-            color=".9",
-            density_norm="count",
-            legend=False,
-        )
-        # 2. Overlay individual points with jitter
-        sns.stripplot(
-            data=df_plot,
-            x="_x_position",
-            y=y_column,
-            hue=x_column,
-            ax=ax,
-            palette=colors,
-            size=4,
-            jitter=0.2,
-            alpha=0.6,
-        )
-        # raise NotImplementedError
+    plot = sns.boxplot(
+        data=df_plot,
+        x="_x_position",
+        y=y_column,
+        hue=x_column,
+        ax=ax,
+        palette=colors,
+        width=0.25,
+        legend=False,
+        boxprops=dict(alpha=0.7),
+        patch_artist=True,
+        linewidth=1.5,
+        saturation=1,
+    )
 
     # Add statistical annotation for pairwise comparisons
     if n_categories >= 2:
@@ -366,6 +338,47 @@ def _prepare_plotting_dataframe(
     return plotting_df
 
 
+def _finalize_boxplot_axes(
+    axs: np.ndarray,
+    ylims_list: list[tuple[float, float]],
+    xlim_list: list[float],
+    boxplot_columns: list[int],
+    mirror_xlims: bool = False,
+) -> None:
+    """Apply consistent y-limits per row and a shared x-limit to boxplot columns.
+
+    Shared second-pass layout logic used by both `plot_subject_mode` and
+    `plot_subject_mode_correlation`: every axes in row i gets the y-limits
+    computed by that row's boxplot (`ylims_list[i]`), and every boxplot axes
+    (identified by `boxplot_columns[i]` for row i) gets the same x-limit, wide
+    enough to fit the widest legend across all rows.
+
+    Parameters
+    ----------
+    axs : np.ndarray
+        2D array of axes with shape (n_rows, n_columns)
+    ylims_list : list[tuple[float, float]]
+        Per-row y-limits, as returned by `make_subject_boxplot` for that row
+    xlim_list : list[float]
+        Required x-limits collected from `make_subject_boxplot` calls that had
+        a legend
+    boxplot_columns : list[int]
+        For each row i, the column index holding that row's boxplot axes
+    mirror_xlims : bool, optional
+        If True (used for the component-correlation grid), non-boxplot axes
+        in column j additionally get their x-limits set to `ylims_list[j]`,
+        so each component's own boxplot range is mirrored onto the scatter
+        plots showing that component on the x-axis. By default False.
+    """
+    max_xlim = max(xlim_list) if xlim_list else 1.5
+    for i, ax_row in enumerate(axs):
+        ax_row[boxplot_columns[i]].set_xlim(-0.25, max_xlim)
+        for j, axx in enumerate(ax_row):
+            axx.set_ylim(*ylims_list[i])
+            if mirror_xlims and j != boxplot_columns[i]:
+                axx.set_xlim(*ylims_list[j])
+
+
 def plot_subject_mode(
     subject_mode: np.ndarray,
     subjects: list[str],
@@ -374,7 +387,6 @@ def plot_subject_mode(
     plotting_variables: list[str],
     page_width: float = 7.0,
     width_to_height_ratio: float = 1.618,
-    violinplot=False,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """Plot subject mode components against group variables and plotting variables.
 
@@ -426,11 +438,12 @@ def plot_subject_mode(
     )
 
     fig, axs = plt.subplots(
-        subject_mode.shape[1],
-        1 + len(plotting_variables),
+        n_components,
+        n_columns,
         width_ratios=[1] + [1] * len(plotting_variables),
         figsize=figsize,
         layout="compressed",
+        squeeze=False,
     )
     fig.tight_layout()
 
@@ -445,7 +458,6 @@ def plot_subject_mode(
             x_column=group_variable,
             y_column=f"comp_{i}",
             legend=True,  # Show legend on every row
-            violinplot=violinplot,
         )
         ylims_list.append(ylims)
         if required_xlim is not None:
@@ -469,16 +481,16 @@ def plot_subject_mode(
             if i == 0:
                 ax[j + 1].set_title(f"Subject mode v {var}")
 
-            if i == subject_mode.shape[1] - 1:
+            if i == n_components - 1:
                 ax[j + 1].set_xlabel(var)
 
     # Second pass: apply consistent xlim and ylim to all rows
-    max_xlim = max(xlim_list) if xlim_list else 1.5
-    print(xlim_list, max_xlim)
-    for i, ax in enumerate(axs):
-        ax[0].set_xlim(-0.25, max_xlim)
-        for axx in ax:
-            axx.set_ylim(*ylims_list[i])
+    _finalize_boxplot_axes(
+        axs,
+        ylims_list,
+        xlim_list,
+        boxplot_columns=[0] * n_components,
+    )
 
     return fig, axs
 
@@ -546,13 +558,13 @@ def plot_subject_mode_correlation(
         page_width=page_width,
         width_to_height_ratio=width_to_height_ratio,
     )
-    print(figsize)
     fig, axs = plt.subplots(
-        subject_mode.shape[1],
+        n_components,
         n_components,
         width_ratios=[1] * n_components,
         figsize=figsize,
         layout="compressed",
+        squeeze=False,
     )
 
     ylims_list = []
@@ -590,18 +602,18 @@ def plot_subject_mode_correlation(
             else:
                 ax[j].set_ylabel("")
 
-            if i == subject_mode.shape[1] - 1:
+            if i == n_components - 1:
                 ax[j].set_xlabel(f"Component {j+1}")
             else:
                 ax[j].set_xlabel("")
+
     # Second pass: apply consistent xlim and ylim to all rows
-    max_xlim = max(xlim_list) if xlim_list else 1.5
-    print(xlim_list, max_xlim)
-    for i, ax in enumerate(axs):
-        ax[i].set_xlim(-0.25, max_xlim)
-        for j, axx in enumerate(ax):
-            axx.set_ylim(*ylims_list[i])
-            if i != j:
-                axx.set_xlim(*ylims_list[j])
+    _finalize_boxplot_axes(
+        axs,
+        ylims_list,
+        xlim_list,
+        boxplot_columns=list(range(n_components)),
+        mirror_xlims=True,
+    )
 
     return fig, axs

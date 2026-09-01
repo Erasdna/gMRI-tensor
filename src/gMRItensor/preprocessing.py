@@ -1,11 +1,13 @@
 from multiprocessing import Pool
 from pathlib import Path
 from typing import Callable
+from typing import cast
 
 import nibabel as nib
 import numexpr as ne
 import numpy as np
 import pandas as pd
+from nibabel.nifti1 import Nifti1Image
 from scipy.ndimage import labeled_comprehension
 from tqdm.contrib import tenumerate
 
@@ -37,14 +39,15 @@ def compute_tracer_from_image(
     segmentation_path: Path | None = None,
     func: Callable = np.nanmedian,
 ):
-    baseline_nifti = nib.load(baseline_path)
-    post_injection_nifti = nib.load(post_injection_path)
-    mask_nifti = nib.load(mask_path)
-    segmentation_nifti = nib.load(segmentation_path)
+    baseline_nifti = cast(Nifti1Image, nib.load(baseline_path))
+    post_injection_nifti = cast(Nifti1Image, nib.load(post_injection_path))
+    mask_nifti = cast(Nifti1Image, nib.load(mask_path))
 
     # Verify that images align so that we get sensible results
-    assert np.allclose(baseline_nifti.affine, post_injection_nifti.affine)
-    assert np.allclose(baseline_nifti.affine, mask_nifti.affine)
+    if not np.allclose(baseline_nifti.affine, post_injection_nifti.affine):
+        raise ValueError("Baseline and post-injection images are not aligned")
+    if not np.allclose(baseline_nifti.affine, mask_nifti.affine):
+        raise ValueError("Baseline and mask images are not aligned")
 
     mask = mask_nifti.get_fdata()
     tracer = compute_tracer(
@@ -54,7 +57,9 @@ def compute_tracer_from_image(
     )
 
     if segmentation_path is not None:
-        assert np.allclose(baseline_nifti.affine, segmentation_nifti.affine)
+        segmentation_nifti = cast(Nifti1Image, nib.load(segmentation_path))
+        if not np.allclose(baseline_nifti.affine, segmentation_nifti.affine):
+            raise ValueError("Baseline and segmentation images are not aligned")
         segmentation = segmentation_nifti.get_fdata()[mask > 0]
         unique_labels = np.unique(segmentation)
         unique_labels = unique_labels[unique_labels > 1e-6]
