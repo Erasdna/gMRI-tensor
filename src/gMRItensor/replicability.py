@@ -2,10 +2,12 @@ from abc import ABC
 from abc import abstractmethod
 from multiprocessing import Pool
 from typing import Any
+from typing import Literal
 
 import numpy as np
 import torch
 from gMRItensor import run_CP_decomposition_repeated
+from gMRItensor import run_PARAFAC2_decomposition_repeated
 from sklearn.model_selection import RepeatedStratifiedKFold
 from sklearn.model_selection import StratifiedShuffleSplit
 from tlviz.factor_tools import factor_match_score
@@ -246,25 +248,63 @@ class CrossValidationEngine(ReplicabilityEngine):
         return fms_results
 
 
+def _n_samples(tensor: torch.Tensor | list[torch.Tensor]) -> int:
+    """Number of samples (subjects) along mode 0.
+
+    Works for both a regular tensor and a ragged list of per-subject slices.
+    """
+    return len(tensor)
+
+
+def _get_device(tensor: torch.Tensor | list[torch.Tensor]) -> torch.device:
+    """Device the input lives on.
+
+    Works for both a regular tensor and a ragged list of per-subject slices
+    (which have no `.device` of their own -- the first slice's device is used).
+    """
+    return tensor.device if isinstance(tensor, torch.Tensor) else tensor[0].device
+
+
 def _decomposition_worker(
-    task_args: tuple[Any, list[int], torch.Tensor, int, dict[str, Any]],
+    task_args: tuple[
+        Any,
+        list[int],
+        torch.Tensor | list[torch.Tensor],
+        int,
+        Literal["CP", "PARAFAC2"],
+        dict[str, Any],
+    ],
 ) -> tuple[Any, list[int], Any, list[torch.Tensor]]:
-    """Worker function for parallel CP decomposition.
+    """Worker function for parallel CP/PARAFAC2 decomposition.
 
     Args:
-        task_args: Tuple of (task_id, indices, full_tensor, rank, CP_kwargs)
+        task_args: Tuple of (task_id, indices, full_tensor, rank, method, kwargs)
 
     Returns:
-        Tuple of (task_id, indices, weights, factors) with tensors on CPU
+        Tuple of (task_id, indices, weights, factors) with tensors on CPU.
+        For "PARAFAC2", the per-subject projections are dropped here: they're
+        only needed to reconstruct subject-specific time patterns for
+        plotting, not for the replicability score -- `HalfHalfEngine`/
+        `CrossValidationEngine` only ever need `(weights, factors)`, and
+        PARAFAC2's `factors = [A, B, C]` are regular-shaped just like CP's,
+        so `compute_fms` needs no PARAFAC2-specific handling.
     """
-    task_id, indices, full_tensor, rank, CP_kwargs = task_args
+    task_id, indices, full_tensor, rank, method, kwargs = task_args
 
     try:
-        # Slice sub-tensor (already on correct device)
-        sub_tensor = full_tensor[indices]
-        weights, factors, _ = run_CP_decomposition_repeated(
-            sub_tensor, rank=rank, device=full_tensor.device, **CP_kwargs
-        )
+        if method == "CP":
+            assert isinstance(full_tensor, torch.Tensor)
+            sub_tensor = full_tensor[indices]
+            weights, factors, _ = run_CP_decomposition_repeated(
+                sub_tensor, rank=rank, device=full_tensor.device, **kwargs
+            )
+        elif method == "PARAFAC2":
+            sub_slices = [full_tensor[i] for i in indices]
+            weights, factors, _projections, _ = run_PARAFAC2_decomposition_repeated(
+                sub_slices, rank=rank, device=_get_device(sub_slices), **kwargs
+            )
+        else:
+            raise ValueError(f"Unknown decomposition method: {method!r}")
 
         # Move results to CPU to avoid device memory issues in multiprocessing
         factors = [f.cpu() for f in factors]
@@ -277,39 +317,45 @@ def _decomposition_worker(
 
 def evaluate_replicability_multiproc(
     replicability_engine: ReplicabilityEngine,
-    tensor: torch.Tensor,
+    tensor: torch.Tensor | list[torch.Tensor],
     rank: int,
+    method: Literal["CP", "PARAFAC2"] = "CP",
     stratification: torch.Tensor | None = None,
     n_procs: int = 1,
     **CP_kwargs: Any,
 ) -> list[tuple[Any, ...]]:
-    """Evaluate replicability using repeated CP decompositions.
+    """Evaluate replicability using repeated CP or PARAFAC2 decompositions.
 
     Args:
         replicability_engine: Engine defining the replicability strategy
-        tensor: Input tensor to decompose (samples × features × ...)
-        rank: Number of components for CP decomposition
+        tensor: Input to decompose. A regular tensor (samples × ...) for
+            method="CP", or a list of per-subject slices (mode 1 may be
+            ragged) for method="PARAFAC2".
+        rank: Number of components for the decomposition
+        method: "CP" or "PARAFAC2"
         stratification: Optional stratification labels for splitting
         n_procs: Number of parallel processes (ignored if using CUDA)
-        **CP_kwargs: Additional arguments passed to run_CP_decomposition_repeated
+        **CP_kwargs: Additional arguments passed to
+            run_CP_decomposition_repeated / run_PARAFAC2_decomposition_repeated
 
     Returns:
         List of FMS score tuples (format depends on engine type)
     """
     tasks = replicability_engine.generate_tasks(
-        tensor.shape[0],
+        _n_samples(tensor),
         stratification,
     )
 
     task_args = [
-        (task_id, indices, tensor, rank, CP_kwargs) for task_id, indices in tasks
+        (task_id, indices, tensor, rank, method, CP_kwargs)
+        for task_id, indices in tasks
     ]
 
     results_dict: dict[Any, tuple[list[int], Any, list[torch.Tensor]]] = {}
 
     # Use sequential processing for CUDA (multiprocessing doesn't work well with CUDA)
     # or when n_procs < 2
-    if n_procs < 2 or tensor.device.type == "cuda":
+    if n_procs < 2 or _get_device(tensor).type == "cuda":
         for task in tqdm(
             task_args,
             desc="Computing decompositions (sequential)",

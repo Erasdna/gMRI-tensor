@@ -123,17 +123,31 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
     return pd.concat(results_dict, ignore_index=True)
 
 
-def prepare_tensor(df: pd.DataFrame, group_filtering: tuple[str, str] | None = None):
+def _pivot_tracer_df(
+    df: pd.DataFrame,
+    group_filtering: tuple[str, str] | None = None,
+) -> pd.DataFrame:
+    """Filter by group and pivot the long-format tracer DataFrame.
+
+    Shared first step of `prepare_tensor` and `prepare_parafac2_slices`:
+    optionally filters `df` to one group, then pivots to a DataFrame indexed
+    by (subject, time_point) with one column per label. Only (subject,
+    time_point) combinations actually present in `df` get a row -- no
+    NaN-filled rows are introduced for combinations that were never observed.
+    """
     if group_filtering is not None:
         df = df.query(f"{group_filtering[0]}=='{group_filtering[1]}'")
 
-    # Make pivot table
-    pivot_df = df.pivot_table(
+    return df.pivot_table(
         index=["subject", "time_point"],
         columns="labels",
         values="values",
         aggfunc="first",  # Handles single value per cell
     )
+
+
+def prepare_tensor(df: pd.DataFrame, group_filtering: tuple[str, str] | None = None):
+    pivot_df = _pivot_tracer_df(df, group_filtering)
 
     # Find all subjects with all time points
     subjects_by_tp = pivot_df.unstack(level="time_point")
@@ -167,3 +181,71 @@ def prepare_tensor(df: pd.DataFrame, group_filtering: tuple[str, str] | None = N
         np.array(retained_timepoints).astype(int),
         np.array(retained_labels).astype(int),
     )
+
+
+def prepare_parafac2_slices(
+    df: pd.DataFrame,
+    group_filtering: tuple[str, str] | None = None,
+    min_timepoints: int = 2,
+) -> tuple[list[np.ndarray], np.ndarray, list[np.ndarray], np.ndarray]:
+    """Prepare ragged per-subject tensor slices for PARAFAC2 decomposition.
+
+    Unlike `prepare_tensor`, subjects are not forced to share the same set of
+    time points: only (subject, time_point) combinations that are actually
+    observed are used, so one subject's missing scan no longer forces a
+    spatial region to be dropped for every subject. The label (region) set
+    still needs to be complete and shared across all subjects/time points --
+    that constraint is unavoidable, since PARAFAC2 still requires a regular
+    mode 2 (region).
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Long-format tracer DataFrame (as produced by `compute_tracer_parallel`),
+        with `subject`, `time_point`, `labels`, `values` columns.
+    group_filtering : tuple[str, str] | None, optional
+        `(column, value)` to filter `df` to a single group before pivoting.
+        By default None.
+    min_timepoints : int, optional
+        Minimum number of observed time points required to keep a subject;
+        subjects with fewer are dropped and reported (PARAFAC2's evolving
+        mode needs at least a couple of points per subject to be meaningful).
+        By default 2.
+
+    Returns
+    -------
+    tuple[list[np.ndarray], np.ndarray, list[np.ndarray], np.ndarray]
+        `(slices, subjects, timepoints_per_subject, labels)`. `slices[i]` has
+        shape `(len(timepoints_per_subject[i]), len(labels))`, ordered by
+        `timepoints_per_subject[i]`.
+    """
+    pivot_df = _pivot_tracer_df(df, group_filtering)
+
+    # Drop any label with a NaN among the *actually observed* (subject,
+    # time_point) rows -- unlike prepare_tensor, a subject's missing time
+    # point never shows up here as a NaN row, so it can no longer force an
+    # otherwise well-observed label to be dropped for every subject.
+    valid_pivot = pivot_df.dropna(axis=1, how="any")
+    labels = np.array(valid_pivot.columns.tolist()).astype(int)
+
+    subjects = []
+    timepoints_per_subject = []
+    slices = []
+    dropped_subjects = []
+    for subject, subject_df in valid_pivot.groupby(level="subject"):
+        time_points = subject_df.index.get_level_values("time_point").to_numpy()
+        order = np.argsort(time_points)
+        if len(order) < min_timepoints:
+            dropped_subjects.append((subject, len(order)))
+            continue
+        subjects.append(subject)
+        timepoints_per_subject.append(time_points[order].astype(int))
+        slices.append(subject_df.to_numpy()[order])
+
+    if dropped_subjects:
+        print(
+            f"prepare_parafac2_slices: dropped {len(dropped_subjects)} subject(s) "
+            f"with fewer than {min_timepoints} observed time points: {dropped_subjects}",
+        )
+
+    return slices, np.array(subjects).astype(str), timepoints_per_subject, labels

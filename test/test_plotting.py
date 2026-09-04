@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
+from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
 from gMRItensor.plotting.subject_mode import make_variable_correlation
@@ -274,3 +275,80 @@ def test_plot_subject_mode_correlation_single_component():
     )
     assert axs.shape == (n_components, n_components)
     plt.close(fig)
+
+
+# --- gMRItensor.plotting.evolving_mode ---
+
+
+def make_evolving_factors(n_subjects_per_group=3, n_components=2, seed=0):
+    rng = np.random.default_rng(seed)
+    subjects = [f"sub-{i:02d}" for i in range(2 * n_subjects_per_group)]
+    subject_info = pd.DataFrame(
+        {
+            "subjects": subjects,
+            "group": ["A"] * n_subjects_per_group + ["B"] * n_subjects_per_group,
+        },
+    )
+    # Ragged: each subject gets a different number of time points.
+    evolving_factors = []
+    timepoints_per_subject = []
+    for i in range(len(subjects)):
+        n_timepoints = 4 + (i % 3)
+        evolving_factors.append(rng.normal(size=(n_timepoints, n_components)))
+        timepoints_per_subject.append(np.arange(n_timepoints))
+    return evolving_factors, timepoints_per_subject, subjects, subject_info
+
+
+def test_plot_evolving_mode():
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
+    fig, axs = plot_evolving_mode(
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+        group_variable="group",
+    )
+    assert axs.shape == (2, 1)
+    plt.close(fig)
+
+
+def test_plot_evolving_mode_single_component():
+    # Regression test for the same axes-squeeze hazard exercised elsewhere in
+    # this file (n_components == 1).
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors(
+        n_components=1,
+    )
+    fig, axs = plot_evolving_mode(
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+        group_variable="group",
+    )
+    assert axs.shape == (1, 1)
+    plt.close(fig)
+
+
+def test_plot_evolving_mode_length_mismatch():
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
+    with pytest.raises(ValueError):
+        plot_evolving_mode(
+            evolving_factors,
+            timepoints,
+            subjects[:-1],
+            subject_info,
+            group_variable="group",
+        )
+
+
+def test_plot_evolving_mode_missing_subject():
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
+    subject_info = subject_info[subject_info["subjects"] != subjects[0]]
+    with pytest.raises(ValueError):
+        plot_evolving_mode(
+            evolving_factors,
+            timepoints,
+            subjects,
+            subject_info,
+            group_variable="group",
+        )
