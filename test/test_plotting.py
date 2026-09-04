@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import pytest
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
+from gMRItensor.plotting.spatial_mode import plot_spatial_mode
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
 from gMRItensor.plotting.subject_mode import make_variable_correlation
@@ -11,15 +12,18 @@ from gMRItensor.plotting.subject_mode import plot_subject_mode
 from gMRItensor.plotting.subject_mode import plot_subject_mode_correlation
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import create_colorbar_with_offset
+from gMRItensor.plotting.utils import expand_roi_mode_to_voxels
 from gMRItensor.plotting.utils import get_color_palette
+from gMRItensor.plotting.utils import merge_segmentations
+from gMRItensor.plotting.utils import region_masks_from_segmentations
 from gMRItensor.plotting.utils import scale_mode
+from gMRItensor.plotting.utils import scatter_to_volume
 
 matplotlib.use("Agg")
 
 
-# TODO: gMRItensor.plotting.spatial_mode and gMRItensor.plotting.mode_grid
-# still need coverage; they require realistic 3D volumes/masks to exercise
-# meaningfully, which is a larger effort than fits here.
+# TODO: gMRItensor.plotting.mode_grid still needs coverage; it requires a
+# bigger synthetic-volumes-plus-subject-metadata fixture than fits here.
 
 
 def make_subject_info(n_per_group: int = 6):
@@ -352,3 +356,243 @@ def test_plot_evolving_mode_missing_subject():
             subject_info,
             group_variable="group",
         )
+
+
+# --- gMRItensor.plotting.utils: spatial helpers ---
+
+
+def test_scatter_to_volume():
+    index_list = np.array([[0, 0, 0], [1, 1, 1], [2, 2, 2]])
+    values = np.array([1.0, 2.0, 3.0])
+    volume, voxel_mask = scatter_to_volume(values, index_list, shape=(4, 4, 4))
+
+    assert volume[0, 0, 0] == 1.0
+    assert volume[1, 1, 1] == 2.0
+    assert volume[2, 2, 2] == 3.0
+    assert volume[3, 3, 3] == 0.0
+    assert voxel_mask.sum() == 3
+    assert voxel_mask[0, 0, 0] and not voxel_mask[3, 3, 3]
+
+
+def test_scatter_to_volume_with_mask():
+    index_list = np.array([[0, 0, 0], [1, 1, 1], [2, 2, 2]])
+    values = np.array([1.0, 2.0, 3.0])
+    mask = np.array([True, False, True])
+    volume, voxel_mask = scatter_to_volume(
+        values,
+        index_list,
+        shape=(4, 4, 4),
+        mask=mask,
+    )
+
+    assert volume[0, 0, 0] == 1.0
+    assert volume[1, 1, 1] == 0.0
+    assert volume[2, 2, 2] == 3.0
+    assert voxel_mask.sum() == 2
+    assert not voxel_mask[1, 1, 1]
+
+
+def make_segmentation(shape=(6, 6, 6)):
+    """3 parenchyma ROIs (10, 20, 30) plus a CSF ROI (1000); ROI 30 is
+    deliberately left out of the decomposition (`rois`) below, to exercise
+    the fill_value path.
+    """
+    tissue_seg = np.zeros(shape, dtype=int)
+    tissue_seg[0:2] = 10
+    tissue_seg[2:4] = 20
+    tissue_seg[4:5] = 30
+    csf_seg = np.zeros(shape, dtype=int)
+    csf_seg[5:6] = 1000
+    combined_seg = np.where(csf_seg > 0, csf_seg, tissue_seg)
+    return tissue_seg, csf_seg, combined_seg
+
+
+def test_merge_segmentations_default_offsets():
+    tissue_seg, csf_seg, _ = make_segmentation()
+
+    merged, segs_after, offsets = merge_segmentations(
+        {"Parenchyma": tissue_seg, "CSF": csf_seg},
+    )
+
+    assert offsets == {"Parenchyma": 0, "CSF": 10000}
+    # Unshifted first segmentation, offset second segmentation.
+    assert np.array_equal(
+        merged[tissue_seg == 10],
+        np.full((tissue_seg == 10).sum(), 10),
+    )
+    assert np.array_equal(
+        merged[csf_seg == 1000],
+        np.full((csf_seg == 1000).sum(), 11000),
+    )
+    # No overrides -> segmentations pass through unchanged.
+    assert np.array_equal(segs_after["Parenchyma"], tissue_seg)
+    assert np.array_equal(segs_after["CSF"], csf_seg)
+
+
+def test_merge_segmentations_overlap_precedence():
+    # Later-listed segmentation wins where both are nonzero at the same voxel.
+    a = np.array([[5]])
+    b = np.array([[100]])
+
+    merged, _, offsets = merge_segmentations({"A": a, "B": b})
+    assert merged[0, 0] == 100 + offsets["B"]
+
+    merged2, _, offsets2 = merge_segmentations({"B": b, "A": a})
+    assert merged2[0, 0] == 5 + offsets2["A"]
+
+
+def test_merge_segmentations_custom_offsets():
+    tissue_seg, csf_seg, _ = make_segmentation()
+
+    merged, _, offsets = merge_segmentations(
+        {"Parenchyma": tissue_seg, "CSF": csf_seg},
+        offsets={"Parenchyma": 0, "CSF": 5000},
+    )
+    assert offsets == {"Parenchyma": 0, "CSF": 5000}
+    assert np.array_equal(
+        merged[csf_seg == 1000],
+        np.full((csf_seg == 1000).sum(), 6000),
+    )
+
+
+def test_merge_segmentations_label_overrides():
+    # Move label 20 (a "ventricle") out of Parenchyma and into CSF before merging.
+    tissue_seg, csf_seg, _ = make_segmentation()
+    original_csf_count = (csf_seg > 0).sum()
+    original_ventricle_count = (tissue_seg == 20).sum()
+
+    merged, segs_after, offsets = merge_segmentations(
+        {"Parenchyma": tissue_seg, "CSF": csf_seg},
+        label_overrides={20: "CSF"},
+    )
+
+    # Moved out of Parenchyma...
+    assert not np.any(segs_after["Parenchyma"] == 20)
+    # ...and into CSF, keeping its original label id.
+    assert np.array_equal(segs_after["CSF"] == 20, tissue_seg == 20)
+    assert (
+        segs_after["CSF"] > 0
+    ).sum() == original_csf_count + original_ventricle_count
+    # Merged output reflects the move, offset as CSF.
+    assert np.array_equal(
+        merged[tissue_seg == 20],
+        np.full(original_ventricle_count, 20 + offsets["CSF"]),
+    )
+
+
+def test_merge_segmentations_invalid_override_target():
+    tissue_seg, csf_seg, _ = make_segmentation()
+    with pytest.raises(ValueError):
+        merge_segmentations(
+            {"Parenchyma": tissue_seg, "CSF": csf_seg},
+            label_overrides={20: "DoesNotExist"},
+        )
+
+
+def test_merge_segmentations_matches_manual_ventricle_relabeling():
+    # Regression test against the original hand-written pattern this
+    # utility replaces.
+    tissue_seg, csf_seg, _ = make_segmentation()
+    ventricles = [20, 30]
+
+    csf_manual = np.where(np.isin(tissue_seg, ventricles), tissue_seg, csf_seg)
+    tissue_manual = np.where(np.isin(tissue_seg, ventricles), 0, tissue_seg)
+    combined_manual = np.where(csf_manual > 0, csf_manual + 10000, tissue_manual)
+
+    merged, segs_after, _ = merge_segmentations(
+        {"Parenchyma": tissue_seg, "CSF": csf_seg},
+        label_overrides={v: "CSF" for v in ventricles},
+    )
+
+    assert np.array_equal(merged, combined_manual)
+    assert np.array_equal(segs_after["CSF"], csf_manual)
+    assert np.array_equal(segs_after["Parenchyma"], tissue_manual)
+
+
+def test_expand_roi_mode_to_voxels():
+    tissue_seg, csf_seg, combined_seg = make_segmentation()
+    rois = np.array([10, 20, 1000])
+    rng = np.random.default_rng(0)
+    roi_mode = rng.random((len(rois), 2))
+
+    voxel_mode, index_list = expand_roi_mode_to_voxels(roi_mode, rois, combined_seg)
+
+    assert len(index_list) == int((combined_seg > 0).sum())
+    np.testing.assert_array_equal(index_list, np.argwhere(combined_seg > 0))
+
+    voxel_region_ids = combined_seg[*index_list.T]
+    # Voxels in ROI 10/20/1000 get their matching decomposition row.
+    assert np.allclose(voxel_mode[voxel_region_ids == 10], roi_mode[0])
+    assert np.allclose(voxel_mode[voxel_region_ids == 1000], roi_mode[2])
+    # ROI 30 was never in `rois` -> fill_value (default 0.0).
+    assert np.all(voxel_mode[voxel_region_ids == 30] == 0.0)
+
+
+def test_expand_roi_mode_to_voxels_custom_fill_value():
+    _, _, combined_seg = make_segmentation()
+    rois = np.array([10, 20, 1000])
+    roi_mode = np.ones((len(rois), 2))
+
+    voxel_mode, index_list = expand_roi_mode_to_voxels(
+        roi_mode,
+        rois,
+        combined_seg,
+        fill_value=-1.0,
+    )
+    voxel_region_ids = combined_seg[*index_list.T]
+    assert np.all(voxel_mode[voxel_region_ids == 30] == -1.0)
+
+
+def test_region_masks_from_segmentations():
+    tissue_seg, csf_seg, combined_seg = make_segmentation()
+    index_list = np.argwhere(combined_seg > 0)
+
+    masks = region_masks_from_segmentations(
+        index_list,
+        CSF=csf_seg,
+        Parenchyma=tissue_seg,
+    )
+
+    assert list(masks.keys()) == ["CSF", "Parenchyma"]
+    assert masks["CSF"].sum() == int((csf_seg[*index_list.T] > 0).sum())
+    assert masks["Parenchyma"].sum() == int((tissue_seg[*index_list.T] > 0).sum())
+    # Every voxel belongs to exactly one of the two masks here.
+    assert np.array_equal(
+        masks["CSF"] | masks["Parenchyma"],
+        np.ones(len(index_list), dtype=bool),
+    )
+
+
+def test_plot_spatial_mode_roi_broadcast():
+    # End-to-end: mirrors the real ROI-decomposition -> voxel plotting
+    # workflow (expand_roi_mode_to_voxels -> region_masks_from_segmentations
+    # -> plot_spatial_mode) that used to require a manual per-voxel loop.
+    tissue_seg, csf_seg, combined_seg = make_segmentation()
+    rois = np.array([10, 20, 1000])
+    rng = np.random.default_rng(0)
+    roi_mode = rng.random((len(rois), 2))
+    background = rng.random(combined_seg.shape)
+
+    voxel_mode, index_list = expand_roi_mode_to_voxels(roi_mode, rois, combined_seg)
+    region_masks = region_masks_from_segmentations(
+        index_list,
+        CSF=csf_seg,
+        Parenchyma=tissue_seg,
+    )
+
+    results = list(
+        plot_spatial_mode(
+            voxel_mode,
+            index_list,
+            region_masks,
+            background,
+            slices=[2, 2, 2],
+            page_width=5.0,
+            width_to_height_ratio=1.0,
+        ),
+    )
+
+    assert [name for _, _, name in results] == ["CSF", "Parenchyma"]
+    for fig, axs, _ in results:
+        assert axs.shape == (2, 4)
+        plt.close(fig)

@@ -129,11 +129,11 @@ def _pivot_tracer_df(
 ) -> pd.DataFrame:
     """Filter by group and pivot the long-format tracer DataFrame.
 
-    Shared first step of `prepare_tensor` and `prepare_parafac2_slices`:
-    optionally filters `df` to one group, then pivots to a DataFrame indexed
-    by (subject, time_point) with one column per label. Only (subject,
-    time_point) combinations actually present in `df` get a row -- no
-    NaN-filled rows are introduced for combinations that were never observed.
+    First step of `prepare_tensor`: optionally filters `df` to one group,
+    then pivots to a DataFrame indexed by (subject, time_point) with one
+    column per label. Only (subject, time_point) combinations actually
+    present in `df` get a row -- no NaN-filled rows are introduced for
+    combinations that were never observed.
     """
     if group_filtering is not None:
         df = df.query(f"{group_filtering[0]}=='{group_filtering[1]}'")
@@ -146,57 +146,21 @@ def _pivot_tracer_df(
     )
 
 
-def prepare_tensor(df: pd.DataFrame, group_filtering: tuple[str, str] | None = None):
-    pivot_df = _pivot_tracer_df(df, group_filtering)
-
-    # Find all subjects with all time points
-    subjects_by_tp = pivot_df.unstack(level="time_point")
-    complete_subjects_mask = ~subjects_by_tp.isna().all(axis=1)
-    valid_subjects = subjects_by_tp[complete_subjects_mask].index
-
-    # Filter the pivoted dataframe to valid subjects only
-    pivot_df = pivot_df.loc[
-        pivot_df.index.get_level_values("subject").isin(valid_subjects)
-    ]
-
-    # Drop nan values
-    valid_pivot = pivot_df.dropna(axis=1, how="any")
-
-    # Find all subjects, time points and labels remaining
-    retained_subjects = sorted(valid_pivot.index.get_level_values("subject").unique())
-    retained_timepoints = sorted(
-        valid_pivot.index.get_level_values("time_point").unique(),
-    )
-    retained_labels = valid_pivot.columns.tolist()
-
-    # Reshape to (subjects x time_points x labels)
-    numpy_3d = valid_pivot.to_numpy().reshape(
-        len(retained_subjects),
-        len(retained_timepoints),
-        len(retained_labels),
-    )
-    return (
-        numpy_3d,
-        np.array(retained_subjects).astype(str),
-        np.array(retained_timepoints).astype(int),
-        np.array(retained_labels).astype(int),
-    )
-
-
-def prepare_parafac2_slices(
+def prepare_tensor(
     df: pd.DataFrame,
     group_filtering: tuple[str, str] | None = None,
-    min_timepoints: int = 2,
-) -> tuple[list[np.ndarray], np.ndarray, list[np.ndarray], np.ndarray]:
-    """Prepare ragged per-subject tensor slices for PARAFAC2 decomposition.
+    require_regular: bool = True,
+    min_timepoints: int = 1,
+):
+    """Prepare subject x time x label tensor data from a long-format tracer DataFrame.
 
-    Unlike `prepare_tensor`, subjects are not forced to share the same set of
-    time points: only (subject, time_point) combinations that are actually
-    observed are used, so one subject's missing scan no longer forces a
-    spatial region to be dropped for every subject. The label (region) set
-    still needs to be complete and shared across all subjects/time points --
-    that constraint is unavoidable, since PARAFAC2 still requires a regular
-    mode 2 (region).
+    Subjects are not required to share the same set of time points: only
+    (subject, time_point) combinations that are actually observed are used
+    to decide which labels to keep, so one subject's missing scan no longer
+    forces a spatial region to be dropped for every subject. The label
+    (region) set still needs to be complete and shared across all
+    subjects/time points -- that constraint is unavoidable, since a value
+    genuinely missing at an observed time point can't be recovered here.
 
     Parameters
     ----------
@@ -206,25 +170,45 @@ def prepare_parafac2_slices(
     group_filtering : tuple[str, str] | None, optional
         `(column, value)` to filter `df` to a single group before pivoting.
         By default None.
+    require_regular : bool, optional
+        If True (default), returns a single regular `(subjects, time_points,
+        labels)` array: any (subject, time_point) combination that was never
+        observed becomes a NaN row rather than being silently dropped or
+        crashing the reshape. That NaN-padded array is **not** directly
+        decomposable by `compute_CP_decomposition`, which doesn't support
+        missing values -- impute or mask those NaNs first.
+
+        If False, returns a ragged `list[np.ndarray]` -- one
+        `(n_timepoints_i, n_labels)` slice per subject, using only that
+        subject's own observed time points, no NaN padding. This is the
+        shape `run_PARAFAC2_decomposition_repeated` expects, since PARAFAC2's
+        evolving mode can have a different size per subject.
     min_timepoints : int, optional
         Minimum number of observed time points required to keep a subject;
-        subjects with fewer are dropped and reported (PARAFAC2's evolving
-        mode needs at least a couple of points per subject to be meaningful).
-        By default 2.
+        subjects with fewer are dropped and reported. By default 1 (drop
+        only subjects with no data at all). If you plan to use
+        `require_regular=False` for PARAFAC2, consider raising this to 2, so
+        every subject's evolving factor has enough points to be meaningful.
 
     Returns
     -------
-    tuple[list[np.ndarray], np.ndarray, list[np.ndarray], np.ndarray]
-        `(slices, subjects, timepoints_per_subject, labels)`. `slices[i]` has
-        shape `(len(timepoints_per_subject[i]), len(labels))`, ordered by
-        `timepoints_per_subject[i]`.
+    If `require_regular`:
+        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]
+            `(tensor, subjects, time_points, labels)`. `tensor` has shape
+            `(len(subjects), len(time_points), len(labels))` and may contain
+            NaN for subject/time_point combinations that were never observed.
+    Otherwise:
+        tuple[list[np.ndarray], np.ndarray, list[np.ndarray], np.ndarray]
+            `(slices, subjects, timepoints_per_subject, labels)`. `slices[i]`
+            has shape `(len(timepoints_per_subject[i]), len(labels))`,
+            ordered by `timepoints_per_subject[i]`.
     """
     pivot_df = _pivot_tracer_df(df, group_filtering)
 
     # Drop any label with a NaN among the *actually observed* (subject,
-    # time_point) rows -- unlike prepare_tensor, a subject's missing time
-    # point never shows up here as a NaN row, so it can no longer force an
-    # otherwise well-observed label to be dropped for every subject.
+    # time_point) rows. A subject's structurally missing time point is not a
+    # row here at all, so it can't force an otherwise well-observed label to
+    # be dropped for everyone else.
     valid_pivot = pivot_df.dropna(axis=1, how="any")
     labels = np.array(valid_pivot.columns.tolist()).astype(int)
 
@@ -244,8 +228,25 @@ def prepare_parafac2_slices(
 
     if dropped_subjects:
         print(
-            f"prepare_parafac2_slices: dropped {len(dropped_subjects)} subject(s) "
-            f"with fewer than {min_timepoints} observed time points: {dropped_subjects}",
+            f"prepare_tensor: dropped {len(dropped_subjects)} subject(s) with "
+            f"fewer than {min_timepoints} observed time points: {dropped_subjects}",
         )
 
-    return slices, np.array(subjects).astype(str), timepoints_per_subject, labels
+    subjects_arr = np.array(subjects).astype(str)
+
+    if not require_regular:
+        return slices, subjects_arr, timepoints_per_subject, labels
+
+    # Build a regular (subjects x time_points x labels) array, filling any
+    # subject/time_point combination that was never observed with NaN,
+    # instead of assuming (and crashing if not) that one already exists.
+    all_timepoints = sorted({t for tps in timepoints_per_subject for t in tps})
+    timepoint_index = {t: i for i, t in enumerate(all_timepoints)}
+    tensor = np.full((len(subjects), len(all_timepoints), len(labels)), np.nan)
+    for i, (subject_slice, time_points) in enumerate(
+        zip(slices, timepoints_per_subject),
+    ):
+        for row, t in zip(subject_slice, time_points):
+            tensor[i, timepoint_index[t]] = row
+
+    return tensor, subjects_arr, np.array(all_timepoints).astype(int), labels

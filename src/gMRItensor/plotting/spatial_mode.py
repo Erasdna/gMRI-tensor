@@ -5,6 +5,7 @@ import scienceplots  # noqa: F401
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import create_colorbar_with_offset
 from gMRItensor.plotting.utils import scale_mode
+from gMRItensor.plotting.utils import scatter_to_volume
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 matplotlib.use("Agg")
@@ -127,8 +128,7 @@ def plot_brain(
 def plot_spatial_mode(
     spatial_mode: np.ndarray,
     index_list: np.ndarray,
-    csf_index_mask: np.ndarray,
-    parenchyma_index_mask: np.ndarray,
+    region_masks: dict[str, np.ndarray],
     background: np.ndarray,
     slices: list,
     page_width: float = 7.0,
@@ -136,16 +136,22 @@ def plot_spatial_mode(
 ):
     """Plot spatial mode components mapped onto brain slices.
 
+    Works the same way whether `spatial_mode` was computed directly on
+    voxels or on agglomerated ROIs and broadcast out to voxels via
+    `gMRItensor.plotting.utils.expand_roi_mode_to_voxels`.
+
     Parameters
     ----------
     spatial_mode : np.ndarray
-        Spatial mode matrix
+        Spatial mode matrix, one row per entry in `index_list`.
     index_list : np.ndarray
-        Index mapping for spatial locations
-    csf_index_mask : np.ndarray
-        Mask for CSF regions
-    parenchyma_index_mask : np.ndarray
-        Mask for parenchyma regions
+        `(n_voxels, ndim)` array of voxel coordinates, one row per row of
+        `spatial_mode`.
+    region_masks : dict[str, np.ndarray]
+        Named `(n_voxels,)` boolean masks partitioning `index_list`'s rows
+        into the regions to plot separately (e.g. `{"CSF": ..., "Parenchyma":
+        ...}`), as built by
+        `gMRItensor.plotting.utils.region_masks_from_segmentations`.
     background : np.ndarray
         Background image
     slices : list
@@ -159,7 +165,7 @@ def plot_spatial_mode(
     Yields
     ------
     tuple
-        (figure, axes, name) for each tissue type (CSF, Parenchyma)
+        (figure, axes, name) for each region in `region_masks`
     """
     assert spatial_mode.shape[0] == index_list.shape[0]
 
@@ -182,9 +188,7 @@ def plot_spatial_mode(
         width_ratios=width_ratios[:-1],
         width_to_height_ratio=width_to_height_ratio,
     )
-    for i, (name, ids_mask) in enumerate(
-        zip(["CSF", "Parenchyma"], [csf_index_mask, parenchyma_index_mask]),
-    ):
+    for name, ids_mask in region_masks.items():
         big_fig, big_ax = plt.subplots(
             n_components,
             4,
@@ -196,15 +200,12 @@ def plot_spatial_mode(
             big_ax = [big_ax]
 
         for component in range(n_components):
-            spatial_component = np.zeros(background_shape)
-            # Create mask of assigned voxels
-            voxel_mask = np.zeros(background_shape, dtype=bool)
-            voxel_mask[*index_list[ids_mask].T] = True
-
-            spatial_component[*index_list[ids_mask].T] = scaled_spatial_mode[
-                ids_mask,
-                component,
-            ]
+            spatial_component, voxel_mask = scatter_to_volume(
+                scaled_spatial_mode[:, component],
+                index_list,
+                background_shape,
+                mask=ids_mask,
+            )
             plot_brain(
                 big_fig,
                 big_ax[component],

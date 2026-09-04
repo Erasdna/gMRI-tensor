@@ -23,6 +23,12 @@ def non_negative_parafac_compiled(tensor, **kwargs):
     return tl.decomposition.non_negative_parafac(tensor, **kwargs)
 
 
+@torch.no_grad()
+@torch.compile(dynamic=True)
+def parafac_compiled(tensor, **kwargs):
+    return tl.decomposition.parafac(tensor, **kwargs)
+
+
 def compute_CP_decomposition(
     tensor: torch.Tensor,
     rank: int,
@@ -32,8 +38,41 @@ def compute_CP_decomposition(
     CP_verbose_level: int = 0,
     CP_tolerance: float = 1e-5,
     normalize_factors: bool = False,
+    allow_nan_imputation: bool = False,
+    non_negative: bool = True,
 ):
-    decomp, errors = non_negative_parafac_compiled(
+    """Compute a single CP/PARAFAC decomposition attempt.
+
+    Notes
+    -----
+    If `allow_nan_imputation` is True, any NaN entries in `tensor` (e.g. from
+    `prepare_tensor(..., require_regular=True)`, where a subject's missing
+    time point becomes a NaN row) are treated as missing and imputed from the
+    model's own reconstruction at each iteration, via TensorLy's `mask`
+    support -- unlike PARAFAC2, which has no such support in this TensorLy
+    version (see `compute_PARAFAC2_decomposition`). If False (the default)
+    and `tensor` contains NaN, a `ValueError` is raised rather than silently
+    fitting on/propagating NaN.
+
+    `non_negative` defaults to True (non-negative CP, appropriate for a
+    tracer signal that should physically be non-negative). Set it to False to
+    run plain, unconstrained CP instead.
+    """
+    mask = None
+    if allow_nan_imputation:
+        mask = (~torch.isnan(tensor)).to(tensor.dtype)
+        tensor = torch.nan_to_num(tensor, nan=0.0)
+    elif torch.isnan(tensor).any():
+        raise ValueError(
+            "tensor contains NaN values; pass allow_nan_imputation=True to let "
+            "TensorLy impute them during fitting, or remove/fill them yourself "
+            "first.",
+        )
+
+    decomposition_fn = (
+        non_negative_parafac_compiled if non_negative else parafac_compiled
+    )
+    decomp, errors = decomposition_fn(
         tensor,
         rank=rank,
         n_iter_max=CP_max_iter,
@@ -43,6 +82,7 @@ def compute_CP_decomposition(
         verbose=CP_verbose_level,
         init=init,
         normalize_factors=normalize_factors,
+        mask=mask,
     )
     if len(errors) > CP_max_iter - 1:
         raise ConvergenceError(
@@ -95,7 +135,29 @@ def compute_PARAFAC2_decomposition(
     an inherently ragged per-slice Python loop that cannot be traced into one
     graph (confirmed to produce dozens of graph breaks on trivial inputs), so
     compiling it adds overhead without a real speedup.
+
+    Raises
+    ------
+    ValueError
+        If any slice contains NaN. Unlike `compute_CP_decomposition`,
+        TensorLy's `parafac2` has no `mask`/imputation support in this
+        version, so there is no `allow_nan_imputation` option here -- NaNs
+        must be removed or imputed before calling this function (e.g. by
+        using `prepare_tensor(..., require_regular=False)`, which never
+        introduces NaN gaps in the first place).
     """
+    slices_to_check = (
+        tensor_slices if isinstance(tensor_slices, list) else [tensor_slices]
+    )
+    if any(torch.isnan(s).any() for s in slices_to_check):
+        raise ValueError(
+            "tensor_slices contains NaN values, but PARAFAC2 has no "
+            "NaN-imputation/masking support in this TensorLy version -- "
+            "remove or impute missing values first (e.g. via "
+            "prepare_tensor(..., require_regular=False), which never "
+            "introduces NaN gaps).",
+        )
+
     result, errors = tl.decomposition.parafac2(
         tensor_slices,
         rank=rank,
@@ -213,7 +275,14 @@ def run_CP_decomposition_repeated(
     CP_tolerance: float = 1e-5,
     progress_bar: bool = True,
     normalize: bool = False,
+    allow_nan_imputation: bool = False,
+    non_negative: bool = True,
 ) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]:
+    """Repeatedly fit a CP/PARAFAC decomposition from random restarts.
+
+    See `compute_CP_decomposition` for the meaning of `allow_nan_imputation`
+    and `non_negative`.
+    """
     if use_memory_efficient_khatri_rao:
         tl.tenalg.register_backend_method(
             "unfolding_dot_khatri_rao",
@@ -230,6 +299,8 @@ def run_CP_decomposition_repeated(
             CP_verbose_level=CP_verbose_level,
             CP_tolerance=CP_tolerance,
             normalize_factors=normalize,
+            allow_nan_imputation=allow_nan_imputation,
+            non_negative=non_negative,
         )
 
     def to_cpu(decomp):

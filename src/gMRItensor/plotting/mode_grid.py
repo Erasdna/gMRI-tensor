@@ -9,6 +9,7 @@ from gMRItensor.plotting.subject_mode import make_subject_boxplot
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import create_colorbar_with_offset
 from gMRItensor.plotting.utils import scale_mode
+from gMRItensor.plotting.utils import scatter_to_volume
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 matplotlib.use("Agg")
@@ -144,15 +145,12 @@ def plot_mode_grid(
             [parenchyma_ax, csf_ax],
             [parenchyma_index_mask, csf_index_mask],
         ):
-            spatial_component = np.zeros(background.shape)
-            # Create mask of assigned voxels
-            voxel_mask = np.zeros(background.shape, dtype=bool)
-            voxel_mask[*index_list[ids_mask].T] = True
-
-            spatial_component[*index_list[ids_mask].T] = scaled_spatial_mode[
-                ids_mask,
-                component,
-            ]
+            spatial_component, voxel_mask = scatter_to_volume(
+                scaled_spatial_mode[:, component],
+                index_list,
+                background.shape,
+                mask=ids_mask,
+            )
 
             im = plot_enhancement_with_background(
                 ax,
