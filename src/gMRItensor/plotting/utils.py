@@ -204,7 +204,7 @@ def merge_segmentations(
 
     if label_overrides:
         for label_id, target_name in label_overrides.items():
-            if target_name not in segmentations:
+            if target_name not in segmentations.keys():
                 raise ValueError(
                     f"Override target {target_name!r} is not in segmentations",
                 )
