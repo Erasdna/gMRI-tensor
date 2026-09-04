@@ -288,7 +288,7 @@ def expand_roi_mode_to_voxels(
 
 def region_masks_from_segmentations(
     index_list: np.ndarray,
-    **segmentations: np.ndarray,
+    segmentations: dict[str, np.ndarray],
 ) -> dict[str, np.ndarray]:
     """Build named per-voxel boolean masks from named segmentation volumes.
 
