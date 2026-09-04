@@ -473,11 +473,14 @@ def test_merge_segmentations_label_overrides():
     assert (
         segs_after["CSF"] > 0
     ).sum() == original_csf_count + original_ventricle_count
-    # Merged output reflects the move, offset as CSF.
+    # Merged output keeps the overridden voxels' bare label id -- they do
+    # NOT get CSF's offset, since the decomposition's region ids were
+    # computed with the original (unshifted) label.
     assert np.array_equal(
         merged[tissue_seg == 20],
-        np.full(original_ventricle_count, 20 + offsets["CSF"]),
+        np.full(original_ventricle_count, 20),
     )
+    assert offsets["CSF"] != 0  # sanity check the offset itself is nonzero
 
 
 def test_merge_segmentations_invalid_override_target():
@@ -490,14 +493,18 @@ def test_merge_segmentations_invalid_override_target():
 
 
 def test_merge_segmentations_matches_manual_ventricle_relabeling():
-    # Regression test against the original hand-written pattern this
-    # utility replaces.
+    # Regression test against the original hand-written pattern this utility
+    # replaces -- including the manual "roi -= 10000" undo step the original
+    # script needed downstream, since overridden voxels must NOT be offset.
     tissue_seg, csf_seg, _ = make_segmentation()
     ventricles = [20, 30]
 
     csf_manual = np.where(np.isin(tissue_seg, ventricles), tissue_seg, csf_seg)
     tissue_manual = np.where(np.isin(tissue_seg, ventricles), 0, tissue_seg)
     combined_manual = np.where(csf_manual > 0, csf_manual + 10000, tissue_manual)
+    # Undo the offset for voxels that were moved in from Parenchyma.
+    is_ventricle = np.isin(tissue_seg, ventricles)
+    combined_manual = np.where(is_ventricle, tissue_seg, combined_manual)
 
     merged, segs_after, _ = merge_segmentations(
         {"Parenchyma": tissue_seg, "CSF": csf_seg},
@@ -549,8 +556,7 @@ def test_region_masks_from_segmentations():
 
     masks = region_masks_from_segmentations(
         index_list,
-        CSF=csf_seg,
-        Parenchyma=tissue_seg,
+        {"CSF": csf_seg, "Parenchyma": tissue_seg},
     )
 
     assert list(masks.keys()) == ["CSF", "Parenchyma"]
@@ -576,8 +582,7 @@ def test_plot_spatial_mode_roi_broadcast():
     voxel_mode, index_list = expand_roi_mode_to_voxels(roi_mode, rois, combined_seg)
     region_masks = region_masks_from_segmentations(
         index_list,
-        CSF=csf_seg,
-        Parenchyma=tissue_seg,
+        {"CSF": csf_seg, "Parenchyma": tissue_seg},
     )
 
     results = list(

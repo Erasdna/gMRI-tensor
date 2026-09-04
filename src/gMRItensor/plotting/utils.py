@@ -179,12 +179,15 @@ def merge_segmentations(
         segmentation (zeroed out at their original location) before
         merging. By default None (no overrides).
     offsets : dict[str, int] | None, optional
-        Per-segmentation label offset added to that segmentation's (possibly
-        overridden) labels before merging, so labels originating from
-        different named segmentations stay distinguishable in the merged
-        output. If None, each segmentation is assigned a distinct offset of
-        `10000 * i` in `segmentations`' order (so the first segmentation's
-        labels are left unshifted). By default None.
+        Per-segmentation label offset added to that segmentation's *native*
+        labels before merging, so labels originating from different named
+        segmentations stay distinguishable in the merged output. Voxels
+        moved there by `label_overrides` are *not* offset -- they keep their
+        bare original label id, since that's the id the decomposition's
+        region ids (`roi_ids` for `expand_roi_mode_to_voxels`) were actually
+        computed with. If None, each segmentation is assigned a distinct
+        offset of `10000 * i` in `segmentations`' order (so the first
+        segmentation's labels are left unshifted). By default None.
 
     Returns
     -------
@@ -201,6 +204,8 @@ def merge_segmentations(
           decomposition's region ids were built with the same convention).
     """
     segmentations = {name: seg.copy() for name, seg in segmentations.items()}
+    shape = next(iter(segmentations.values())).shape
+    overridden = np.zeros(shape, dtype=bool)
 
     if label_overrides:
         for label_id, target_name in label_overrides.items():
@@ -209,7 +214,7 @@ def merge_segmentations(
                     f"Override target {target_name!r} is not in segmentations",
                 )
             target_seg = segmentations[target_name]
-            moved = np.zeros(target_seg.shape, dtype=bool)
+            moved = np.zeros(shape, dtype=bool)
             for name, seg in segmentations.items():
                 if name == target_name:
                     continue
@@ -218,14 +223,17 @@ def merge_segmentations(
                     seg[source_mask] = 0
                     moved |= source_mask
             target_seg[moved] = label_id
+            overridden |= moved
 
     if offsets is None:
         offsets = {name: 10000 * i for i, name in enumerate(segmentations)}
 
-    shape = next(iter(segmentations.values())).shape
     merged = np.zeros(shape, dtype=int)
     for name, seg in segmentations.items():
-        offset_seg = np.where(seg > 0, seg + offsets[name], 0)
+        # Overridden voxels keep their bare label id -- only a
+        # segmentation's own native labels get its offset.
+        seg_offset = np.where(overridden, 0, offsets[name])
+        offset_seg = np.where(seg > 0, seg + seg_offset, 0)
         merged = np.where(offset_seg > 0, offset_seg, merged)
 
     return merged, segmentations, offsets
@@ -293,8 +301,11 @@ def region_masks_from_segmentations(
     """Build named per-voxel boolean masks from named segmentation volumes.
 
     Replaces manually writing `segmentation[*index_list.T] > 0` once per
-    named region, e.g.
-    `region_masks_from_segmentations(index_list, CSF=csf_seg, Parenchyma=tissue_seg)`.
+    named region, e.g. `region_masks_from_segmentations(index_list,
+    {"CSF": csf_seg, "Parenchyma": tissue_seg})` -- the same dict shape
+    `merge_segmentations` takes and returns, so its
+    `segmentations_after_override` return value can be passed straight
+    through here.
 
     Parameters
     ----------
@@ -302,7 +313,7 @@ def region_masks_from_segmentations(
         `(n_voxels, ndim)` array of voxel coordinates, as returned by
         `expand_roi_mode_to_voxels` or built directly (e.g.
         `np.argwhere(mask)`).
-    **segmentations : np.ndarray
+    segmentations : dict[str, np.ndarray]
         Named segmentation volumes (same shape as the full image); a voxel
         belongs to a region if its value there is greater than zero.
 
