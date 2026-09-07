@@ -3,6 +3,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
+from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
+from gMRItensor.plotting.evolving_mode import _compute_group_ribbon_stats
+from gMRItensor.plotting.evolving_mode import _test_group_differences_over_time
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.spatial_mode import plot_spatial_mode
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
@@ -303,6 +306,37 @@ def make_evolving_factors(n_subjects_per_group=3, n_components=2, seed=0):
     return evolving_factors, timepoints_per_subject, subjects, subject_info
 
 
+def make_evolving_factors_shared_timepoints(
+    n_subjects_per_group=10,
+    n_timepoints=6,
+    shifted_timepoints=(3, 4, 5),
+    shift=10.0,
+    seed=0,
+):
+    # All subjects share the same timepoints; group "B" is shifted by a
+    # large constant at a subset of timepoints, so group differences are
+    # detectable there and not elsewhere.
+    rng = np.random.default_rng(seed)
+    subjects = [f"sub-{i:02d}" for i in range(2 * n_subjects_per_group)]
+    subject_info = pd.DataFrame(
+        {
+            "subjects": subjects,
+            "group": ["A"] * n_subjects_per_group + ["B"] * n_subjects_per_group,
+        },
+    )
+    timepoints = np.arange(n_timepoints)
+    evolving_factors = []
+    timepoints_per_subject = []
+    for i, subject in enumerate(subjects):
+        values = rng.normal(size=(n_timepoints, 1))
+        if i >= n_subjects_per_group:
+            for t in shifted_timepoints:
+                values[t, 0] += shift
+        evolving_factors.append(values)
+        timepoints_per_subject.append(timepoints.copy())
+    return evolving_factors, timepoints_per_subject, subjects, subject_info
+
+
 def test_plot_evolving_mode():
     evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
     fig, axs = plot_evolving_mode(
@@ -312,7 +346,7 @@ def test_plot_evolving_mode():
         subject_info,
         group_variable="group",
     )
-    assert axs.shape == (2, 1)
+    assert axs.shape == (2, 3)
     plt.close(fig)
 
 
@@ -329,8 +363,149 @@ def test_plot_evolving_mode_single_component():
         subject_info,
         group_variable="group",
     )
-    assert axs.shape == (1, 1)
+    assert axs.shape == (1, 3)
     plt.close(fig)
+
+
+def test_plot_evolving_mode_single_group():
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
+    subject_info = subject_info.assign(group="A")
+    fig, axs = plot_evolving_mode(
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+        group_variable="group",
+    )
+    assert axs.shape == (2, 2)
+    plt.close(fig)
+
+
+def test_plot_evolving_mode_ribbon_layout():
+    (
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+    ) = make_evolving_factors_shared_timepoints()
+    fig, axs = plot_evolving_mode(
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+        group_variable="group",
+    )
+    assert axs.shape[1] == 3
+    assert axs[0, 0].get_legend() is not None
+    assert axs[0, 1].get_title() == "A"
+    assert axs[0, 2].get_title() == "B"
+    plt.close(fig)
+
+
+def test_build_long_evolving_dataframe_and_ribbon_stats():
+    factors = [
+        np.array([[1.0], [3.0]]),
+        np.array([[3.0], [5.0]]),
+        np.array([[10.0]]),
+    ]
+    timepoints = [np.array([0, 1]), np.array([0, 1]), np.array([0])]
+    subjects = ["s0", "s1", "s2"]
+    groups = ["A", "A", "B"]
+
+    long_df = _build_long_evolving_dataframe(factors, timepoints, subjects, groups, 1)
+    stats = _compute_group_ribbon_stats(long_df)
+
+    row_a0 = stats[(stats["group"] == "A") & (stats["timepoint"] == 0)].iloc[0]
+    assert row_a0["mean"] == pytest.approx(2.0)
+    assert row_a0["n"] == 2
+
+    row_a1 = stats[(stats["group"] == "A") & (stats["timepoint"] == 1)].iloc[0]
+    assert row_a1["mean"] == pytest.approx(4.0)
+
+    row_b0 = stats[(stats["group"] == "B") & (stats["timepoint"] == 0)].iloc[0]
+    assert row_b0["n"] == 1
+    # sem is NaN from pandas at n == 1; must be filled to 0.0, not left NaN.
+    assert row_b0["sem"] == pytest.approx(0.0)
+
+
+def test_test_group_differences_detects_shifted_timepoints():
+    (
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+    ) = make_evolving_factors_shared_timepoints()
+    subject_to_group = subject_info.set_index("subjects")["group"]
+    groups = [subject_to_group.loc[s] for s in subjects]
+    long_df = _build_long_evolving_dataframe(
+        evolving_factors,
+        timepoints,
+        subjects,
+        groups,
+        1,
+    )
+    significance = _test_group_differences_over_time(long_df, ["A", "B"])
+
+    shifted = significance[significance["timepoint"].isin([3, 4, 5])]
+    unshifted = significance[significance["timepoint"].isin([0, 1, 2])]
+    assert (shifted["p_adj"] < 0.05).all()
+    assert not (unshifted["p_adj"] < 0.05).any()
+
+
+def test_test_group_differences_min_group_n_guard():
+    (
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+    ) = make_evolving_factors_shared_timepoints(
+        n_subjects_per_group=1,
+    )
+    subject_to_group = subject_info.set_index("subjects")["group"]
+    groups = [subject_to_group.loc[s] for s in subjects]
+    long_df = _build_long_evolving_dataframe(
+        evolving_factors,
+        timepoints,
+        subjects,
+        groups,
+        1,
+    )
+    significance = _test_group_differences_over_time(long_df, ["A", "B"])
+    assert significance.empty
+
+
+def test_test_group_differences_single_group_short_circuits():
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
+    groups = ["A"] * len(subjects)
+    long_df = _build_long_evolving_dataframe(
+        evolving_factors,
+        timepoints,
+        subjects,
+        groups,
+        evolving_factors[0].shape[1],
+    )
+    significance = _test_group_differences_over_time(long_df, ["A"])
+    assert significance.empty
+
+
+def test_test_group_differences_more_than_two_groups():
+    (
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+    ) = make_evolving_factors_shared_timepoints(n_subjects_per_group=4)
+    groups = ["A"] * 4 + ["B"] * 4
+    groups[4:6] = ["C", "C"]
+    long_df = _build_long_evolving_dataframe(
+        evolving_factors,
+        timepoints,
+        subjects,
+        groups,
+        1,
+    )
+    significance = _test_group_differences_over_time(long_df, ["A", "B", "C"])
+    assert list(significance.columns) == ["component", "timepoint", "p_value", "p_adj"]
 
 
 def test_plot_evolving_mode_length_mismatch():
