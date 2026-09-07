@@ -49,10 +49,24 @@ class ReplicabilityEngine(ABC):
 
         Returns:
             List of (task_id, indices) tuples
+
+        Notes
+        -----
+        `inds`/`stratification` are index-bookkeeping arrays consumed by
+        scikit-learn's splitters (`self.rskf.split` in the subclasses),
+        which need plain CPU/numpy-convertible data -- not the tensors being
+        decomposed, so they're kept on CPU regardless of `self.device` (that
+        setting is for the actual decomposition compute, done separately in
+        `evaluate_replicability_multiproc`). Passing a CUDA `tensor` to that
+        function with the default `stratification=None` used to build a
+        CUDA `stratification` tensor here, which scikit-learn cannot accept
+        (`TypeError: can't convert cuda:0 device type tensor to numpy`).
         """
-        inds = torch.arange(n_tot).to(self.device)
+        inds = torch.arange(n_tot)
         if stratification is None:
-            stratification = torch.ones(n_tot).to(self.device)
+            stratification = torch.ones(n_tot)
+        else:
+            stratification = stratification.cpu()
 
         return inds, stratification
 
@@ -367,6 +381,18 @@ def evaluate_replicability_multiproc(
             single-process execution. Pass `n_procs=1` for CUDA, or move
             `tensor` to CPU first to use multiple processes.
     """
+    is_cuda = _get_device(tensor).type == "cuda"
+    if is_cuda and n_procs >= 2:
+        # Checked first, before generate_tasks/decomposition do any work: fail
+        # fast on this misconfiguration rather than partway through a run.
+        raise ValueError(
+            f"n_procs={n_procs} requests multiprocessing, but `tensor` is on "
+            "CUDA. Running multiple worker processes against a CUDA context "
+            "is unsafe/unreliable across GPU driver setups -- pass "
+            "n_procs=1 to run sequentially on the GPU, or move `tensor` to "
+            "CPU first to use multiple processes.",
+        )
+
     tasks = replicability_engine.generate_tasks(
         _n_samples(tensor),
         stratification,
@@ -379,16 +405,6 @@ def evaluate_replicability_multiproc(
 
     results_dict: dict[Any, tuple[list[int], Any, list[torch.Tensor]]] = {}
 
-    is_cuda = _get_device(tensor).type == "cuda"
-    if is_cuda and n_procs >= 2:
-        raise ValueError(
-            f"n_procs={n_procs} requests multiprocessing, but `tensor` is on "
-            "CUDA. Running multiple worker processes against a CUDA context "
-            "is unsafe/unreliable across GPU driver setups -- pass "
-            "n_procs=1 to run sequentially on the GPU, or move `tensor` to "
-            "CPU first to use multiple processes.",
-        )
-
     # Use sequential processing for CUDA (multiprocessing doesn't work well with
     # CUDA -- see the ValueError above) or when n_procs < 2
     if n_procs < 2 or is_cuda:
@@ -399,15 +415,7 @@ def evaluate_replicability_multiproc(
             task_id, indices, weights, factors = _decomposition_worker(task)
             results_dict[task_id] = (indices, weights, factors)
     else:
-        # "spawn" rather than the platform-default "fork": if CUDA has already
-        # been initialized in this (parent) process -- even for unrelated work,
-        # since torch/CUDA initialization is process-global -- forked workers
-        # inherit that half-initialized CUDA state and crash with "Cannot
-        # re-initialize CUDA in forked subprocess" the moment they touch torch,
-        # regardless of whether these particular tasks run on CPU or GPU.
-        # "spawn" starts each worker as a fresh process instead, avoiding this.
-        # `initializer` sets up each fresh worker's own TensorLy backend --
-        # see `_init_worker_backend`.
+        # "spawn" rather than the platform-default "fork"
         with get_context("spawn").Pool(
             n_procs,
             initializer=_init_worker_backend,

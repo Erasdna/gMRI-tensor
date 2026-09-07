@@ -44,17 +44,21 @@ def test_CV_engine_input():
 def run_replicability(procs):
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     device = setup_backend()
-    tensor = torch.randn(30, 4, 10000).to(device)
+    # This only exercises the multiproc/engine plumbing (task counts, result
+    # shapes) -- not decomposition accuracy -- so keep the tensor, restart
+    # count and iteration budget small; a much bigger fit here previously
+    # made this test take several minutes for no added coverage.
+    tensor = torch.randn(10, 5, 6).to(device)
 
-    CV_splits = 5
-    CV_repeats = 2
+    CV_splits = 3
+    CV_repeats = 1
     CV_engine = CrossValidationEngine(
         splits=CV_splits,
         repeats=CV_repeats,
         device=device,
     )
 
-    half_repeats = 10
+    half_repeats = 2
     half_engine = HalfHalfEngine(
         repeats=half_repeats,
         device=device,
@@ -63,30 +67,27 @@ def run_replicability(procs):
     half_fms = evaluate_replicability_multiproc(
         half_engine,
         tensor,
-        3,
+        2,
         n_procs=procs,
-        init_repeats=10,
-        max_iter=5000,
+        init_repeats=2,
+        max_iter=100,
         verbose_level=0,
-        tolerance=1e-7,
+        tolerance=1e-4,
         progress_bar=False,
     )
-    print(half_fms)
     assert len(half_fms) == half_repeats
 
     CV_fms = evaluate_replicability_multiproc(
         CV_engine,
         tensor,
-        3,
+        2,
         n_procs=procs,
-        init_repeats=10,
-        max_iter=5000,
+        init_repeats=2,
+        max_iter=100,
         verbose_level=0,
-        tolerance=1e-7,
+        tolerance=1e-4,
         progress_bar=False,
     )
-    print(CV_fms)
-    print(len(CV_fms))
     assert len(CV_fms) == CV_repeats * comb(CV_splits, 2, exact=True)
 
 
@@ -95,7 +96,7 @@ def test_replicability_serial():
 
 
 def test_replicability_parallel():
-    run_replicability(10)
+    run_replicability(4)
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
@@ -118,6 +119,30 @@ def test_replicability_multiproc_rejects_cuda():
             init_repeats=1,
             progress_bar=False,
         )
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+def test_replicability_cuda_sequential_default_stratification():
+    # Regression test: ReplicabilityEngine.generate_tasks used to build its
+    # default stratification array on the engine's device, which broke
+    # scikit-learn's splitter for a CUDA engine even with n_procs=1 (no
+    # multiprocessing involved at all) -- it needs plain CPU/numpy-
+    # convertible data, not the tensor being decomposed.
+    os.environ["GMRITENSOR_USE_GPU"] = "TRUE"
+    device = setup_backend()
+    tensor = torch.randn(6, 4, 5).abs().to(device)
+
+    engine = HalfHalfEngine(repeats=1, device=device)
+    fms = evaluate_replicability_multiproc(
+        engine,
+        tensor,
+        2,
+        n_procs=1,
+        max_iter=10,
+        init_repeats=1,
+        progress_bar=False,
+    )
+    assert len(fms) == 1
 
 
 def run_replicability_parafac2(procs):
@@ -146,8 +171,8 @@ def run_replicability_parafac2(procs):
         2,
         method="PARAFAC2",
         n_procs=procs,
-        init_repeats=10,
-        max_iter=500,
+        init_repeats=3,
+        max_iter=100,
         verbose_level=0,
         tolerance=1e-4,
         progress_bar=False,
@@ -160,8 +185,8 @@ def run_replicability_parafac2(procs):
         2,
         method="PARAFAC2",
         n_procs=procs,
-        init_repeats=10,
-        max_iter=500,
+        init_repeats=3,
+        max_iter=100,
         verbose_level=0,
         tolerance=1e-4,
         progress_bar=False,
