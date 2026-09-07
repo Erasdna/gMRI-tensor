@@ -339,7 +339,7 @@ def make_evolving_factors_shared_timepoints(
 
 def test_plot_evolving_mode():
     evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
-    fig, axs = plot_evolving_mode(
+    fig, axs, significance = plot_evolving_mode(
         evolving_factors,
         timepoints,
         subjects,
@@ -347,6 +347,13 @@ def test_plot_evolving_mode():
         group_variable="group",
     )
     assert axs.shape == (2, 3)
+    assert list(significance.columns) == [
+        "component",
+        "timepoint",
+        "p_value",
+        "p_adj",
+        "significant",
+    ]
     plt.close(fig)
 
 
@@ -356,7 +363,7 @@ def test_plot_evolving_mode_single_component():
     evolving_factors, timepoints, subjects, subject_info = make_evolving_factors(
         n_components=1,
     )
-    fig, axs = plot_evolving_mode(
+    fig, axs, _ = plot_evolving_mode(
         evolving_factors,
         timepoints,
         subjects,
@@ -370,7 +377,7 @@ def test_plot_evolving_mode_single_component():
 def test_plot_evolving_mode_single_group():
     evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
     subject_info = subject_info.assign(group="A")
-    fig, axs = plot_evolving_mode(
+    fig, axs, significance = plot_evolving_mode(
         evolving_factors,
         timepoints,
         subjects,
@@ -378,6 +385,7 @@ def test_plot_evolving_mode_single_group():
         group_variable="group",
     )
     assert axs.shape == (2, 2)
+    assert significance.empty
     plt.close(fig)
 
 
@@ -388,7 +396,7 @@ def test_plot_evolving_mode_ribbon_layout():
         subjects,
         subject_info,
     ) = make_evolving_factors_shared_timepoints()
-    fig, axs = plot_evolving_mode(
+    fig, axs, significance = plot_evolving_mode(
         evolving_factors,
         timepoints,
         subjects,
@@ -399,6 +407,15 @@ def test_plot_evolving_mode_ribbon_layout():
     assert axs[0, 0].get_legend() is not None
     assert axs[0, 1].get_title() == "A"
     assert axs[0, 2].get_title() == "B"
+
+    # No significance markers should be drawn on the ribbon axes anymore.
+    ribbon_markers = {line.get_marker() for line in axs[0, 0].get_lines()}
+    assert "*" not in ribbon_markers
+
+    shifted = significance[significance["timepoint"].isin([3, 4, 5])]
+    unshifted = significance[significance["timepoint"].isin([0, 1, 2])]
+    assert shifted["significant"].all()
+    assert not unshifted["significant"].any()
     plt.close(fig)
 
 

@@ -220,12 +220,10 @@ def _test_group_differences_over_time(
 def _plot_ribbon_column(
     ax: matplotlib.axes.Axes,
     ribbon_stats: pd.DataFrame,
-    significance: pd.DataFrame,
     categories: list[str],
     color_by_group: dict[str, str],
-    significance_alpha: float,
 ) -> tuple[float, float]:
-    """Draw a mean +/- SEM ribbon per group, with significance markers.
+    """Draw a mean +/- SEM ribbon per group.
 
     Parameters
     ----------
@@ -234,21 +232,15 @@ def _plot_ribbon_column(
     ribbon_stats : pd.DataFrame
         `_compute_group_ribbon_stats` output, pre-filtered to one
         component.
-    significance : pd.DataFrame
-        `_test_group_differences_over_time` output, pre-filtered to the
-        same component. May be empty.
     categories : list[str]
         Group labels, in the order they should be plotted/legended.
     color_by_group : dict[str, str]
         Color for each group.
-    significance_alpha : float
-        Threshold on `p_adj` below which a timepoint is marked significant.
 
     Returns
     -------
     tuple[float, float]
-        `(ymin, ymax)` actually drawn (ribbon bands and significance
-        markers), for row-wise y-limit finalization.
+        `(ymin, ymax)` actually drawn, for row-wise y-limit finalization.
     """
     ymin, ymax = np.inf, -np.inf
     for category in categories:
@@ -265,22 +257,6 @@ def _plot_ribbon_column(
         ax.fill_between(timepoints, mean - sem, mean + sem, color=color, alpha=0.25)
         ymin = min(ymin, np.min(mean - sem))
         ymax = max(ymax, np.max(mean + sem))
-
-    if not significance.empty:
-        significant_timepoints = significance.loc[
-            significance["p_adj"] < significance_alpha,
-            "timepoint",
-        ]
-        if len(significant_timepoints) and np.isfinite(ymax):
-            ax.plot(
-                significant_timepoints,
-                np.full(len(significant_timepoints), ymax),
-                linestyle="none",
-                marker="*",
-                markersize=8,
-                color="black",
-                label="_nolegend_",
-            )
 
     return ymin, ymax
 
@@ -330,8 +306,7 @@ def _finalize_evolving_mode_axes(
     Direct analogue of `subject_mode._finalize_boxplot_axes`'s two-pass
     pattern: rendering happens first so the actual data range is known,
     then every axes in a row is given the same y-limits so the ribbon
-    column and per-group columns stay visually comparable. Extra headroom
-    is added on top so significance star markers don't collide with data.
+    column and per-group columns stay visually comparable.
 
     Parameters
     ----------
@@ -346,7 +321,7 @@ def _finalize_evolving_mode_axes(
             continue
         span = ymax - ymin if ymax > ymin else 1.0
         for ax in axs[component, :]:
-            ax.set_ylim(ymin - 0.05 * span, ymax + 0.2 * span)
+            ax.set_ylim(ymin - 0.05 * span, ymax + 0.05 * span)
 
 
 def plot_evolving_mode(
@@ -359,14 +334,15 @@ def plot_evolving_mode(
     width_to_height_ratio: float = 1.618,
     min_group_n: int = 2,
     significance_alpha: float = 0.05,
-) -> tuple[matplotlib.figure.Figure, np.ndarray]:
+) -> tuple[matplotlib.figure.Figure, np.ndarray, pd.DataFrame]:
     """Plot each subject's own PARAFAC2 evolving-mode (time) pattern.
 
     One row per component, `1 + n_groups` columns: the first column is a
-    ribbon plot (per-group mean +/- SEM band, colored by `group_variable`,
-    with star markers above timepoints where the groups significantly
-    differ), followed by one column per group showing that group's
-    individual subjects' own reconstructed time curves.
+    ribbon plot (per-group mean +/- SEM band, colored by `group_variable`),
+    followed by one column per group showing that group's individual
+    subjects' own reconstructed time curves. Per-timepoint group-difference
+    significance is computed but not drawn -- it's returned as a
+    `pd.DataFrame` instead, see `Returns`.
 
     Parameters
     ----------
@@ -392,17 +368,24 @@ def plot_evolving_mode(
         group-difference test to be run there. By default 2, the smallest
         `n` at which the underlying rank-based test is non-degenerate.
     significance_alpha : float, optional
-        FDR-corrected p-value threshold below which a timepoint is marked
-        significant on the ribbon plot. By default 0.05.
+        FDR-corrected p-value threshold below which a timepoint is flagged
+        `significant` in the returned DataFrame. By default 0.05.
 
     Returns
     -------
-    tuple[matplotlib.figure.Figure, np.ndarray]
-        Figure and 2D axes array with shape `(n_components, 1 + n_groups)`
-        -- note this is a wider grid than this function used to return
-        (previously `(n_components, 1)`): column 0 is the ribbon plot,
-        columns 1..n_groups are one per group (in `sorted(set(groups))`
-        order).
+    tuple[matplotlib.figure.Figure, np.ndarray, pd.DataFrame]
+        `(fig, axs, significance)`:
+        - `fig`, `axs`: figure and 2D axes array with shape
+          `(n_components, 1 + n_groups)` -- note this is a wider grid than
+          this function used to return (previously `(n_components, 1)`):
+          column 0 is the ribbon plot, columns 1..n_groups are one per
+          group (in `sorted(set(groups))` order).
+        - `significance`: per-timepoint group-difference test results, with
+          columns `component`, `timepoint`, `p_value`, `p_adj`,
+          `significant` (`p_adj < significance_alpha`). Empty (but
+          correctly columned) if fewer than two groups are given or no
+          timepoint had enough subjects per group to test -- see
+          `_test_group_differences_over_time`.
 
     Raises
     ------
@@ -426,13 +409,14 @@ def plot_evolving_mode(
     a two-sided Mann-Whitney U test for two groups, or Kruskal-Wallis for
     more than two, run independently at each timepoint that has at least
     `min_group_n` subjects per group, with Benjamini-Hochberg FDR
-    correction applied per component. Significant timepoints are marked
-    with a plain star above the ribbon rather than `statannotations`
-    brackets: `statannotations.Annotator` annotates pairwise comparisons
-    between fixed categorical x-positions (as used for boxplots in
-    `gMRItensor.plotting.subject_mode.make_subject_boxplot`), which doesn't
-    fit a comparison repeated at many points along a continuous time axis.
-    With a single group, no comparison is possible and no tests are run.
+    correction applied per component. Results are returned as a DataFrame
+    rather than drawn on the plot: a significance marker repeated at every
+    tested point along a continuous time axis doesn't read well, and
+    `statannotations.Annotator` (used for boxplots in
+    `gMRItensor.plotting.subject_mode.make_subject_boxplot`) is built for
+    bracket annotations between fixed categorical x-positions, which
+    doesn't fit here either. With a single group, no comparison is
+    possible and no tests are run.
     """
     if not (len(evolving_factors) == len(timepoints_per_subject) == len(subjects)):
         raise ValueError(
@@ -471,6 +455,7 @@ def plot_evolving_mode(
         categories,
         min_group_n=min_group_n,
     )
+    significance["significant"] = significance["p_adj"] < significance_alpha
 
     n_columns = 1 + len(categories)
     figsize = compute_figsize(
@@ -497,16 +482,11 @@ def plot_evolving_mode(
         ribbon_stats_component = ribbon_stats.loc[
             ribbon_stats["component"] == component,
         ]
-        significance_component = significance.loc[
-            significance["component"] == component,
-        ]
         row_min, row_max = _plot_ribbon_column(
             axs[component, 0],
             ribbon_stats_component,
-            significance_component,
             categories,
             color_by_group,
-            significance_alpha,
         )
 
         for col, category in enumerate(categories, start=1):
@@ -535,9 +515,9 @@ def plot_evolving_mode(
             axs[component, 0].legend(frameon=True, framealpha=0.9)
         if component == n_components - 1:
             for ax in axs[component, :]:
-                ax.set_xlabel("Time")
+                ax.set_xlabel("Time after injection")
 
     _finalize_evolving_mode_axes(axs, row_ylims)
     fig.align_titles()
 
-    return fig, axs
+    return fig, axs, significance
