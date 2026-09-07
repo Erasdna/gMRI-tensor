@@ -1,10 +1,11 @@
 from abc import ABC
 from abc import abstractmethod
-from multiprocessing import Pool
+from multiprocessing import get_context
 from typing import Any
 from typing import Literal
 
 import numpy as np
+import tensorly as tl
 import torch
 from gMRItensor import run_CP_decomposition_repeated
 from gMRItensor import run_PARAFAC2_decomposition_repeated
@@ -265,6 +266,21 @@ def _get_device(tensor: torch.Tensor | list[torch.Tensor]) -> torch.device:
     return tensor.device if isinstance(tensor, torch.Tensor) else tensor[0].device
 
 
+def _init_worker_backend() -> None:
+    """Pool initializer: set up TensorLy's backend in each worker process.
+
+    With the "fork" start method, a worker inherits the parent process's
+    memory wholesale, including whatever `tl.set_backend("pytorch")` the
+    caller already ran (typically via `gMRItensor.setup_backend`). With
+    "spawn" (used here -- see `evaluate_replicability_multiproc`'s Pool
+    call for why), each worker starts as a fresh Python process that never
+    ran that setup, so TensorLy falls back to its default numpy backend and
+    fails to interpret the torch tensors handed to it. Registered as the
+    `Pool` initializer so it runs once per worker before any task.
+    """
+    tl.set_backend("pytorch")
+
+
 def _decomposition_worker(
     task_args: tuple[
         Any,
@@ -334,12 +350,22 @@ def evaluate_replicability_multiproc(
         rank: Number of components for the decomposition
         method: "CP" or "PARAFAC2"
         stratification: Optional stratification labels for splitting
-        n_procs: Number of parallel processes (ignored if using CUDA)
+        n_procs: Number of parallel processes. Must be 1 if `tensor` is on
+            CUDA -- see Raises.
         **CP_kwargs: Additional arguments passed to
             run_CP_decomposition_repeated / run_PARAFAC2_decomposition_repeated
 
     Returns:
         List of FMS score tuples (format depends on engine type)
+
+    Raises:
+        ValueError: If `n_procs >= 2` and `tensor` is on CUDA. Worker
+            processes touching a CUDA context derived from an already
+            CUDA-initialized parent is unreliable across GPU driver/runtime
+            setups (regardless of multiprocessing start method), so this is
+            rejected outright rather than silently falling back to
+            single-process execution. Pass `n_procs=1` for CUDA, or move
+            `tensor` to CPU first to use multiple processes.
     """
     tasks = replicability_engine.generate_tasks(
         _n_samples(tensor),
@@ -353,9 +379,19 @@ def evaluate_replicability_multiproc(
 
     results_dict: dict[Any, tuple[list[int], Any, list[torch.Tensor]]] = {}
 
-    # Use sequential processing for CUDA (multiprocessing doesn't work well with CUDA)
-    # or when n_procs < 2
-    if n_procs < 2 or _get_device(tensor).type == "cuda":
+    is_cuda = _get_device(tensor).type == "cuda"
+    if is_cuda and n_procs >= 2:
+        raise ValueError(
+            f"n_procs={n_procs} requests multiprocessing, but `tensor` is on "
+            "CUDA. Running multiple worker processes against a CUDA context "
+            "is unsafe/unreliable across GPU driver setups -- pass "
+            "n_procs=1 to run sequentially on the GPU, or move `tensor` to "
+            "CPU first to use multiple processes.",
+        )
+
+    # Use sequential processing for CUDA (multiprocessing doesn't work well with
+    # CUDA -- see the ValueError above) or when n_procs < 2
+    if n_procs < 2 or is_cuda:
         for task in tqdm(
             task_args,
             desc="Computing decompositions (sequential)",
@@ -363,7 +399,19 @@ def evaluate_replicability_multiproc(
             task_id, indices, weights, factors = _decomposition_worker(task)
             results_dict[task_id] = (indices, weights, factors)
     else:
-        with Pool(n_procs) as pool:
+        # "spawn" rather than the platform-default "fork": if CUDA has already
+        # been initialized in this (parent) process -- even for unrelated work,
+        # since torch/CUDA initialization is process-global -- forked workers
+        # inherit that half-initialized CUDA state and crash with "Cannot
+        # re-initialize CUDA in forked subprocess" the moment they touch torch,
+        # regardless of whether these particular tasks run on CPU or GPU.
+        # "spawn" starts each worker as a fresh process instead, avoiding this.
+        # `initializer` sets up each fresh worker's own TensorLy backend --
+        # see `_init_worker_backend`.
+        with get_context("spawn").Pool(
+            n_procs,
+            initializer=_init_worker_backend,
+        ) as pool:
             for task_id, indices, weights, factors in tqdm(
                 pool.imap_unordered(_decomposition_worker, task_args),
                 total=len(task_args),

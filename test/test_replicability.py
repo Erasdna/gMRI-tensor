@@ -1,5 +1,6 @@
 import os
 
+import pytest
 import torch
 from gMRItensor import setup_backend
 from gMRItensor.replicability import CrossValidationEngine
@@ -64,10 +65,10 @@ def run_replicability(procs):
         tensor,
         3,
         n_procs=procs,
-        CP_init_repeats=10,
-        CP_max_iter=5000,
-        CP_verbose_level=0,
-        CP_tolerance=1e-7,
+        init_repeats=10,
+        max_iter=5000,
+        verbose_level=0,
+        tolerance=1e-7,
         progress_bar=False,
     )
     print(half_fms)
@@ -78,10 +79,10 @@ def run_replicability(procs):
         tensor,
         3,
         n_procs=procs,
-        CP_init_repeats=10,
-        CP_max_iter=5000,
-        CP_verbose_level=0,
-        CP_tolerance=1e-7,
+        init_repeats=10,
+        max_iter=5000,
+        verbose_level=0,
+        tolerance=1e-7,
         progress_bar=False,
     )
     print(CV_fms)
@@ -95,6 +96,28 @@ def test_replicability_serial():
 
 def test_replicability_parallel():
     run_replicability(10)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="requires a CUDA device")
+def test_replicability_multiproc_rejects_cuda():
+    # Running worker processes against an already-CUDA-initialized parent is
+    # unsafe/unreliable across GPU driver setups, so n_procs >= 2 with a CUDA
+    # tensor must raise rather than silently fall back to sequential.
+    os.environ["GMRITENSOR_USE_GPU"] = "TRUE"
+    device = setup_backend()
+    tensor = torch.randn(6, 4, 5).abs().to(device)
+
+    engine = HalfHalfEngine(repeats=1, device=device)
+    with pytest.raises(ValueError, match="CUDA"):
+        evaluate_replicability_multiproc(
+            engine,
+            tensor,
+            2,
+            n_procs=2,
+            max_iter=10,
+            init_repeats=1,
+            progress_bar=False,
+        )
 
 
 def run_replicability_parafac2(procs):
@@ -123,10 +146,10 @@ def run_replicability_parafac2(procs):
         2,
         method="PARAFAC2",
         n_procs=procs,
-        PARAFAC2_init_repeats=10,
-        PARAFAC2_max_iter=500,
-        PARAFAC2_verbose_level=0,
-        PARAFAC2_tolerance=1e-4,
+        init_repeats=10,
+        max_iter=500,
+        verbose_level=0,
+        tolerance=1e-4,
         progress_bar=False,
     )
     assert len(half_fms) == half_repeats
@@ -137,10 +160,10 @@ def run_replicability_parafac2(procs):
         2,
         method="PARAFAC2",
         n_procs=procs,
-        PARAFAC2_init_repeats=10,
-        PARAFAC2_max_iter=500,
-        PARAFAC2_verbose_level=0,
-        PARAFAC2_tolerance=1e-4,
+        init_repeats=10,
+        max_iter=500,
+        verbose_level=0,
+        tolerance=1e-4,
         progress_bar=False,
     )
     assert len(CV_fms) == CV_repeats * comb(CV_splits, 2, exact=True)

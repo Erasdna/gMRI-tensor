@@ -61,8 +61,8 @@ def test_CP_non_negative_default():
     _, factors, _ = run_CP_decomposition_repeated(
         tensor,
         rank=2,
-        CP_max_iter=500,
-        CP_init_repeats=5,
+        max_iter=500,
+        init_repeats=5,
         device=device,
         progress_bar=False,
     )
@@ -80,8 +80,8 @@ def test_CP_plain_allows_negative_factors():
     _, factors, _ = run_CP_decomposition_repeated(
         tensor,
         rank=2,
-        CP_max_iter=500,
-        CP_init_repeats=5,
+        max_iter=500,
+        init_repeats=5,
         device=device,
         progress_bar=False,
         non_negative=False,
@@ -102,8 +102,8 @@ def run_PARAFAC2(use_gpu):
     weights, factors, projections, error = run_PARAFAC2_decomposition_repeated(
         slices,
         rank=2,
-        PARAFAC2_max_iter=200,
-        PARAFAC2_init_repeats=3,
+        max_iter=200,
+        init_repeats=3,
         device=device,
         progress_bar=False,
     )
@@ -123,6 +123,32 @@ def test_PARAFAC2_gpu():
     run_PARAFAC2("TRUE")
 
 
+def test_PARAFAC2_normalize_factors():
+    # `normalize` wasn't previously exposed by run_PARAFAC2_decomposition_repeated
+    # even though compute_PARAFAC2_decomposition already supported it -- with
+    # normalize=True, every factor matrix's columns should come out unit-norm.
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+
+    rng = np.random.default_rng(0)
+    slices = [
+        torch.from_numpy(rng.random((n_timepoints, 5))).to(device)
+        for n_timepoints in (4, 5, 6)
+    ]
+    _, factors, _, _ = run_PARAFAC2_decomposition_repeated(
+        slices,
+        rank=2,
+        max_iter=200,
+        init_repeats=3,
+        device=device,
+        progress_bar=False,
+        normalize=True,
+    )
+    for factor in factors:
+        norms = torch.linalg.norm(factor, dim=0)
+        assert torch.allclose(norms, torch.ones_like(norms), atol=1e-4)
+
+
 def test_PARAFAC2_no_convergence_raises():
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     device = setup_backend()
@@ -136,8 +162,8 @@ def test_PARAFAC2_no_convergence_raises():
         run_PARAFAC2_decomposition_repeated(
             slices,
             rank=2,
-            PARAFAC2_max_iter=1,
-            PARAFAC2_init_repeats=2,
+            max_iter=1,
+            init_repeats=2,
             device=device,
             progress_bar=False,
         )
@@ -167,8 +193,8 @@ def test_CP_nan_with_imputation_succeeds():
     weights, factors, error = run_CP_decomposition_repeated(
         tensor,
         rank=2,
-        CP_max_iter=500,
-        CP_init_repeats=5,
+        max_iter=500,
+        init_repeats=5,
         device=device,
         progress_bar=False,
         allow_nan_imputation=True,
@@ -187,8 +213,8 @@ def test_PARAFAC2_rejects_nan():
         run_PARAFAC2_decomposition_repeated(
             slices,
             rank=2,
-            PARAFAC2_max_iter=50,
-            PARAFAC2_init_repeats=2,
+            max_iter=50,
+            init_repeats=2,
             device=device,
             progress_bar=False,
         )

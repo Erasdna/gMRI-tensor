@@ -264,15 +264,32 @@ def _repeat_with_restarts(
     return best_decomp, best_error.float().cpu()
 
 
+def _maybe_register_memory_efficient_khatri_rao(enabled: bool) -> None:
+    """Register TensorLy's memory-efficient MTTKRP backend method, if enabled.
+
+    `tl.tenalg.register_backend_method` is a global TensorLy backend
+    registration, not specific to any one decomposition -- shared by
+    `run_CP_decomposition_repeated` and `run_PARAFAC2_decomposition_repeated`,
+    since both algorithms' ALS iterations rely on the same underlying
+    MTTKRP operation.
+    """
+    if enabled:
+        tl.tenalg.register_backend_method(
+            "unfolding_dot_khatri_rao",
+            unfolding_dot_khatri_rao_memory,
+        )
+        tl.tenalg.use_dynamic_dispatch()
+
+
 def run_CP_decomposition_repeated(
     tensor: torch.Tensor,
     rank: int,
-    CP_max_iter: int = 5000,
-    CP_init_repeats: int = 50,
+    max_iter: int = 5000,
+    init_repeats: int = 50,
     device: torch.device = torch.device("cpu"),
     use_memory_efficient_khatri_rao: bool = True,
-    CP_verbose_level: int = 0,
-    CP_tolerance: float = 1e-5,
+    verbose_level: int = 0,
+    tolerance: float = 1e-5,
     progress_bar: bool = True,
     normalize: bool = False,
     allow_nan_imputation: bool = False,
@@ -282,22 +299,29 @@ def run_CP_decomposition_repeated(
 
     See `compute_CP_decomposition` for the meaning of `allow_nan_imputation`
     and `non_negative`.
+
+    Notes
+    -----
+    Shares its option names (`max_iter`, `init_repeats`, `verbose_level`,
+    `tolerance`, `normalize`, `use_memory_efficient_khatri_rao`,
+    `progress_bar`, `device`, `rank`) with
+    `run_PARAFAC2_decomposition_repeated` -- see that function's docstring
+    for the options it doesn't share (`nn_modes` instead of
+    `non_negative`; no `allow_nan_imputation`). Kept in sync so a single
+    `**kwargs` dict of shared options (e.g.
+    `gMRItensor.replicability.evaluate_replicability_multiproc`'s
+    `CP_kwargs`) can be forwarded to either function.
     """
-    if use_memory_efficient_khatri_rao:
-        tl.tenalg.register_backend_method(
-            "unfolding_dot_khatri_rao",
-            unfolding_dot_khatri_rao_memory,
-        )
-        tl.tenalg.use_dynamic_dispatch()
+    _maybe_register_memory_efficient_khatri_rao(use_memory_efficient_khatri_rao)
 
     def attempt(random_state: int):
         return compute_CP_decomposition(
             tensor,
             rank,
-            CP_max_iter,
+            max_iter,
             random_state=random_state,
-            CP_verbose_level=CP_verbose_level,
-            CP_tolerance=CP_tolerance,
+            CP_verbose_level=verbose_level,
+            CP_tolerance=tolerance,
             normalize_factors=normalize,
             allow_nan_imputation=allow_nan_imputation,
             non_negative=non_negative,
@@ -310,9 +334,9 @@ def run_CP_decomposition_repeated(
     (best_weights, best_factors), best_error = _repeat_with_restarts(
         attempt,
         to_cpu,
-        CP_init_repeats,
+        init_repeats,
         device,
-        CP_verbose_level,
+        verbose_level,
         progress_bar,
     )
 
@@ -322,18 +346,34 @@ def run_CP_decomposition_repeated(
 def run_PARAFAC2_decomposition_repeated(
     tensor_slices: list[torch.Tensor] | torch.Tensor,
     rank: int,
-    PARAFAC2_max_iter: int = 2000,
-    PARAFAC2_init_repeats: int = 50,
+    max_iter: int = 2000,
+    init_repeats: int = 50,
     device: torch.device = torch.device("cpu"),
-    PARAFAC2_verbose_level: int = 0,
-    PARAFAC2_tolerance: float = 1e-5,
+    use_memory_efficient_khatri_rao: bool = True,
+    verbose_level: int = 0,
+    tolerance: float = 1e-5,
     progress_bar: bool = True,
+    normalize: bool = False,
     nn_modes: tuple[int, ...] | None = (0, 2),
 ) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
     """Repeatedly fit a PARAFAC2 decomposition from random restarts.
 
     See `compute_PARAFAC2_decomposition` for the meaning of `nn_modes` and
     why this is not `torch.compile`-wrapped.
+
+    Notes
+    -----
+    Shares its option names (`max_iter`, `init_repeats`, `verbose_level`,
+    `tolerance`, `normalize`, `use_memory_efficient_khatri_rao`,
+    `progress_bar`, `device`, `rank`) with `run_CP_decomposition_repeated`
+    -- see that function's `Notes`. Two options aren't shared: `nn_modes`
+    replaces CP's flat `non_negative` bool (it's strictly more expressive
+    -- it picks *which* modes are constrained, defaulting to `(0, 2)`;
+    pass `None` for an unconstrained fit); and there's no
+    `allow_nan_imputation` here, since this TensorLy version has no
+    PARAFAC2 mask/imputation support at all (see
+    `compute_PARAFAC2_decomposition`) -- unlike CP, NaN input always
+    raises regardless of any parameter.
 
     Returns
     -------
@@ -344,15 +384,17 @@ def run_PARAFAC2_decomposition_repeated(
         projection needed to reconstruct that subject's own time pattern
         (`projections[i] @ best_factors[1]`).
     """
+    _maybe_register_memory_efficient_khatri_rao(use_memory_efficient_khatri_rao)
 
     def attempt(random_state: int):
         return compute_PARAFAC2_decomposition(
             tensor_slices,
             rank,
-            PARAFAC2_max_iter,
+            max_iter,
             random_state=random_state,
-            PARAFAC2_verbose_level=PARAFAC2_verbose_level,
-            PARAFAC2_tolerance=PARAFAC2_tolerance,
+            PARAFAC2_verbose_level=verbose_level,
+            PARAFAC2_tolerance=tolerance,
+            normalize_factors=normalize,
             nn_modes=nn_modes,
         )
 
@@ -365,9 +407,9 @@ def run_PARAFAC2_decomposition_repeated(
     (best_weights, best_factors, best_projections), best_error = _repeat_with_restarts(
         attempt,
         to_cpu,
-        PARAFAC2_init_repeats,
+        init_repeats,
         device,
-        PARAFAC2_verbose_level,
+        verbose_level,
         progress_bar,
     )
 
