@@ -93,7 +93,7 @@ def get_color_palette(n_colors: int) -> list:
         List of colors from matplotlib's tab10 palette, cycling if
         n_colors exceeds 10.
     """
-    return [f"C{i % 10}" for i in range(n_colors)]
+    return [f"C{3*i % 10}" for i in range(n_colors)]
 
 
 def scatter_to_volume(
