@@ -20,16 +20,13 @@ class ReplicabilityEngine(ABC):
 
     def __init__(
         self,
-        device: str = "cpu",
         seed: int = 0,
     ) -> None:
         """Initialize the replicability engine.
 
         Args:
-            device: Device to use for tensor operations ('cpu' or 'cuda')
             seed: Random seed for reproducibility
         """
-        self.device = device
         self.seed = seed
         # Set seed
         torch.manual_seed(self.seed)
@@ -55,12 +52,15 @@ class ReplicabilityEngine(ABC):
         `inds`/`stratification` are index-bookkeeping arrays consumed by
         scikit-learn's splitters (`self.rskf.split` in the subclasses),
         which need plain CPU/numpy-convertible data -- not the tensors being
-        decomposed, so they're kept on CPU regardless of `self.device` (that
-        setting is for the actual decomposition compute, done separately in
-        `evaluate_replicability_multiproc`). Passing a CUDA `tensor` to that
-        function with the default `stratification=None` used to build a
-        CUDA `stratification` tensor here, which scikit-learn cannot accept
-        (`TypeError: can't convert cuda:0 device type tensor to numpy`).
+        decomposed (whose device is handled separately, per call, in
+        `evaluate_replicability_multiproc`) -- so they're always kept on
+        CPU here, including an explicitly-passed `stratification` that
+        happens to be on another device. A previous version of this engine
+        stored a `device` and moved these arrays onto it, which broke
+        scikit-learn for a CUDA-configured engine even with no
+        multiprocessing involved at all (`TypeError: can't convert cuda:0
+        device type tensor to numpy`); removed since nothing here needs a
+        device in the first place.
         """
         inds = torch.arange(n_tot)
         if stratification is None:
@@ -92,17 +92,15 @@ class HalfHalfEngine(ReplicabilityEngine):
     def __init__(
         self,
         repeats: int,
-        device: str = "cpu",
         seed: int = 0,
     ) -> None:
         """Initialize half-half split engine.
 
         Args:
             repeats: Number of random half-half splits to perform
-            device: Device to use for tensor operations
             seed: Random seed for reproducibility
         """
-        super().__init__(device, seed)
+        super().__init__(seed)
         self.repeats = repeats
         self.rskf = StratifiedShuffleSplit(
             n_splits=repeats,
@@ -172,7 +170,6 @@ class CrossValidationEngine(ReplicabilityEngine):
         self,
         splits: int,
         repeats: int,
-        device: str = "cpu",
         seed: int = 0,
     ) -> None:
         """Initialize cross-validation engine.
@@ -180,10 +177,9 @@ class CrossValidationEngine(ReplicabilityEngine):
         Args:
             splits: Number of folds per repeat
             repeats: Number of times to repeat the cross-validation
-            device: Device to use for tensor operations
             seed: Random seed for reproducibility
         """
-        super().__init__(device, seed)
+        super().__init__(seed)
         self.splits = splits
         self.repeats = repeats
 

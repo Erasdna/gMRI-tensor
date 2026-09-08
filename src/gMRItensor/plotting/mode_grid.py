@@ -3,6 +3,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scienceplots  # noqa: F401
+from gMRItensor.plotting.spatial_mode import _percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
@@ -30,14 +31,33 @@ def plot_mode_grid(
     subject_info: pd.DataFrame,
     group_variable: str,
     page_width: float = 7.0,
+    share_colorbar_scaling: bool = False,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
+    """Plot a component-per-row grid: time, subject boxplot, and spatial mode.
 
+    See `gMRItensor.plotting.spatial_mode.plot_spatial_mode` for the two
+    spatial columns' `mask`/percentile-scaling behavior -- the same
+    approach is used here for the Parenchyma/CSF columns.
+
+    Parameters
+    ----------
+    share_colorbar_scaling : bool, optional
+        If True, a given component's Parenchyma and CSF colorbars share one
+        `vmin`/`vmax` (5th-95th percentile of positive values, pooled from
+        both regions), making that component's color intensity directly
+        comparable between the two spatial columns. If False (the default,
+        unchanged behavior), each column is scaled independently from only
+        its own masked values. By default False. Mirrors
+        `plot_spatial_mode`'s parameter of the same name.
+    """
     # TODO: Verify the all inpute modes have same nb of components
     n_components = spatial_mode.shape[1]
 
     scaled_spatial_mode = scale_mode(spatial_mode)
     scaled_time_mode = scale_mode(time_mode)
     scaled_subject_mode = scale_mode(subject_mode)
+
+    combined_index_mask = parenchyma_index_mask | csf_index_mask
 
     # Calculate width ratios based on actual image aspect ratios
     # Get the shape of the sagittal slice
@@ -141,6 +161,11 @@ def plot_mode_grid(
         parenchyma_ax = axs[component, 2]
         csf_ax = axs[component, 3]
 
+        if share_colorbar_scaling:
+            shared_vmin, shared_vmax = _percentile_vlim(
+                scaled_spatial_mode[combined_index_mask, component],
+            )
+
         for ax, ids_mask in zip(
             [parenchyma_ax, csf_ax],
             [parenchyma_index_mask, csf_index_mask],
@@ -151,14 +176,18 @@ def plot_mode_grid(
                 background.shape,
                 mask=ids_mask,
             )
+            if share_colorbar_scaling:
+                vmin, vmax = shared_vmin, shared_vmax
+            else:
+                vmin, vmax = _percentile_vlim(spatial_component)
 
             im = plot_enhancement_with_background(
                 ax,
                 np.flip(np.rot90(background[sagittal_slice], 1), 1),
                 np.flip(np.rot90(spatial_component[sagittal_slice], 1), 1),
                 "plasma",
-                vmin=np.percentile(spatial_component[spatial_component > 0], 5),
-                vmax=np.percentile(spatial_component[spatial_component > 0], 95),
+                vmin=vmin,
+                vmax=vmax,
                 mask=np.flip(np.rot90(voxel_mask[sagittal_slice], 1), 1),
             )
             # Create temporary colorbar to measure exponent text width

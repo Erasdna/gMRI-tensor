@@ -125,6 +125,16 @@ def plot_brain(
         ax[jj].set_yticks([])
 
 
+def _percentile_vlim(
+    values: np.ndarray,
+    low: float = 5,
+    high: float = 95,
+) -> tuple[float, float]:
+    """5th/95th (by default) percentile of `values`' positive entries."""
+    positive = values[values > 0]
+    return np.percentile(positive, low), np.percentile(positive, high)
+
+
 def plot_spatial_mode(
     spatial_mode: np.ndarray,
     index_list: np.ndarray,
@@ -133,6 +143,7 @@ def plot_spatial_mode(
     slices: list,
     page_width: float = 7.0,
     width_to_height_ratio: float = 1.618,
+    share_colorbar_scaling: bool = False,
 ):
     """Plot spatial mode components mapped onto brain slices.
 
@@ -161,6 +172,16 @@ def plot_spatial_mode(
         By default 7.0.
     width_to_height_ratio : float, optional
         Desired width-to-height ratio for each subplot. By default 1.618 (golden ratio).
+    share_colorbar_scaling : bool, optional
+        If True, a given component's colorbar (5th-95th percentile of its
+        positive values) is computed once from the union of all
+        `region_masks`, and that same `vmin`/`vmax` is reused for every
+        region's figure -- so a component's color intensity is directly
+        comparable across regions. If False (the default, unchanged
+        behavior), each region's colorbar is scaled independently from only
+        its own masked values, which is not comparable across regions but
+        makes the best use of each region's own color range. By default
+        False.
 
     Yields
     ------
@@ -179,6 +200,16 @@ def plot_spatial_mode(
         0.05,
     ]
     n_components = spatial_mode.shape[1]
+
+    shared_vlims: list[tuple[float, float]] | None = None
+    if share_colorbar_scaling:
+        combined_mask = np.zeros(index_list.shape[0], dtype=bool)
+        for ids_mask in region_masks.values():
+            combined_mask |= ids_mask
+        shared_vlims = [
+            _percentile_vlim(scaled_spatial_mode[combined_mask, component])
+            for component in range(n_components)
+        ]
 
     # Compute figsize
     figsize = compute_figsize(
@@ -206,6 +237,10 @@ def plot_spatial_mode(
                 background_shape,
                 mask=ids_mask,
             )
+            if shared_vlims is not None:
+                vmin, vmax = shared_vlims[component]
+            else:
+                vmin, vmax = _percentile_vlim(spatial_component)
             plot_brain(
                 big_fig,
                 big_ax[component],
@@ -213,8 +248,8 @@ def plot_spatial_mode(
                 background,
                 "plasma",
                 slices,
-                vmin=np.percentile(spatial_component[spatial_component > 0], 5),
-                vmax=np.percentile(spatial_component[spatial_component > 0], 95),
+                vmin=vmin,
+                vmax=vmax,
                 label="",
                 mask=voxel_mask,
             )

@@ -11,12 +11,9 @@ from scipy.special import comb
 
 def test_half_half_engine_input():
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
-    device = setup_backend()
+    setup_backend()
     repeats = 100
-    engine = HalfHalfEngine(
-        repeats=repeats,
-        device=device,
-    )
+    engine = HalfHalfEngine(repeats=repeats)
     n_tot = 30
     tasks = engine.generate_tasks(n_tot)
     assert len(tasks) == repeats * 2
@@ -26,15 +23,11 @@ def test_half_half_engine_input():
 
 def test_CV_engine_input():
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
-    device = setup_backend()
+    setup_backend()
 
     splits = 10
     repeats = 10
-    engine = CrossValidationEngine(
-        splits=splits,
-        repeats=repeats,
-        device=device,
-    )
+    engine = CrossValidationEngine(splits=splits, repeats=repeats)
     tasks = engine.generate_tasks(30)
 
     assert len(tasks) == engine.nb_folds
@@ -52,17 +45,10 @@ def run_replicability(procs):
 
     CV_splits = 3
     CV_repeats = 1
-    CV_engine = CrossValidationEngine(
-        splits=CV_splits,
-        repeats=CV_repeats,
-        device=device,
-    )
+    CV_engine = CrossValidationEngine(splits=CV_splits, repeats=CV_repeats)
 
     half_repeats = 2
-    half_engine = HalfHalfEngine(
-        repeats=half_repeats,
-        device=device,
-    )
+    half_engine = HalfHalfEngine(repeats=half_repeats)
 
     half_fms = evaluate_replicability_multiproc(
         half_engine,
@@ -108,7 +94,7 @@ def test_replicability_multiproc_rejects_cuda():
     device = setup_backend()
     tensor = torch.randn(6, 4, 5).abs().to(device)
 
-    engine = HalfHalfEngine(repeats=1, device=device)
+    engine = HalfHalfEngine(repeats=1)
     with pytest.raises(ValueError, match="CUDA"):
         evaluate_replicability_multiproc(
             engine,
@@ -132,14 +118,14 @@ def test_replicability_cuda_sequential_default_stratification():
     device = setup_backend()
     tensor = torch.randn(6, 4, 5).abs().to(device)
 
-    engine = HalfHalfEngine(repeats=1, device=device)
+    engine = HalfHalfEngine(repeats=1)
     fms = evaluate_replicability_multiproc(
         engine,
         tensor,
         2,
         n_procs=1,
-        max_iter=10,
-        init_repeats=1,
+        max_iter=100,
+        init_repeats=2,
         progress_bar=False,
     )
     assert len(fms) == 1
@@ -153,17 +139,10 @@ def run_replicability_parafac2(procs):
 
     CV_splits = 3
     CV_repeats = 1
-    CV_engine = CrossValidationEngine(
-        splits=CV_splits,
-        repeats=CV_repeats,
-        device=device,
-    )
+    CV_engine = CrossValidationEngine(splits=CV_splits, repeats=CV_repeats)
 
     half_repeats = 3
-    half_engine = HalfHalfEngine(
-        repeats=half_repeats,
-        device=device,
-    )
+    half_engine = HalfHalfEngine(repeats=half_repeats)
 
     half_fms = evaluate_replicability_multiproc(
         half_engine,

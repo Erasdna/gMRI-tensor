@@ -7,6 +7,7 @@ from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
 from gMRItensor.plotting.evolving_mode import _compute_group_ribbon_stats
 from gMRItensor.plotting.evolving_mode import _test_group_differences_over_time
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
+from gMRItensor.plotting.mode_grid import plot_mode_grid
 from gMRItensor.plotting.spatial_mode import plot_spatial_mode
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
@@ -23,10 +24,6 @@ from gMRItensor.plotting.utils import scale_mode
 from gMRItensor.plotting.utils import scatter_to_volume
 
 matplotlib.use("Agg")
-
-
-# TODO: gMRItensor.plotting.mode_grid still needs coverage; it requires a
-# bigger synthetic-volumes-plus-subject-metadata fixture than fits here.
 
 
 def make_subject_info(n_per_group: int = 6):
@@ -793,3 +790,100 @@ def test_plot_spatial_mode_roi_broadcast():
     for fig, axs, _ in results:
         assert axs.shape == (2, 4)
         plt.close(fig)
+
+
+def make_roi_mode_fixture(n_components=2, csf_scale=100.0, seed=0):
+    """ROI-broadcast spatial mode with CSF deliberately scaled up relative
+    to Parenchyma, so region-independent vs. shared colorbar scaling are
+    clearly distinguishable."""
+    tissue_seg, csf_seg, combined_seg = make_segmentation()
+    rois = np.array([10, 20, 1000])
+    rng = np.random.default_rng(seed)
+    roi_mode = rng.random((len(rois), n_components))
+    roi_mode[-1] *= csf_scale  # last row -> ROI 1000, i.e. CSF
+    background = rng.random(combined_seg.shape)
+
+    voxel_mode, index_list = expand_roi_mode_to_voxels(roi_mode, rois, combined_seg)
+    region_masks = region_masks_from_segmentations(
+        index_list,
+        {"CSF": csf_seg, "Parenchyma": tissue_seg},
+    )
+    return voxel_mode, index_list, region_masks, background
+
+
+def test_plot_spatial_mode_share_colorbar_scaling():
+    voxel_mode, index_list, region_masks, background = make_roi_mode_fixture()
+
+    def component_0_clim(share_colorbar_scaling):
+        results = list(
+            plot_spatial_mode(
+                voxel_mode,
+                index_list,
+                region_masks,
+                background,
+                slices=[2, 2, 2],
+                page_width=5.0,
+                width_to_height_ratio=1.0,
+                share_colorbar_scaling=share_colorbar_scaling,
+            ),
+        )
+        clims = {}
+        for fig, axs, name in results:
+            clims[name] = axs[0][0].collections[-1].get_clim()
+            plt.close(fig)
+        return clims
+
+    shared = component_0_clim(share_colorbar_scaling=True)
+    assert shared["CSF"] == pytest.approx(shared["Parenchyma"])
+
+    independent = component_0_clim(share_colorbar_scaling=False)
+    assert independent["CSF"] != pytest.approx(independent["Parenchyma"])
+
+
+def make_mode_grid_fixture(n_components=2, seed=0):
+    voxel_mode, index_list, region_masks, background = make_roi_mode_fixture(
+        n_components=n_components,
+        seed=seed,
+    )
+    subject_info, subjects = make_subject_info(n_per_group=3)
+    rng = np.random.default_rng(seed)
+    subject_mode = rng.random((len(subjects), n_components))
+    n_timepoints = 4
+    time_mode = rng.random((n_timepoints, n_components))
+    return {
+        "spatial_mode": voxel_mode,
+        "time_mode": time_mode,
+        "subject_mode": subject_mode,
+        "index_list": index_list,
+        "csf_index_mask": region_masks["CSF"],
+        "parenchyma_index_mask": region_masks["Parenchyma"],
+        "background": background,
+        "sagittal_slice": 2,
+        "time_points": list(range(n_timepoints)),
+        "subjects": subjects,
+        "subject_info": subject_info,
+        "group_variable": "group",
+        "page_width": 5.0,
+    }
+
+
+def test_plot_mode_grid_smoke():
+    fig, axs = plot_mode_grid(**make_mode_grid_fixture())
+    assert axs.shape == (2, 4)
+    plt.close(fig)
+
+
+def test_plot_mode_grid_share_colorbar_scaling():
+    kwargs = make_mode_grid_fixture()
+
+    fig, axs = plot_mode_grid(**kwargs, share_colorbar_scaling=True)
+    shared_parenchyma = axs[0, 2].collections[-1].get_clim()
+    shared_csf = axs[0, 3].collections[-1].get_clim()
+    plt.close(fig)
+    assert shared_parenchyma == pytest.approx(shared_csf)
+
+    fig, axs = plot_mode_grid(**kwargs, share_colorbar_scaling=False)
+    independent_parenchyma = axs[0, 2].collections[-1].get_clim()
+    independent_csf = axs[0, 3].collections[-1].get_clim()
+    plt.close(fig)
+    assert independent_parenchyma != pytest.approx(independent_csf)
