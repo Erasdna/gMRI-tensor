@@ -8,6 +8,7 @@ from gMRItensor.plotting.evolving_mode import _compute_group_ribbon_stats
 from gMRItensor.plotting.evolving_mode import _test_group_differences_over_time
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.mode_grid import plot_mode_grid
+from gMRItensor.plotting.spatial_mode import _percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_spatial_mode
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
@@ -756,6 +757,18 @@ def test_region_masks_from_segmentations():
         masks["CSF"] | masks["Parenchyma"],
         np.ones(len(index_list), dtype=bool),
     )
+
+
+def test_percentile_vlim_keeps_negative_values():
+    # Regression test: _percentile_vlim used to filter to values > 0, which
+    # dropped real negative entries from an unconstrained spatial mode along
+    # with the zero-fill sentinel from scatter_to_volume. It should only
+    # exclude the exact zeros, not negative values.
+    values = np.concatenate([np.zeros(100), np.linspace(-10, -1, 50)])
+    vmin, vmax = _percentile_vlim(values, low=5, high=95)
+
+    assert vmin < 0
+    assert vmax < 0
 
 
 def test_plot_spatial_mode_roi_broadcast():

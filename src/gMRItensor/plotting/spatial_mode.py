@@ -130,9 +130,16 @@ def _percentile_vlim(
     low: float = 5,
     high: float = 95,
 ) -> tuple[float, float]:
-    """5th/95th (by default) percentile of `values`' positive entries."""
-    positive = values[values > 0]
-    return np.percentile(positive, low), np.percentile(positive, high)
+    """5th/95th (by default) percentile of `values`' nonzero entries.
+
+    Zero is excluded rather than clipped to, since `scatter_to_volume` fills
+    voxels outside the mask/background with exact 0 -- not a real value --
+    which would otherwise dominate and skew the percentile. This does not
+    require `values` to be non-negative: real negative entries (e.g. from an
+    unconstrained CP/PARAFAC2 spatial mode) are kept.
+    """
+    nonzero = values[values != 0]
+    return np.percentile(nonzero, low), np.percentile(nonzero, high)
 
 
 def plot_spatial_mode(
