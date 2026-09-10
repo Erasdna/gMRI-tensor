@@ -138,6 +138,88 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
     return pd.concat(results_dict, ignore_index=True)
 
 
+def compute_roi_scaling(
+    data: np.ndarray | list[np.ndarray],
+) -> tuple[np.ndarray, np.ndarray]:
+    """Compute per-ROI mean and standard deviation from `prepare_tensor` output.
+
+    Pools over every subject and time point -- i.e. every axis except the
+    last (label/ROI) one -- ignoring NaNs, so it works whether `data` is the
+    regular `(subjects, time_points, labels)` array or the ragged
+    `list[np.ndarray]` of per-subject `(n_timepoints_i, labels)` slices that
+    `prepare_tensor(..., require_regular=False)` returns.
+
+    Parameters
+    ----------
+    data : np.ndarray | list[np.ndarray]
+        Output tensor or list of slices from `prepare_tensor`.
+
+    Returns
+    -------
+    tuple[np.ndarray, np.ndarray]
+        `(mean, std)`, each of shape `(labels,)`.
+    """
+    pooled = (
+        data.reshape(-1, data.shape[-1])
+        if isinstance(data, np.ndarray)
+        else np.concatenate(data, axis=0)
+    )
+    mean = np.nanmean(pooled, axis=0)
+    std = np.nanstd(pooled, axis=0)
+    return mean, std
+
+
+def scale_tensor(
+    data: np.ndarray | list[np.ndarray],
+    center: bool = False,
+    mean: np.ndarray | None = None,
+    std: np.ndarray | None = None,
+) -> tuple[np.ndarray | list[np.ndarray], np.ndarray, np.ndarray]:
+    """Scale `prepare_tensor` output per ROI, over all subjects and time points.
+
+    Handles both possible outputs of `prepare_tensor`: the regular
+    `(subjects, time_points, labels)` array (`require_regular=True`) and the
+    ragged `list[np.ndarray]` of per-subject slices (`require_regular=False`).
+    In both cases, scaling is per-label (last axis), pooling over every other
+    axis, matching the (subjects, time_points) pooling `compute_roi_scaling`
+    does.
+
+    Parameters
+    ----------
+    data : np.ndarray | list[np.ndarray]
+        Output tensor or list of slices from `prepare_tensor`.
+    center : bool, optional
+        If True, subtract the per-ROI mean before dividing by the per-ROI
+        standard deviation. By default False.
+    mean, std : np.ndarray | None, optional
+        Precomputed per-ROI `(labels,)` mean/std to apply instead of
+        computing them from `data` -- e.g. to apply scaling fit on training
+        subjects to held-out ones. By default None, in which case both are
+        computed from `data` via `compute_roi_scaling`.
+
+    Returns
+    -------
+    tuple[np.ndarray | list[np.ndarray], np.ndarray, np.ndarray]
+        `(scaled, mean, std)`. `scaled` has the same type/shape as `data`.
+        `mean` and `std` are the values used, so the same scaling can be
+        re-applied later (e.g. to held-out data) by passing them back in.
+    """
+    if mean is None or std is None:
+        computed_mean, computed_std = compute_roi_scaling(data)
+        mean = computed_mean if mean is None else mean
+        std = computed_std if std is None else std
+
+    # A zero-variance ROI is already constant (equal to its own mean), so
+    # guard against a 0/0 NaN by leaving it undivided rather than raising.
+    safe_std = np.where(std == 0, 1.0, std)
+
+    def _scale(arr: np.ndarray) -> np.ndarray:
+        return ((arr - mean) if center else arr) / safe_std
+
+    scaled = _scale(data) if isinstance(data, np.ndarray) else [_scale(s) for s in data]
+    return scaled, mean, std
+
+
 def _pivot_tracer_df(
     df: pd.DataFrame,
     group_filtering: tuple[str, str] | None = None,

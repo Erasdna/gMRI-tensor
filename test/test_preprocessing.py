@@ -2,8 +2,10 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 import pytest
+from gMRItensor.preprocessing import compute_roi_scaling
 from gMRItensor.preprocessing import compute_tracer_from_image
 from gMRItensor.preprocessing import prepare_tensor
+from gMRItensor.preprocessing import scale_tensor
 from nibabel.orientations import axcodes2ornt
 from nibabel.orientations import io_orientation
 from nibabel.orientations import ornt_transform
@@ -102,6 +104,70 @@ def test_prepare_tensor_min_timepoints_filtering():
 
     assert list(subjects) == ["s1", "s2"]
     assert len(slices) == 2
+
+
+def test_scale_tensor_regular_and_ragged_agree():
+    # Same underlying data, regular vs. ragged prepare_tensor output -- the
+    # per-ROI mean/std pooled over subjects and time points should match, and
+    # scaling should preserve the ragged shape/NaN-padding relationship the
+    # same way prepare_tensor itself does.
+    df = make_long_df({"s1": [0, 1, 2], "s2": [0, 1, 2], "s3": [0, 1]})
+
+    tensor, _, _, _ = prepare_tensor(df, require_regular=True)
+    slices, _, _, _ = prepare_tensor(df, require_regular=False)
+
+    scaled_tensor, mean_t, std_t = scale_tensor(tensor, center=True)
+    scaled_slices, mean_s, std_s = scale_tensor(slices, center=True)
+
+    np.testing.assert_allclose(mean_t, mean_s)
+    np.testing.assert_allclose(std_t, std_s)
+    assert isinstance(scaled_slices, list)
+    np.testing.assert_allclose(scaled_slices[2], scaled_tensor[2, :2])
+    # Centered and scaled by its own pooled stats -> zero mean, unit std.
+    pooled = scaled_tensor.reshape(-1, scaled_tensor.shape[-1])
+    np.testing.assert_allclose(np.nanmean(pooled, axis=0), 0, atol=1e-10)
+    np.testing.assert_allclose(np.nanstd(pooled, axis=0), 1, atol=1e-10)
+
+
+def test_scale_tensor_without_center_only_divides_by_std():
+    df = make_long_df({"s1": [0, 1, 2], "s2": [0, 1, 2]})
+    tensor, _, _, _ = prepare_tensor(df)
+
+    scaled, mean, std = scale_tensor(tensor, center=False)
+
+    np.testing.assert_allclose(mean, np.nanmean(tensor.reshape(-1, 3), axis=0))
+    np.testing.assert_allclose(scaled, tensor / std)
+
+
+def test_scale_tensor_applies_precomputed_mean_and_std():
+    # Fitting scaling on one set of data and applying it to another (e.g.
+    # held-out subjects) should use the passed-in mean/std, not recompute
+    # them, and should still report back exactly what was passed in.
+    df = make_long_df({"s1": [0, 1, 2], "s2": [0, 1, 2]})
+    tensor, _, _, _ = prepare_tensor(df)
+    fit_mean, fit_std = compute_roi_scaling(tensor)
+
+    other = tensor + 5
+    scaled, mean, std = scale_tensor(other, center=True, mean=fit_mean, std=fit_std)
+
+    np.testing.assert_array_equal(mean, fit_mean)
+    np.testing.assert_array_equal(std, fit_std)
+    np.testing.assert_allclose(scaled, (other - fit_mean) / fit_std)
+
+
+def test_scale_tensor_handles_zero_variance_roi():
+    # A constant ROI has std 0; dividing by it should not produce NaN/inf --
+    # the value is already equal to its own mean, so it should come out 0
+    # after centering rather than blowing up.
+    df = make_long_df({"s1": [0, 1], "s2": [0, 1]}, labels=(10,))
+    df.loc[df["labels"] == 10, "values"] = 3.0
+
+    tensor, _, _, _ = prepare_tensor(df)
+    scaled, mean, std = scale_tensor(tensor, center=True)
+
+    assert std[0] == 0
+    assert np.all(np.isfinite(scaled))
+    np.testing.assert_allclose(scaled, 0)
 
 
 def _as_las(img: nib.Nifti1Image) -> nib.Nifti1Image:
