@@ -16,6 +16,8 @@ def compute_tracer(baseline: np.ndarray, post_injection: np.ndarray, signal_type
 
     if signal_type == "T1map":
         expr = "where((abs(post_injection) < 1e-6) | (abs(baseline) < 1e-6), nan, (1 / post_injection) - (1 / baseline))"  # noqa: E501
+    if signal_type == "R1map":
+        expr = "post_injection - baseline"  # noqa: E501
     elif signal_type == "T1w":
         expr = "where(abs(baseline) < 1e-6, nan, post_injection / baseline)"
     else:
