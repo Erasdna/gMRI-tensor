@@ -1,6 +1,12 @@
+import nibabel as nib
 import numpy as np
 import pandas as pd
+import pytest
+from gMRItensor.preprocessing import compute_tracer_from_image
 from gMRItensor.preprocessing import prepare_tensor
+from nibabel.orientations import axcodes2ornt
+from nibabel.orientations import io_orientation
+from nibabel.orientations import ornt_transform
 
 
 def make_long_df(timepoints_per_subject, labels=(10, 20, 30), missing=None, seed=0):
@@ -96,3 +102,81 @@ def test_prepare_tensor_min_timepoints_filtering():
 
     assert list(subjects) == ["s1", "s2"]
     assert len(slices) == 2
+
+
+def _as_las(img: nib.Nifti1Image) -> nib.Nifti1Image:
+    """Reorient `img` to LAS storage, preserving the physical grid it encodes.
+
+    Used to simulate an image written by different software with an
+    equivalent-but-different axis-order/flip convention, without changing
+    which physical location each voxel represents.
+    """
+    transform = ornt_transform(
+        io_orientation(img.affine),
+        axcodes2ornt(("L", "A", "S")),
+    )
+    return img.as_reoriented(transform)
+
+
+def test_compute_tracer_from_image_allows_equivalent_orientation(tmp_path):
+    # Regression test: baseline/post-injection/mask on the same physical
+    # grid, but post-injection stored in a different (LAS) axis convention
+    # than baseline's RAS+. This used to raise a false-positive "not
+    # aligned" ValueError; canonicalizing before comparing affines should
+    # now recover the same values as if both had been stored identically.
+    affine = np.diag([2.0, 2.0, 2.0, 1.0])
+    baseline_data = np.arange(27, dtype=float).reshape(3, 3, 3)
+    post_injection_data = np.arange(27, 100, dtype=float)[:27].reshape(3, 3, 3)
+    mask_data = np.ones((3, 3, 3))
+
+    baseline_img = nib.Nifti1Image(baseline_data, affine)
+    post_injection_img = _as_las(nib.Nifti1Image(post_injection_data, affine))
+    mask_img = nib.Nifti1Image(mask_data, affine)
+
+    baseline_path = tmp_path / "baseline.nii"
+    post_injection_path = tmp_path / "post_injection.nii"
+    mask_path = tmp_path / "mask.nii"
+    nib.save(baseline_img, baseline_path)
+    nib.save(post_injection_img, post_injection_path)
+    nib.save(mask_img, mask_path)
+
+    _, tracer = compute_tracer_from_image(
+        baseline_path,
+        post_injection_path,
+        "R1map",
+        mask_path,
+    )
+
+    expected = (post_injection_data - baseline_data).ravel()
+    np.testing.assert_allclose(tracer, expected)
+
+
+def test_compute_tracer_from_image_rejects_different_grid(tmp_path):
+    # Images that are genuinely on different grids (different voxel size)
+    # must still be rejected after canonicalization -- reorientation only
+    # normalizes axis order/flips, it doesn't resample.
+    baseline_data = np.ones((3, 3, 3))
+    post_injection_data = np.ones((3, 3, 3))
+    mask_data = np.ones((3, 3, 3))
+
+    baseline_img = nib.Nifti1Image(baseline_data, np.diag([2.0, 2.0, 2.0, 1.0]))
+    post_injection_img = nib.Nifti1Image(
+        post_injection_data,
+        np.diag([3.0, 3.0, 3.0, 1.0]),
+    )
+    mask_img = nib.Nifti1Image(mask_data, np.diag([2.0, 2.0, 2.0, 1.0]))
+
+    baseline_path = tmp_path / "baseline.nii"
+    post_injection_path = tmp_path / "post_injection.nii"
+    mask_path = tmp_path / "mask.nii"
+    nib.save(baseline_img, baseline_path)
+    nib.save(post_injection_img, post_injection_path)
+    nib.save(mask_img, mask_path)
+
+    with pytest.raises(ValueError, match="not aligned"):
+        compute_tracer_from_image(
+            baseline_path,
+            post_injection_path,
+            "R1map",
+            mask_path,
+        )

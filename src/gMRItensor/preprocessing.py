@@ -16,7 +16,7 @@ def compute_tracer(baseline: np.ndarray, post_injection: np.ndarray, signal_type
 
     if signal_type == "T1map":
         expr = "where((abs(post_injection) < 1e-6) | (abs(baseline) < 1e-6), nan, (1 / post_injection) - (1 / baseline))"  # noqa: E501
-    if signal_type == "R1map":
+    elif signal_type == "R1map":
         expr = "post_injection - baseline"  # noqa: E501
     elif signal_type == "T1w":
         expr = "where(abs(baseline) < 1e-6, nan, post_injection / baseline)"
@@ -40,12 +40,22 @@ def compute_tracer_from_image(
     mask_path: Path,
     segmentation_path: Path | None = None,
     func: Callable = np.nanmedian,
-):
-    baseline_nifti = cast(Nifti1Image, nib.load(baseline_path))
-    post_injection_nifti = cast(Nifti1Image, nib.load(post_injection_path))
-    mask_nifti = cast(Nifti1Image, nib.load(mask_path))
+) -> tuple[np.ndarray | None, np.ndarray]:
+    baseline_nifti = cast(
+        Nifti1Image,
+        nib.as_closest_canonical(nib.load(baseline_path)),
+    )
+    post_injection_nifti = cast(
+        Nifti1Image,
+        nib.as_closest_canonical(nib.load(post_injection_path)),
+    )
+    mask_nifti = cast(Nifti1Image, nib.as_closest_canonical(nib.load(mask_path)))
 
-    # Verify that images align so that we get sensible results
+    # Reorient every image to the closest canonical (RAS+) axis convention
+    # first, so that two images which are actually on the same physical grid
+    # but stored with a different (yet equivalent) axis order/flip don't fail
+    # this check. It does not resample, so genuinely different grids
+    # (different voxel size, origin, or oblique rotation) still fail here.
     if not np.allclose(baseline_nifti.affine, post_injection_nifti.affine):
         raise ValueError("Baseline and post-injection images are not aligned")
     if not np.allclose(baseline_nifti.affine, mask_nifti.affine):
@@ -59,7 +69,10 @@ def compute_tracer_from_image(
     )
 
     if segmentation_path is not None:
-        segmentation_nifti = cast(Nifti1Image, nib.load(segmentation_path))
+        segmentation_nifti = cast(
+            Nifti1Image,
+            nib.as_closest_canonical(nib.load(segmentation_path)),
+        )
         if not np.allclose(baseline_nifti.affine, segmentation_nifti.affine):
             raise ValueError("Baseline and segmentation images are not aligned")
         segmentation = segmentation_nifti.get_fdata()[mask > 0]
