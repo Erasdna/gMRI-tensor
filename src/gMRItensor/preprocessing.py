@@ -33,6 +33,15 @@ def compute_tracer(baseline: np.ndarray, post_injection: np.ndarray, signal_type
     )
 
 
+def _within_group_rank(values: np.ndarray) -> np.ndarray:
+    """0-based rank of each element among prior equal elements, in order.
+
+    E.g. `[1, 1, 2, 2, 2, 1] -> [0, 1, 0, 1, 2, 2]`. All-zeros whenever
+    `values` has no repeats (e.g. already one row per ROI).
+    """
+    return pd.Series(values).groupby(values).cumcount().to_numpy()
+
+
 def compute_tracer_from_image(
     baseline_path: Path,
     post_injection_path: Path,
@@ -86,12 +95,16 @@ def compute_tracer_from_image(
           voxels of the same ROI).
         - `values[i]`: `func` applied to that ROI's voxels, or (if `func`
           is None) that single voxel's own unaggregated tracer signal.
-        - `label_index[i]`: `i` itself (`np.arange(len(labels))`) -- a
-          plain dense row enumeration, always unique. Exists because
-          `labels` values aren't necessarily contiguous/unique-per-row (in
-          per-voxel mode many rows share a `labels` value), so this is the
-          stable per-row key downstream code (`prepare_tensor`) pivots on
-          instead of `labels`.
+        - `label_index[i]`: 0-based rank of `labels[i]` among prior rows
+          sharing that same ROI id -- "the j-th voxel of this ROI" --
+          resetting per ROI. Always `0` in ROI-aggregate mode (one row per
+          ROI already). Exists so `(labels[i], label_index[i])` uniquely
+          identifies a row even in per-voxel mode, where `labels` repeats;
+          `prepare_tensor` pivots on that pair instead of `labels` alone,
+          without requiring ROI ids to be contiguous, or requiring the same
+          ROIs to be present in every image -- a subject missing an ROI
+          another has is still tolerated exactly as before, since
+          `label_index` is `0` for every ROI-aggregate row regardless.
         - `index_list[i]`: `(n_i, ndim)` array of the voxel coordinate(s)
           behind that row -- every voxel in that ROI (`func` not None) or
           just that one voxel (`func` is None, `n_i == 1`).
@@ -112,11 +125,6 @@ def compute_tracer_from_image(
     )
     mask_nifti = cast(Nifti1Image, nib.as_closest_canonical(nib.load(mask_path)))
 
-    # Reorient every image to the closest canonical (RAS+) axis convention
-    # first, so that two images which are actually on the same physical grid
-    # but stored with a different (yet equivalent) axis order/flip don't fail
-    # this check. It does not resample, so genuinely different grids
-    # (different voxel size, origin, or oblique rotation) still fail here.
     if not np.allclose(baseline_nifti.affine, post_injection_nifti.affine):
         raise ValueError("Baseline and post-injection images are not aligned")
     if not np.allclose(baseline_nifti.affine, mask_nifti.affine):
@@ -151,7 +159,7 @@ def compute_tracer_from_image(
     if func is None:
         labels = np.rint(segmentation)
         index_list = [coord[None, :] for coord in voxel_coords]
-        return labels, tracer, np.arange(len(labels)), index_list
+        return labels, tracer, _within_group_rank(labels), index_list
 
     unique_labels = np.unique(segmentation)
     values = labeled_comprehension(
@@ -163,7 +171,12 @@ def compute_tracer_from_image(
         out_dtype=float,
     )
     index_list = [voxel_coords[segmentation == label] for label in unique_labels]
-    return np.rint(unique_labels), values, np.arange(len(unique_labels)), index_list
+    return (
+        np.rint(unique_labels),
+        values,
+        _within_group_rank(unique_labels),
+        index_list,
+    )
 
 
 def _compute_tracer_worker(args):
@@ -184,38 +197,46 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
     arguments plus `"subject"`/`"time_point"`. Returns `(df, index_list)`:
     `df` is the long-format DataFrame (`subject`, `time_point`, `labels`,
     `label_index`, `values`) that `prepare_tensor` consumes, and
-    `index_list` is the shared voxel-coordinate metadata from
+    `index_list` is the voxel-coordinate metadata from
     `compute_tracer_from_image` (see its docstring), taken from the first
     image processed.
 
-    `label_index` (and thus `index_list`) is only meaningful if every image
-    shares the exact same mask/segmentation grid -- every image's
-    `(labels, label_index)` is checked against the first, and a `ValueError`
-    is raised on any disagreement (e.g. one image missing an ROI another
-    has), rather than silently mixing up which tensor column data belongs
-    to.
+    If every entry shares the same `segmentation_path`, every image
+    necessarily observes the exact same set of ROIs in the exact same
+    order -- so ROI-aggregate rows (`func` not None, `label_index` always
+    `0` from `compute_tracer_from_image`) are upgraded here to a dense,
+    dataset-wide `label_index` (each ROI's rank among all ROIs present),
+    stable across every subject and time point since it's derived from the
+    one shared segmentation rather than each image's own local view. This
+    upgrade is only safe when the segmentation is provably identical
+    everywhere: with per-subject/native-space segmentations (where ROI
+    presence can legitimately vary), a rank computed from one image's own
+    ROI set would not mean the same thing in another image missing some of
+    those ROIs -- `label_index` is left at its safe default (`0`) in that
+    case, which still pivots correctly and still tolerates a subject
+    missing an ROI (via `labels` alone), just without a dense per-ROI
+    ordering. Per-voxel rows (`func=None`) are never touched here --
+    `label_index` there is already a real, meaningful within-ROI voxel
+    rank from `compute_tracer_from_image`.
     """
+    segmentation_paths = {str(args["segmentation_path"]) for args in args_list}
+    shared_segmentation = len(segmentation_paths) == 1
+
     results_dict = []
-    reference: tuple[np.ndarray, np.ndarray] | None = None
     index_list: list[np.ndarray] | None = None
+    rank_of_label: dict[int, int] | None = None
 
     def collect(task_id, labels, values, label_index, this_index_list):
-        nonlocal reference, index_list
-        if reference is None:
-            reference = (labels, label_index)
+        nonlocal index_list, rank_of_label
+        if index_list is None:
             index_list = this_index_list
-        elif not (
-            np.array_equal(labels, reference[0])
-            and np.array_equal(label_index, reference[1])
-        ):
-            raise ValueError(
-                f"compute_tracer_from_image returned labels/label_index for "
-                f"task {task_id} that disagree with earlier images -- "
-                "compute_tracer_parallel assumes every image shares the same "
-                "mask/segmentation grid so label_index consistently "
-                "identifies the same ROI/voxel across subjects and time "
-                "points.",
-            )
+            if shared_segmentation:
+                rank_of_label = {
+                    label: rank for rank, label in enumerate(np.unique(labels))
+                }
+        if shared_segmentation and args_list[task_id]["func"] is not None:
+            assert rank_of_label is not None
+            label_index = np.array([rank_of_label[label] for label in labels])
         tmp_dict = {
             "labels": labels,
             "label_index": label_index,
@@ -335,27 +356,30 @@ def _pivot_tracer_df(
 
     First step of `prepare_tensor`: optionally filters `df` to one group,
     then pivots to a DataFrame indexed by (subject, time_point) with one
-    column per `label_index`. Only (subject, time_point) combinations
-    actually present in `df` get a row -- no NaN-filled rows are introduced
-    for combinations that were never observed.
+    column per `(labels, label_index)` pair. Only (subject, time_point)
+    combinations actually present in `df` get a row -- no NaN-filled rows
+    are introduced for combinations that were never observed.
 
-    Pivots on `label_index` rather than `labels`: `labels` (the ROI id) can
-    repeat across many rows sharing one `(subject, time_point)` when `df`
-    was built from per-voxel `compute_tracer_from_image` output (many
-    voxels, one ROI id each) -- pivoting on that directly would let
-    `aggfunc="first"` silently keep one arbitrary voxel and drop the rest.
-    `label_index` is unique per row by construction (see
-    `compute_tracer_from_image`), so this is safe for both ROI-aggregate
-    and per-voxel input.
+    Pivots on `(labels, label_index)` rather than `labels` alone: `labels`
+    (the ROI id) can repeat across many rows sharing one `(subject,
+    time_point)` when `df` was built from per-voxel
+    `compute_tracer_from_image` output (many voxels, one ROI id each) --
+    pivoting on `labels` directly would let `aggfunc="first"` silently keep
+    one arbitrary voxel and drop the rest. `label_index` disambiguates that
+    (see `compute_tracer_from_image`) and is always `0` in ROI-aggregate
+    mode, so there this is exactly equivalent to pivoting on `labels` alone
+    -- one subject/image missing an ROI another has is still tolerated the
+    same way it always was (that ROI's column is NaN for the missing
+    subject/time point, dropped later by `prepare_tensor`'s `dropna`).
     """
     if group_filtering is not None:
         df = df.query(f"{group_filtering[0]}=='{group_filtering[1]}'")
 
     return df.pivot_table(
         index=["subject", "time_point"],
-        columns="label_index",
+        columns=["labels", "label_index"],
         values="values",
-        aggfunc="first",  # Safe: label_index is unique per row.
+        aggfunc="first",  # Safe: (labels, label_index) is unique per row.
     )
 
 
@@ -411,11 +435,11 @@ def prepare_tensor(
             `(tensor, subjects, time_points, labels, label_index)`. `tensor`
             has shape `(len(subjects), len(time_points), len(labels))` and
             may contain NaN for subject/time_point combinations that were
-            never observed. `label_index[i]` is column `i`'s `label_index`
-            value from `df` (see `compute_tracer_from_image`), unchanged --
-            not renumbered after dropping columns -- so it can still be used
-            to look up that column's voxel coordinates in
-            `compute_tracer_parallel`'s `index_list`.
+            never observed. `(labels[i], label_index[i])` is column `i`'s
+            key from `df` (see `compute_tracer_from_image`) -- together
+            they identify which original `compute_tracer_from_image` row
+            (and thus, in `compute_tracer_parallel`'s `index_list`, which
+            voxel coordinate(s)) this column corresponds to.
     Otherwise:
         tuple[list[np.ndarray], np.ndarray, list[np.ndarray], np.ndarray, np.ndarray]
             `(slices, subjects, timepoints_per_subject, labels, label_index)`.
@@ -429,13 +453,10 @@ def prepare_tensor(
     # row here at all, so it can't force an otherwise well-observed label to
     # be dropped for everyone else.
     valid_pivot = pivot_df.dropna(axis=1, how="any")
-    label_index = np.array(valid_pivot.columns.tolist()).astype(int)
-
-    # Recover each surviving column's ROI id. label_index -> labels is a
-    # stable mapping (compute_tracer_parallel already verified every image
-    # agrees on it), so any one row per label_index gives the right answer.
-    label_map = df.drop_duplicates("label_index").set_index("label_index")["labels"]
-    labels = label_map.loc[label_index].to_numpy().astype(int)
+    # Columns are (labels, label_index) pairs -- see _pivot_tracer_df.
+    columns = valid_pivot.columns.tolist()
+    labels = np.array([c[0] for c in columns]).astype(int)
+    label_index = np.array([c[1] for c in columns]).astype(int)
 
     subjects = []
     timepoints_per_subject = []

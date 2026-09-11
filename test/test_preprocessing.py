@@ -334,7 +334,10 @@ def test_compute_tracer_from_image_aggregates_per_roi_and_excludes_background(tm
 
     np.testing.assert_array_equal(labels, [1, 2])
     np.testing.assert_allclose(values, [20.0, 200.0])
-    np.testing.assert_array_equal(label_index, [0, 1])
+    # One row per ROI already -- label_index is always 0 here, so pivoting
+    # on (labels, label_index) later is equivalent to pivoting on labels
+    # alone, preserving tolerance for a subject missing an ROI.
+    np.testing.assert_array_equal(label_index, [0, 0])
     assert len(index_list) == 2
     for i, label in enumerate(labels):
         expected_coords = np.argwhere(
@@ -364,11 +367,22 @@ def test_compute_tracer_from_image_per_voxel_matches_own_label_and_value(tmp_pat
     assert labels.shape == values.shape == label_index.shape
     assert len(index_list) == len(labels)
     assert len(labels) == 6  # background voxels (label 0) excluded
-    np.testing.assert_array_equal(label_index, np.arange(len(labels)))
 
     expected_mask = paths["segmentation_flat"] > 1e-6
-    np.testing.assert_array_equal(labels, paths["segmentation_flat"][expected_mask])
+    expected_labels = paths["segmentation_flat"][expected_mask]
+    np.testing.assert_array_equal(labels, expected_labels)
     np.testing.assert_allclose(values, paths["post_injection_flat"][expected_mask])
+
+    # label_index is each voxel's rank among prior voxels of the same ROI
+    # (0, 1, 2, ... resetting per ROI) -- computed independently here via a
+    # running per-label counter, not by mirroring the implementation.
+    counts: dict[float, int] = {}
+    expected_label_index = []
+    for label in expected_labels:
+        expected_label_index.append(counts.get(label, 0))
+        counts[label] = counts.get(label, 0) + 1
+    np.testing.assert_array_equal(label_index, expected_label_index)
+
     for i in range(len(labels)):
         assert index_list[i].shape == (1, 3)
 
@@ -393,6 +407,14 @@ def test_compute_tracer_parallel_returns_shared_index_list(tmp_path):
 
     assert "label_index" in df.columns
     assert len(df) == 2 * 2  # 2 time points x 2 ROIs
+    # Every image shares one segmentation_path, so ROI-aggregate rows get a
+    # dense, stable per-ROI label_index (0 for ROI 1, 1 for ROI 2) instead
+    # of compute_tracer_from_image's safe-but-uninformative constant 0.
+    for _, group in df.groupby(["subject", "time_point"]):
+        np.testing.assert_array_equal(
+            group.sort_values("labels")["label_index"].to_numpy(),
+            [0, 1],
+        )
 
     direct_labels, _, _, direct_index_list = compute_tracer_from_image(**args)
     assert len(index_list) == len(direct_labels)
@@ -400,12 +422,17 @@ def test_compute_tracer_parallel_returns_shared_index_list(tmp_path):
         np.testing.assert_array_equal(got, expected)
 
 
-def test_compute_tracer_parallel_rejects_inconsistent_images(tmp_path):
+def test_compute_tracer_parallel_tolerates_roi_missing_in_some_images(tmp_path):
+    # Real per-subject/native-space segmentations can legitimately differ in
+    # which ROIs they capture -- this must not be treated as an error, and
+    # prepare_tensor's existing dropna step should tolerate it exactly as it
+    # always did for aggregate-mode input (label_index is 0 for every
+    # ROI-aggregate row, so pivoting on (labels, label_index) is equivalent
+    # to pivoting on labels alone).
     paths = _make_two_roi_images(tmp_path)
     other_dir = tmp_path / "other"
     other_dir.mkdir()
-    # A second segmentation missing ROI 2 entirely -- inconsistent with the
-    # first image's labels/label_index.
+    # A second segmentation missing ROI 2 entirely.
     other_segmentation = np.where(
         paths["segmentation_flat"].reshape(2, 2, 2) == 2,
         0,
@@ -414,31 +441,86 @@ def test_compute_tracer_parallel_rejects_inconsistent_images(tmp_path):
     other_segmentation_path = other_dir / "segmentation.nii"
     nib.save(nib.Nifti1Image(other_segmentation, np.eye(4)), other_segmentation_path)
 
+    args = {
+        "baseline_path": paths["baseline_path"],
+        "post_injection_path": paths["post_injection_path"],
+        "signal_type": "R1map",
+        "mask_path": paths["mask_path"],
+        "func": np.nanmedian,
+    }
     args_list = [
         {
-            "baseline_path": paths["baseline_path"],
-            "post_injection_path": paths["post_injection_path"],
-            "signal_type": "R1map",
-            "mask_path": paths["mask_path"],
+            **args,
             "segmentation_path": paths["segmentation_path"],
-            "func": np.nanmedian,
             "subject": "s1",
             "time_point": 0,
         },
         {
-            "baseline_path": paths["baseline_path"],
-            "post_injection_path": paths["post_injection_path"],
-            "signal_type": "R1map",
-            "mask_path": paths["mask_path"],
+            **args,
             "segmentation_path": other_segmentation_path,
-            "func": np.nanmedian,
             "subject": "s1",
             "time_point": 1,
         },
     ]
 
-    with pytest.raises(ValueError, match="disagree"):
-        compute_tracer_parallel(args_list, n_procs=1)
+    df, _ = compute_tracer_parallel(args_list, n_procs=1)
+    tensor, _, _, labels, label_index = prepare_tensor(df)
+
+    # ROI 2 is missing at time point 1 -> dropped everywhere; only ROI 1
+    # (present at both time points) survives.
+    assert list(labels) == [1]
+    assert list(label_index) == [0]
+    assert tensor.shape[-1] == 1
+
+
+def test_compute_tracer_parallel_keeps_label_index_zero_when_segmentation_differs(
+    tmp_path,
+):
+    # Critical invariant: whenever segmentation_path differs across images
+    # (so a dense, dataset-wide label_index can't be trusted to mean the
+    # same ROI everywhere -- see compute_tracer_parallel's docstring),
+    # EVERY ROI-aggregate row must get the same label_index (0), regardless
+    # of which ROI it is. Anything else would make (labels, label_index)
+    # pivot keys inconsistent across images that do share an ROI, silently
+    # fragmenting/losing that ROI's data. Uses two segmentation files with
+    # identical *content* but different *paths*, to isolate that this is a
+    # path-based check (conservative by construction), not a check of
+    # whether the images happen to agree on their ROI set.
+    paths = _make_two_roi_images(tmp_path)
+    other_dir = tmp_path / "other"
+    other_dir.mkdir()
+    other_segmentation_path = other_dir / "segmentation.nii"
+    nib.save(
+        nib.Nifti1Image(paths["segmentation_flat"].reshape(2, 2, 2), np.eye(4)),
+        other_segmentation_path,
+    )
+
+    args = {
+        "baseline_path": paths["baseline_path"],
+        "post_injection_path": paths["post_injection_path"],
+        "signal_type": "R1map",
+        "mask_path": paths["mask_path"],
+        "func": np.nanmedian,
+    }
+    args_list = [
+        {
+            **args,
+            "segmentation_path": paths["segmentation_path"],
+            "subject": "s1",
+            "time_point": 0,
+        },
+        {
+            **args,
+            "segmentation_path": other_segmentation_path,
+            "subject": "s1",
+            "time_point": 1,
+        },
+    ]
+
+    df, _ = compute_tracer_parallel(args_list, n_procs=1)
+
+    assert set(df["labels"]) == {1, 2}
+    np.testing.assert_array_equal(df["label_index"].to_numpy(), 0)
 
 
 def test_prepare_tensor_per_voxel_style_labels_are_not_collapsed():
