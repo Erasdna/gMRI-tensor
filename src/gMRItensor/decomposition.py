@@ -215,14 +215,29 @@ def _restart_worker(
         return None, None
 
 
-def _init_restart_worker_backend() -> None:
-    """Pool initializer: set up TensorLy's "pytorch" backend in each worker.
+def _init_restart_worker_backend(num_threads: int) -> None:
+    """Pool initializer: set up TensorLy's backend and cap this worker's threads.
 
-    Needed with the "spawn" start method used here (see
-    `gMRItensor.replicability._init_worker_backend`, which does the same
-    thing for the same reason).
+    `tl.set_backend("pytorch")` is needed with the "spawn" start method used
+    here (see `gMRItensor.replicability._init_worker_backend`, which does the
+    same thing for the same reason).
+
+    `torch.set_num_threads(num_threads)` guards against thread
+    oversubscription: `torch.set_num_threads` is process-local state, so it
+    does *not* carry over from the parent into a freshly "spawn"ed worker --
+    left unset, each of the `restart_procs` worker processes falls back to
+    its own default intra-op thread pool (often sized to *all* visible
+    cores), so `restart_procs` processes each also fanning out into a full
+    thread pool massively oversubscribes the CPU (this is what made the
+    parallel path effectively not work: `restart_procs` workers x each
+    worker's own large thread pool, rather than `restart_procs` total
+    threads of work). `_repeat_with_restarts` computes `num_threads` so that
+    `restart_procs * num_threads` stays close to the parent's own
+    `torch.get_num_threads()` (e.g. set via `setup_backend`'s
+    `CPUS_PER_TASK` handling).
     """
     tl.set_backend("pytorch")
+    torch.set_num_threads(num_threads)
 
 
 def _in_worker_process() -> bool:
@@ -286,6 +301,14 @@ def _repeat_with_restarts(
         inside another worker process (see `_in_worker_process`) -- e.g. one
         of `evaluate_replicability_multiproc`'s own workers -- in which case
         it silently falls back to 1 to avoid nesting process pools.
+
+        Each worker process is pinned to `torch.get_num_threads() //
+        restart_procs` intra-op threads (see
+        `_init_restart_worker_backend`), so the *total* CPU budget stays
+        close to whatever the calling process's own `torch.get_num_threads()`
+        already is (e.g. as set by `setup_backend` from `CPUS_PER_TASK`) --
+        pick `restart_procs` as a number of workers to split that budget
+        across, not as extra CPUs on top of it.
 
     Returns
     -------
@@ -356,9 +379,14 @@ def _repeat_with_restarts(
             sys.stdout.flush()
     else:
         task_args = [(method, i, payload, kwargs) for i in range(init_repeats)]
+        # Split the parent's own thread budget across restart_procs workers
+        # rather than letting each worker default to its own (often much
+        # larger) thread pool -- see _init_restart_worker_backend.
+        threads_per_proc = max(1, torch.get_num_threads() // restart_procs)
         with get_context("spawn").Pool(
             restart_procs,
             initializer=_init_restart_worker_backend,
+            initargs=(threads_per_proc,),
         ) as pool:
             for decomp, errors in tqdm(
                 pool.imap_unordered(_restart_worker, task_args),

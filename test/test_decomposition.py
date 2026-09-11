@@ -8,6 +8,7 @@ from gMRItensor import run_CP_decomposition_repeated
 from gMRItensor import run_PARAFAC2_decomposition_repeated
 from gMRItensor import setup_backend
 from gMRItensor.decomposition import _in_worker_process
+from gMRItensor.decomposition import _init_restart_worker_backend
 from gMRItensor.decomposition import ConvergenceError
 
 
@@ -206,6 +207,20 @@ def test_CP_nan_with_imputation_succeeds():
 
 def test_in_worker_process_false_in_main_process():
     assert not _in_worker_process()
+
+
+def test_init_restart_worker_backend_caps_threads():
+    # Regression test: torch.set_num_threads doesn't survive into a spawned
+    # worker process, so left unset each worker fell back to its own
+    # (often much larger) default thread pool -- restart_procs processes
+    # each ALSO fanning out into a full thread pool oversubscribed the CPU
+    # rather than actually parallelizing across restart_procs total threads.
+    original = torch.get_num_threads()
+    try:
+        _init_restart_worker_backend(2)
+        assert torch.get_num_threads() == 2
+    finally:
+        torch.set_num_threads(original)
 
 
 def test_CP_restart_procs_parallel_converges_as_well_as_sequential():
