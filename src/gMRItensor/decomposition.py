@@ -1,8 +1,11 @@
 import gc
 import os
 import sys
+from multiprocessing import current_process
+from multiprocessing import get_context
 from typing import Any
 from typing import Callable
+from typing import Literal
 
 import tensorly as tl
 import torch
@@ -183,36 +186,106 @@ def compute_PARAFAC2_decomposition(
     return result, errors
 
 
+def _restart_worker(
+    args: tuple[Literal["CP", "PARAFAC2"], int, Any, dict[str, Any]],
+) -> tuple[Any, torch.Tensor] | tuple[None, None]:
+    """Pool worker: run a single random-restart attempt.
+
+    Only used by `_repeat_with_restarts`'s parallel (CPU-only, `restart_procs
+    >= 2`) path -- the sequential path calls `compute_CP_decomposition`/
+    `compute_PARAFAC2_decomposition` directly, in-process, so it also works
+    with a GPU tensor and reuses the `torch.compile` cache across restarts.
+
+    Returns `(None, None)` rather than raising on `ConvergenceError`, so one
+    failed restart doesn't kill the whole `Pool.imap_unordered` -- matching
+    the sequential loop's "skip and continue" behavior.
+    """
+    method, random_state, payload, kwargs = args
+    try:
+        if method == "CP":
+            return compute_CP_decomposition(
+                payload, random_state=random_state, **kwargs
+            )
+        return compute_PARAFAC2_decomposition(
+            payload,
+            random_state=random_state,
+            **kwargs,
+        )
+    except ConvergenceError:
+        return None, None
+
+
+def _init_restart_worker_backend() -> None:
+    """Pool initializer: set up TensorLy's "pytorch" backend in each worker.
+
+    Needed with the "spawn" start method used here (see
+    `gMRItensor.replicability._init_worker_backend`, which does the same
+    thing for the same reason).
+    """
+    tl.set_backend("pytorch")
+
+
+def _in_worker_process() -> bool:
+    """True if already running inside a multiprocessing worker.
+
+    `multiprocessing.current_process()` is the `"MainProcess"` only for the
+    process that was never handed off into a `Pool` -- a worker spawned by
+    `evaluate_replicability_multiproc`'s own `Pool` has some other name
+    (e.g. `"SpawnPoolWorker-1"`). Used to refuse restart-level
+    multiprocessing there: spawning a second layer of processes from inside
+    an already-parallel worker just multiplies process-startup/backend-init
+    overhead without adding real parallelism (the outer pool is already
+    using all the requested workers).
+    """
+    return current_process().name != "MainProcess"
+
+
 def _repeat_with_restarts(
-    attempt: Callable[[int], tuple[Any, torch.Tensor]],
+    method: Literal["CP", "PARAFAC2"],
+    payload: Any,
+    kwargs: dict[str, Any],
     to_cpu: Callable[[Any], Any],
     init_repeats: int,
     device: torch.device,
     verbose_level: int,
     progress_bar: bool,
+    restart_procs: int = 1,
 ) -> tuple[Any, torch.Tensor]:
-    """Run `attempt` with repeated random restarts and keep the best result.
+    """Run repeated random restarts and keep the best result.
 
     Shared restart/error-tracking/GPU-memory-management skeleton used by both
     `run_CP_decomposition_repeated` and `run_PARAFAC2_decomposition_repeated`.
 
     Parameters
     ----------
-    attempt : Callable[[int], tuple[Any, torch.Tensor]]
-        Called with a `random_state` index; should return `(decomp, errors)`
-        for that restart, raising `ConvergenceError` if it failed. `decomp`
-        is an opaque, decomposition-specific result and `errors` is the list
-        of per-iteration reconstruction errors.
+    method : Literal["CP", "PARAFAC2"]
+        Which of `compute_CP_decomposition`/`compute_PARAFAC2_decomposition`
+        to call for each restart.
+    payload : Any
+        The `tensor`/`tensor_slices` positional argument to pass to that
+        function.
+    kwargs : dict[str, Any]
+        The rest of that function's arguments (everything except
+        `random_state`, which is filled in per restart).
     to_cpu : Callable[[Any], Any]
         Moves the winning `decomp` to CPU/float precision.
     init_repeats : int
         Number of random restarts to try.
     device : torch.device
-        Device the input tensor(s) live on (used for CUDA memory management).
+        Device the input tensor(s) live on (used for CUDA memory management,
+        and to reject `restart_procs >= 2`, which isn't safe on CUDA -- see
+        Raises).
     verbose_level : int
         If > 0, prints each `ConvergenceError` encountered.
     progress_bar : bool
         Whether to show a tqdm progress bar over the restarts.
+    restart_procs : int, optional
+        Number of worker processes to run restarts in parallel with. By
+        default 1 (sequential, in-process, unchanged behavior). Only takes
+        effect when `device.type == "cpu"` and this isn't already running
+        inside another worker process (see `_in_worker_process`) -- e.g. one
+        of `evaluate_replicability_multiproc`'s own workers -- in which case
+        it silently falls back to 1 to avoid nesting process pools.
 
     Returns
     -------
@@ -223,32 +296,81 @@ def _repeat_with_restarts(
     ------
     ConvergenceError
         If no restart converged.
+    ValueError
+        If `restart_procs >= 2` and `device` is CUDA.
     """
+    if restart_procs >= 2 and device.type == "cuda":
+        raise ValueError(
+            f"restart_procs={restart_procs} requests multiprocessing, but the "
+            "input is on CUDA. Running multiple worker processes against a "
+            "CUDA context is unsafe/unreliable across GPU driver setups -- "
+            "pass restart_procs=1 to run sequentially on the GPU, or move "
+            "the input to CPU first to use multiple processes.",
+        )
+    if restart_procs >= 2 and _in_worker_process():
+        if verbose_level > 0:
+            print(
+                f"restart_procs={restart_procs} requested, but already running "
+                "inside a worker process (e.g. evaluate_replicability_multiproc's "
+                "own pool) -- falling back to restart_procs=1 to avoid nesting "
+                "process pools.",
+            )
+        restart_procs = 1
+
     best_error: torch.Tensor | float = torch.inf
     best_decomp: Any = None
 
-    for i in tqdm(range(init_repeats), disable=not progress_bar):
-        try:
-            decomp, errors = attempt(i)
-        except ConvergenceError as e:
-            if verbose_level > 0:
-                print(e)
-            continue
+    if restart_procs < 2:
+        for i in tqdm(range(init_repeats), disable=not progress_bar):
+            try:
+                if method == "CP":
+                    decomp, errors = compute_CP_decomposition(
+                        payload,
+                        random_state=i,
+                        **kwargs,
+                    )
+                else:
+                    decomp, errors = compute_PARAFAC2_decomposition(
+                        payload,
+                        random_state=i,
+                        **kwargs,
+                    )
+            except ConvergenceError as e:
+                if verbose_level > 0:
+                    print(e)
+                continue
 
-        if errors[-1] < best_error:
-            best_error = errors[-1]
-            # Move the best result to CPU immediately to free up GPU VRAM
-            best_decomp = to_cpu(decomp)
+            if errors[-1] < best_error:
+                best_error = errors[-1]
+                # Move the best result to CPU immediately to free up GPU VRAM
+                best_decomp = to_cpu(decomp)
 
-        del decomp, errors
+            del decomp, errors
 
-        # Reduce some memory issues by clearing cache when memory usage is high
-        if device.type == "cuda":
-            mem_reserved = torch.cuda.memory_reserved(device)
-            total_mem = torch.cuda.get_device_properties(device).total_memory
-            if mem_reserved / total_mem > 0.85:
-                torch.cuda.empty_cache()
-        sys.stdout.flush()
+            # Reduce some memory issues by clearing cache when memory usage is high
+            if device.type == "cuda":
+                mem_reserved = torch.cuda.memory_reserved(device)
+                total_mem = torch.cuda.get_device_properties(device).total_memory
+                if mem_reserved / total_mem > 0.85:
+                    torch.cuda.empty_cache()
+            sys.stdout.flush()
+    else:
+        task_args = [(method, i, payload, kwargs) for i in range(init_repeats)]
+        with get_context("spawn").Pool(
+            restart_procs,
+            initializer=_init_restart_worker_backend,
+        ) as pool:
+            for decomp, errors in tqdm(
+                pool.imap_unordered(_restart_worker, task_args),
+                total=init_repeats,
+                disable=not progress_bar,
+            ):
+                if decomp is None:
+                    continue
+                if errors[-1] < best_error:
+                    best_error = errors[-1]
+                    best_decomp = to_cpu(decomp)
+                del decomp, errors
 
     gc.collect()
     # Force PyTorch to release its internal cached memory back to the OS/GPU
@@ -294,17 +416,18 @@ def run_CP_decomposition_repeated(
     normalize: bool = False,
     allow_nan_imputation: bool = False,
     non_negative: bool = True,
+    restart_procs: int = 1,
 ) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]:
     """Repeatedly fit a CP/PARAFAC decomposition from random restarts.
 
     See `compute_CP_decomposition` for the meaning of `allow_nan_imputation`
-    and `non_negative`.
+    and `non_negative`, and `_repeat_with_restarts` for `restart_procs`.
 
     Notes
     -----
     Shares its option names (`max_iter`, `init_repeats`, `verbose_level`,
     `tolerance`, `normalize`, `use_memory_efficient_khatri_rao`,
-    `progress_bar`, `device`, `rank`) with
+    `progress_bar`, `device`, `rank`, `restart_procs`) with
     `run_PARAFAC2_decomposition_repeated` -- see that function's docstring
     for the options it doesn't share (`nn_modes` instead of
     `non_negative`; no `allow_nan_imputation`). Kept in sync so a single
@@ -314,30 +437,30 @@ def run_CP_decomposition_repeated(
     """
     _maybe_register_memory_efficient_khatri_rao(use_memory_efficient_khatri_rao)
 
-    def attempt(random_state: int):
-        return compute_CP_decomposition(
-            tensor,
-            rank,
-            max_iter,
-            random_state=random_state,
-            CP_verbose_level=verbose_level,
-            CP_tolerance=tolerance,
-            normalize_factors=normalize,
-            allow_nan_imputation=allow_nan_imputation,
-            non_negative=non_negative,
-        )
+    kwargs = {
+        "rank": rank,
+        "CP_max_iter": max_iter,
+        "CP_verbose_level": verbose_level,
+        "CP_tolerance": tolerance,
+        "normalize_factors": normalize,
+        "allow_nan_imputation": allow_nan_imputation,
+        "non_negative": non_negative,
+    }
 
     def to_cpu(decomp):
         weights, factors = decomp
         return weights.float().cpu(), [f.float().cpu() for f in factors]
 
     (best_weights, best_factors), best_error = _repeat_with_restarts(
-        attempt,
+        "CP",
+        tensor,
+        kwargs,
         to_cpu,
         init_repeats,
         device,
         verbose_level,
         progress_bar,
+        restart_procs=restart_procs,
     )
 
     return best_weights, best_factors, best_error
@@ -355,23 +478,25 @@ def run_PARAFAC2_decomposition_repeated(
     progress_bar: bool = True,
     normalize: bool = False,
     nn_modes: tuple[int, ...] | None = (0, 2),
+    restart_procs: int = 1,
 ) -> tuple[torch.Tensor, list[torch.Tensor], list[torch.Tensor], torch.Tensor]:
     """Repeatedly fit a PARAFAC2 decomposition from random restarts.
 
     See `compute_PARAFAC2_decomposition` for the meaning of `nn_modes` and
-    why this is not `torch.compile`-wrapped.
+    why this is not `torch.compile`-wrapped, and `_repeat_with_restarts` for
+    `restart_procs`.
 
     Notes
     -----
     Shares its option names (`max_iter`, `init_repeats`, `verbose_level`,
     `tolerance`, `normalize`, `use_memory_efficient_khatri_rao`,
-    `progress_bar`, `device`, `rank`) with `run_CP_decomposition_repeated`
-    -- see that function's `Notes`. Two options aren't shared: `nn_modes`
-    replaces CP's flat `non_negative` bool (it's strictly more expressive
-    -- it picks *which* modes are constrained, defaulting to `(0, 2)`;
-    pass `None` for an unconstrained fit); and there's no
-    `allow_nan_imputation` here, since this TensorLy version has no
-    PARAFAC2 mask/imputation support at all (see
+    `progress_bar`, `device`, `rank`, `restart_procs`) with
+    `run_CP_decomposition_repeated` -- see that function's `Notes`. Two
+    options aren't shared: `nn_modes` replaces CP's flat `non_negative`
+    bool (it's strictly more expressive -- it picks *which* modes are
+    constrained, defaulting to `(0, 2)`; pass `None` for an unconstrained
+    fit); and there's no `allow_nan_imputation` here, since this TensorLy
+    version has no PARAFAC2 mask/imputation support at all (see
     `compute_PARAFAC2_decomposition`) -- unlike CP, NaN input always
     raises regardless of any parameter.
 
@@ -386,17 +511,14 @@ def run_PARAFAC2_decomposition_repeated(
     """
     _maybe_register_memory_efficient_khatri_rao(use_memory_efficient_khatri_rao)
 
-    def attempt(random_state: int):
-        return compute_PARAFAC2_decomposition(
-            tensor_slices,
-            rank,
-            max_iter,
-            random_state=random_state,
-            PARAFAC2_verbose_level=verbose_level,
-            PARAFAC2_tolerance=tolerance,
-            normalize_factors=normalize,
-            nn_modes=nn_modes,
-        )
+    kwargs = {
+        "rank": rank,
+        "PARAFAC2_max_iter": max_iter,
+        "PARAFAC2_verbose_level": verbose_level,
+        "PARAFAC2_tolerance": tolerance,
+        "normalize_factors": normalize,
+        "nn_modes": nn_modes,
+    }
 
     def to_cpu(result):
         weights = result.weights.float().cpu()
@@ -405,12 +527,15 @@ def run_PARAFAC2_decomposition_repeated(
         return weights, factors, projections
 
     (best_weights, best_factors, best_projections), best_error = _repeat_with_restarts(
-        attempt,
+        "PARAFAC2",
+        tensor_slices,
+        kwargs,
         to_cpu,
         init_repeats,
         device,
         verbose_level,
         progress_bar,
+        restart_procs=restart_procs,
     )
 
     return best_weights, best_factors, best_projections, best_error

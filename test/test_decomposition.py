@@ -7,6 +7,7 @@ from gMRItensor import compute_CP_decomposition
 from gMRItensor import run_CP_decomposition_repeated
 from gMRItensor import run_PARAFAC2_decomposition_repeated
 from gMRItensor import setup_backend
+from gMRItensor.decomposition import _in_worker_process
 from gMRItensor.decomposition import ConvergenceError
 
 
@@ -201,6 +202,112 @@ def test_CP_nan_with_imputation_succeeds():
     )
     assert [f.shape for f in factors] == [(8, 2), (6, 2), (5, 2)]
     assert torch.isfinite(error)
+
+
+def test_in_worker_process_false_in_main_process():
+    assert not _in_worker_process()
+
+
+def test_CP_restart_procs_parallel_converges_as_well_as_sequential():
+    # Splitting restarts across worker processes should reach comparably low
+    # reconstruction error to running them sequentially in-process. Not
+    # asserted bit-identical: separate processes can pick up different BLAS
+    # thread counts, so the exact floating-point trajectory (and possibly
+    # which restart ends up best) isn't guaranteed to match, only the
+    # resulting fit quality.
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    tensor = make_low_rank_tensor()
+
+    _, _, error_seq = run_CP_decomposition_repeated(
+        tensor,
+        rank=2,
+        max_iter=500,
+        init_repeats=6,
+        device=device,
+        progress_bar=False,
+        restart_procs=1,
+    )
+    _, factors_par, error_par = run_CP_decomposition_repeated(
+        tensor,
+        rank=2,
+        max_iter=500,
+        init_repeats=6,
+        device=device,
+        progress_bar=False,
+        restart_procs=2,
+    )
+    assert torch.isfinite(error_par)
+    assert error_par < 10 * error_seq
+    assert all((f >= -1e-6).all() for f in factors_par)  # non_negative default
+
+
+def test_PARAFAC2_restart_procs_parallel_succeeds():
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    rng = np.random.default_rng(0)
+    slices = [
+        torch.from_numpy(rng.random((n_timepoints, 5))).to(device)
+        for n_timepoints in (4, 5, 6)
+    ]
+
+    weights, factors, projections, error = run_PARAFAC2_decomposition_repeated(
+        slices,
+        rank=2,
+        max_iter=200,
+        init_repeats=4,
+        device=device,
+        progress_bar=False,
+        restart_procs=2,
+    )
+    assert weights.shape == (2,)
+    assert torch.isfinite(error)
+
+
+def test_restart_procs_rejected_on_cuda():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    os.environ["GMRITENSOR_USE_GPU"] = "TRUE"
+    device = setup_backend()
+    tensor = make_low_rank_tensor().to(device)
+
+    with pytest.raises(ValueError, match="CUDA"):
+        run_CP_decomposition_repeated(
+            tensor,
+            rank=2,
+            max_iter=10,
+            init_repeats=2,
+            device=device,
+            progress_bar=False,
+            restart_procs=2,
+        )
+
+
+def test_restart_procs_falls_back_inside_worker_process(monkeypatch, capsys):
+    # Guards against nesting process pools: e.g. inside one of
+    # evaluate_replicability_multiproc's own workers, restart_procs should
+    # silently drop to 1 (sequential) instead of spawning a second layer of
+    # processes.
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    tensor = make_low_rank_tensor()
+
+    monkeypatch.setattr(
+        "gMRItensor.decomposition._in_worker_process",
+        lambda: True,
+    )
+    _, _, error = run_CP_decomposition_repeated(
+        tensor,
+        rank=2,
+        max_iter=500,
+        init_repeats=3,
+        device=device,
+        progress_bar=False,
+        restart_procs=4,
+        verbose_level=1,
+    )
+    assert torch.isfinite(error)
+    assert "falling back to restart_procs=1" in capsys.readouterr().out
 
 
 def test_PARAFAC2_rejects_nan():
