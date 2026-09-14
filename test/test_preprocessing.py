@@ -407,14 +407,6 @@ def test_compute_tracer_parallel_returns_shared_index_list(tmp_path):
 
     assert "label_index" in df.columns
     assert len(df) == 2 * 2  # 2 time points x 2 ROIs
-    # Every image shares one segmentation_path, so ROI-aggregate rows get a
-    # dense, stable per-ROI label_index (0 for ROI 1, 1 for ROI 2) instead
-    # of compute_tracer_from_image's safe-but-uninformative constant 0.
-    for _, group in df.groupby(["subject", "time_point"]):
-        np.testing.assert_array_equal(
-            group.sort_values("labels")["label_index"].to_numpy(),
-            [0, 1],
-        )
 
     direct_labels, _, _, direct_index_list = compute_tracer_from_image(**args)
     assert len(index_list) == len(direct_labels)
@@ -476,16 +468,14 @@ def test_compute_tracer_parallel_tolerates_roi_missing_in_some_images(tmp_path):
 def test_compute_tracer_parallel_keeps_label_index_zero_when_segmentation_differs(
     tmp_path,
 ):
-    # Critical invariant: whenever segmentation_path differs across images
-    # (so a dense, dataset-wide label_index can't be trusted to mean the
-    # same ROI everywhere -- see compute_tracer_parallel's docstring),
-    # EVERY ROI-aggregate row must get the same label_index (0), regardless
-    # of which ROI it is. Anything else would make (labels, label_index)
-    # pivot keys inconsistent across images that do share an ROI, silently
-    # fragmenting/losing that ROI's data. Uses two segmentation files with
-    # identical *content* but different *paths*, to isolate that this is a
-    # path-based check (conservative by construction), not a check of
-    # whether the images happen to agree on their ROI set.
+    # Invariant: every ROI-aggregate row gets the same label_index (0),
+    # regardless of which ROI it is -- label_index only needs to
+    # distinguish rows *within* one (subject, time_point, labels) group
+    # (needed for per-voxel mode's repeated ROI ids), not to distinguish
+    # one ROI from another. That's independent of whether segmentation_path
+    # is shared across images or not (compute_tracer_parallel no longer
+    # special-cases that); this test just uses two different segmentation
+    # files (same ROI content, different paths) as one concrete case of it.
     paths = _make_two_roi_images(tmp_path)
     other_dir = tmp_path / "other"
     other_dir.mkdir()

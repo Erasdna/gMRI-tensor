@@ -201,42 +201,22 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
     `compute_tracer_from_image` (see its docstring), taken from the first
     image processed.
 
-    If every entry shares the same `segmentation_path`, every image
-    necessarily observes the exact same set of ROIs in the exact same
-    order -- so ROI-aggregate rows (`func` not None, `label_index` always
-    `0` from `compute_tracer_from_image`) are upgraded here to a dense,
-    dataset-wide `label_index` (each ROI's rank among all ROIs present),
-    stable across every subject and time point since it's derived from the
-    one shared segmentation rather than each image's own local view. This
-    upgrade is only safe when the segmentation is provably identical
-    everywhere: with per-subject/native-space segmentations (where ROI
-    presence can legitimately vary), a rank computed from one image's own
-    ROI set would not mean the same thing in another image missing some of
-    those ROIs -- `label_index` is left at its safe default (`0`) in that
-    case, which still pivots correctly and still tolerates a subject
-    missing an ROI (via `labels` alone), just without a dense per-ROI
-    ordering. Per-voxel rows (`func=None`) are never touched here --
-    `label_index` there is already a real, meaningful within-ROI voxel
-    rank from `compute_tracer_from_image`.
+    Images are *not* required to agree on which ROIs are present --
+    ROI-aggregate mode has always tolerated one subject/image missing an
+    ROI another has (`prepare_tensor` drops it via `dropna`), which is the
+    normal case for per-subject/native-space segmentations, not an error.
+    `index_list` is therefore only a faithful voxel-coordinate map for
+    every row if every image does happen to share the same voxel grid (e.g.
+    a shared template/atlas) -- true for the per-voxel use case, not
+    assumed or checked here otherwise.
     """
-    segmentation_paths = {str(args["segmentation_path"]) for args in args_list}
-    shared_segmentation = len(segmentation_paths) == 1
-
     results_dict = []
     index_list: list[np.ndarray] | None = None
-    rank_of_label: dict[int, int] | None = None
 
     def collect(task_id, labels, values, label_index, this_index_list):
-        nonlocal index_list, rank_of_label
+        nonlocal index_list
         if index_list is None:
             index_list = this_index_list
-            if shared_segmentation:
-                rank_of_label = {
-                    label: rank for rank, label in enumerate(np.unique(labels))
-                }
-        if shared_segmentation and args_list[task_id]["func"] is not None:
-            assert rank_of_label is not None
-            label_index = np.array([rank_of_label[label] for label in labels])
         tmp_dict = {
             "labels": labels,
             "label_index": label_index,
