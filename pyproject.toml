@@ -18,6 +18,10 @@ license = {file = "LICENSE"}
 # Direct dependencies
 dependencies = [
     "h5py>=3.16.0",
+    # Upper-bounded deliberately: gMRItensor.decomposition reads the PARAFAC2
+    # basis/coordinate matrices out of matcouply's ADMM auxiliary variables
+    # (`auxes[1][0]`), which is internal layout rather than public API.
+    "matcouply>=0.2.0,<0.3",
     "nibabel>=5.4.2",
     "numexpr>=2.14.1",
     'numpy',

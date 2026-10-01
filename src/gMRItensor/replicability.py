@@ -363,7 +363,13 @@ def evaluate_replicability_multiproc(
         n_procs: Number of parallel processes. Must be 1 if `tensor` is on
             CUDA -- see Raises.
         **CP_kwargs: Additional arguments passed to
-            run_CP_decomposition_repeated / run_PARAFAC2_decomposition_repeated
+            run_CP_decomposition_repeated / run_PARAFAC2_decomposition_repeated.
+            This is how PARAFAC2-only options reach the solver -- notably
+            `solver="matcouply"` (plus `nn_modes`, `aoadmm_options` and
+            `aoadmm_loss_tolerance`), which is why this module needs no
+            PARAFAC2-solver-specific code of its own. They will `TypeError`
+            with `method="CP"`. Do not pass `return_diagnostics`: the worker
+            below unpacks a fixed 4-tuple.
 
     Returns:
         List of FMS score tuples (format depends on engine type)

@@ -1,3 +1,4 @@
+import math
 import os
 
 import pytest
@@ -131,10 +132,11 @@ def test_replicability_cuda_sequential_default_stratification():
     assert len(fms) == 1
 
 
-def run_replicability_parafac2(procs):
+def run_replicability_parafac2(procs, solver="tensorly"):
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     device = setup_backend()
     # Ragged: 12 subjects with 4-6 time points each, sharing 20 labels/regions.
+    # .abs() so the non-negativity-constrained default fit is well-posed.
     tensor = [torch.randn(4 + (i % 3), 20).to(device).abs() for i in range(12)]
 
     CV_splits = 3
@@ -144,17 +146,25 @@ def run_replicability_parafac2(procs):
     half_repeats = 3
     half_engine = HalfHalfEngine(repeats=half_repeats)
 
+    # `solver` reaches run_PARAFAC2_decomposition_repeated through
+    # evaluate_replicability_multiproc's **CP_kwargs, which is why the
+    # replicability path needed no changes of its own.
+    common = dict(
+        method="PARAFAC2",
+        n_procs=procs,
+        init_repeats=3,
+        max_iter=500,
+        verbose_level=0,
+        tolerance=1e-4,
+        progress_bar=False,
+        solver=solver,
+    )
+
     half_fms = evaluate_replicability_multiproc(
         half_engine,
         tensor,
         2,
-        method="PARAFAC2",
-        n_procs=procs,
-        init_repeats=3,
-        max_iter=100,
-        verbose_level=0,
-        tolerance=1e-4,
-        progress_bar=False,
+        **common,
     )
     assert len(half_fms) == half_repeats
 
@@ -162,19 +172,25 @@ def run_replicability_parafac2(procs):
         CV_engine,
         tensor,
         2,
-        method="PARAFAC2",
-        n_procs=procs,
-        init_repeats=3,
-        max_iter=100,
-        verbose_level=0,
-        tolerance=1e-4,
-        progress_bar=False,
+        **common,
     )
     assert len(CV_fms) == CV_repeats * comb(CV_splits, 2, exact=True)
+    return half_fms, CV_fms
 
 
 def test_replicability_parafac2_serial():
     run_replicability_parafac2(1)
+
+
+@pytest.mark.parametrize("solver", ["tensorly", "matcouply"])
+def test_replicability_parafac2_accepts_either_solver(solver):
+    # The plug-and-play claim at the top level: FMS scoring consumes
+    # (weights, factors) from either solver without branching.
+    half_fms, CV_fms = run_replicability_parafac2(1, solver=solver)
+    for scores in (half_fms, CV_fms):
+        for entry in scores:
+            fms = entry[-1]
+            assert math.isfinite(float(fms))
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@ from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
 from gMRItensor.plotting.evolving_mode import _compute_group_ribbon_stats
 from gMRItensor.plotting.evolving_mode import _test_group_differences_over_time
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
+from gMRItensor.plotting.evolving_mode import reconstruct_evolving_factors
 from gMRItensor.plotting.mode_grid import plot_mode_grid
 from gMRItensor.plotting.spatial_mode import _percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_spatial_mode
@@ -900,3 +901,38 @@ def test_plot_mode_grid_share_colorbar_scaling():
     independent_csf = axs[0, 3].collections[-1].get_clim()
     plt.close(fig)
     assert independent_parenchyma != pytest.approx(independent_csf)
+
+
+@pytest.mark.parametrize("solver", ["tensorly", "matcouply"])
+def test_reconstruct_evolving_factors_accepts_either_solver(solver):
+    # The plotting path's half of the plug-and-play claim: whichever solver
+    # produced the fit, reconstruct_evolving_factors must take it unchanged.
+    # This is also the first direct test of that function.
+    import os
+
+    import torch
+    from gMRItensor import run_PARAFAC2_decomposition_repeated
+    from gMRItensor import setup_backend
+
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    rng = np.random.default_rng(0)
+    slices = [
+        torch.from_numpy(rng.random((n_timepoints, 5))).to(device)
+        for n_timepoints in (4, 5, 6)
+    ]
+
+    weights, factors, projections, _ = run_PARAFAC2_decomposition_repeated(
+        slices,
+        rank=2,
+        max_iter=500,
+        init_repeats=2,
+        device=device,
+        progress_bar=False,
+        solver=solver,
+    )
+    evolving_factors = reconstruct_evolving_factors(weights, factors, projections)
+
+    assert [f.shape for f in evolving_factors] == [(4, 2), (5, 2), (6, 2)]
+    assert all(isinstance(f, np.ndarray) for f in evolving_factors)
+    assert all(np.isfinite(f).all() for f in evolving_factors)
