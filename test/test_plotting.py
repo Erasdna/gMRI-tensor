@@ -1,3 +1,5 @@
+import warnings
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -936,3 +938,44 @@ def test_reconstruct_evolving_factors_accepts_either_solver(solver):
     assert [f.shape for f in evolving_factors] == [(4, 2), (5, 2), (6, 2)]
     assert all(isinstance(f, np.ndarray) for f in evolving_factors)
     assert all(np.isfinite(f).all() for f in evolving_factors)
+
+
+def test_scale_mode_zero_column():
+    # An all-zero column used to divide by zero, emitting a RuntimeWarning
+    # and returning NaN. Constrained fits make this more likely, since an
+    # unexpressed loading is now exactly 0.
+    arr = np.array([[1.0, 0.0], [2.0, 0.0], [3.0, 0.0]])
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        scaled = scale_mode(arr)
+    assert not np.isnan(scaled).any()
+    assert (scaled[:, 1] == 0.0).all()
+    assert np.linalg.norm(scaled[:, 0]) == pytest.approx(1.0)
+    assert [w for w in caught if issubclass(w.category, RuntimeWarning)] == []
+
+
+def test_scale_mode_zeroes_negligible_column():
+    # A column at ~1e-12 of its siblings is solver residue, not shape.
+    # Normalising it would manufacture a full-amplitude curve out of noise --
+    # and if that residue is negative, a mirrored one.
+    arr = np.array([[1.0, -1e-12], [2.0, -2e-12], [3.0, -1e-12]])
+    scaled = scale_mode(arr)
+    assert (scaled[:, 1] == 0.0).all()
+
+
+def test_scale_mode_keeps_genuinely_small_column():
+    # Guards the rtol choice from over-reaching: 1e-2 relative is a weakly
+    # expressed component, not noise, and must still be scaled to unit norm.
+    arr = np.array([[1.0, 1e-2], [2.0, 2e-2], [3.0, 1e-2]])
+    scaled = scale_mode(arr)
+    assert np.linalg.norm(scaled[:, 1]) == pytest.approx(1.0)
+
+
+def test_scale_mode_uniformly_small_array():
+    # Every column ~1e-8: the array simply has a small scale, nothing is
+    # negligible relative to its siblings. An absolute threshold would wrongly
+    # flatten all of it.
+    arr = np.array([[1e-8, 2e-8], [2e-8, 1e-8], [3e-8, 3e-8]])
+    scaled = scale_mode(arr)
+    for column in range(arr.shape[1]):
+        assert np.linalg.norm(scaled[:, column]) == pytest.approx(1.0)

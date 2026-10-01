@@ -7,6 +7,7 @@ from collections import Counter
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
+from dataclasses import replace
 from multiprocessing import current_process
 from multiprocessing import get_context
 from typing import Any
@@ -82,6 +83,11 @@ class PARAFAC2Diagnostics:
     relative_reconstruction_error: float
     reconstruction_error_change: float
     reconstruction_tolerance: float
+    #: Non-negativity actually applied, with `"auto"` already resolved.
+    nn_modes: tuple[int, ...] | None = None
+    #: Largest per-component non-negativity violation in the *returned*
+    #: factors, keyed by mode, relative to that component's own scale.
+    max_nn_violation: dict[int, float] | None = None
     # matcouply only; None for tensorly.
     loss_converged: bool | None = None
     loss_tolerance: float | None = None
@@ -334,11 +340,40 @@ def _normalize_parafac2_factors(
     return scaled_weights, scaled_factors
 
 
+def _constrained_factor(
+    admm_vars: Any,
+    mode: int,
+    primal: torch.Tensor,
+    nn_modes: tuple[int, ...] | None,
+) -> torch.Tensor:
+    """Return the factor that actually satisfies the non-negativity constraint.
+
+    AO-ADMM splits each factor into a primal variable, which fits the data,
+    and an auxiliary, which satisfies the constraint. They agree only at
+    exact convergence, so matcouply's returned primal is non-negative merely
+    to within the feasibility gap -- in testing its minimum sat at -7.7e-07
+    where the auxiliary's was exactly 0.
+
+    That residue is not harmless. A subject that does not express a
+    component should load 0 on it; a loading of -1e-07 instead flips the sign
+    of everything it multiplies, and `scale_mode` then renormalizes the
+    result back to full amplitude -- turning numerical dust into an
+    entirely negative, mirrored curve.
+
+    Only modes with a non-negativity penalty have an auxiliary to read.
+    """
+    if not nn_modes or mode not in nn_modes:
+        return primal
+    auxes = admm_vars.auxes[mode]
+    return auxes[0] if auxes else primal
+
+
 def _matcouply_to_parafac2_tensor(
     cmf: Any,
     admm_vars: Any,
     rank: int,
     normalize_factors: bool,
+    nn_modes: tuple[int, ...] | None,
 ) -> Parafac2Tensor:
     """Adapt matcouply's output to TensorLy's `Parafac2Tensor` contract.
 
@@ -351,6 +386,14 @@ def _matcouply_to_parafac2_tensor(
     shared `rank x rank` coordinate matrix -- so reading it back recovers
     TensorLy's representation to ~1e-7 relative error. This is what lets
     downstream consumers work unchanged for both solvers.
+
+    Modes 0 and 2 are taken from their non-negativity auxiliaries rather
+    than the primal, so a requested constraint actually holds in what is
+    returned (see `_constrained_factor`). Mode 1 must keep the PARAFAC2
+    auxiliary, since that is what supplies `P_i` and the coordinate matrix,
+    so `projections[i] @ factors[1]` stays non-negative only to within the
+    feasibility gap -- reported by `_check_nn_modes_satisfied` rather than
+    silently corrected.
 
     `factors[1]` (the coordinate matrix) is NOT non-negative even when mode 1
     is constrained; non-negativity holds on `projections[i] @ factors[1]`.
@@ -391,7 +434,11 @@ def _matcouply_to_parafac2_tensor(
             )
 
     weights = torch.ones(rank, dtype=A.dtype, device=A.device)
-    factors = [A, coordinate_matrix, C]
+    factors = [
+        _constrained_factor(admm_vars, 0, A, nn_modes),
+        coordinate_matrix,
+        _constrained_factor(admm_vars, 2, C, nn_modes),
+    ]
     if normalize_factors:
         weights, factors = _normalize_parafac2_factors(weights, factors)
 
@@ -520,6 +567,7 @@ def _compute_PARAFAC2_matcouply(
             admm_vars,
             rank,
             normalize_factors,
+            nn_modes,
         )
 
     # Below here torch's defaults are restored, so neither float64 nor the
@@ -579,6 +627,7 @@ def _compute_PARAFAC2_matcouply(
         relative_reconstruction_error=rec_errors[-1],
         reconstruction_error_change=delta,
         reconstruction_tolerance=tolerance,
+        nn_modes=nn_modes,
         loss_converged=loss_converged,
         loss_tolerance=aoadmm_loss_tolerance,
         final_relative_loss_change=loss_change,
@@ -631,6 +680,7 @@ def _compute_PARAFAC2_tensorly(
         relative_reconstruction_error=rec_errors[-1],
         reconstruction_error_change=delta,
         reconstruction_tolerance=tolerance,
+        nn_modes=nn_modes,
         message="converged",
     )
     return result, errors, diagnostics
@@ -675,12 +725,36 @@ def compute_PARAFAC2_decomposition(
     mode 1 raises, since it would otherwise only warn and leave the mode
     unconstrained.
 
-    With matcouply, `factors[1]` is AO-ADMM's coordinate matrix and carries
-    negative entries even under a fully constrained fit; non-negativity holds
-    on `projections[i] @ factors[1]`. matcouply also runs in float64
-    regardless of `setup_backend` (see `_matcouply_numeric_context`), and its
-    non-random `init` options ignore `random_state`, making restarts
-    identical.
+    matcouply also runs in float64 regardless of `setup_backend` (see
+    `_matcouply_numeric_context`), and its non-random `init` options ignore
+    `random_state`, making restarts identical.
+
+    What "non-negative" means here
+    ------------------------------
+    AO-ADMM splits each factor into a primal variable, which fits the data,
+    and an auxiliary, which satisfies the constraint; they agree only at
+    exact convergence. Modes 0 and 2 are therefore returned from their
+    auxiliaries, so those constraints hold **exactly**. Mode 1 must keep the
+    PARAFAC2 auxiliary (it supplies `projections` and `factors[1]`), so its
+    non-negativity holds only to within the feasibility gap --
+    `PARAFAC2Diagnostics.max_nn_violation` reports how far.
+
+    Note `factors[1]` is AO-ADMM's coordinate matrix and carries negative
+    entries even under a fully constrained fit. The non-negative quantity is
+    `projections[i] @ factors[1]`; assert there, not on `factors[1]`.
+
+    On sign flips
+    -------------
+    PARAFAC2 has a per-component sign/scale indeterminacy -- scale `a_r`,
+    `b_r`, `c_r` by `alpha, beta, gamma` with `alpha*beta*gamma = 1`, of
+    which sign flips are `alpha = beta = -1`. Non-negativity on all three
+    modes removes the sign freedom entirely.
+
+    Once two modes are constrained, flipping the third is **not** a free
+    reparametrisation: it changes the reconstruction. So a wholly negative
+    component is a genuinely different model, representing signal below
+    baseline, and must not be flipped back for plotting -- that would require
+    flipping another mode, making it negative instead.
 
     Convergence: AO-ADMM has two thresholds
     ---------------------------------------
@@ -1237,6 +1311,66 @@ def run_CP_decomposition_repeated(
     return best_weights, best_factors, best_error
 
 
+def _nn_violations(
+    factors: list[torch.Tensor],
+    projections: list[torch.Tensor],
+    nn_modes: tuple[int, ...] | None,
+) -> dict[int, float]:
+    """Largest per-component non-negativity violation in the returned factors.
+
+    Scored **relative to each component's own scale**, because an absolute
+    threshold misses the case that matters: a loading of -1e-07 is invisible
+    against a total norm of order 1, yet it flips the sign of everything it
+    multiplies.
+
+    Mode 1 is measured on `projections[i] @ factors[1]`, never on
+    `factors[1]` itself -- that is AO-ADMM's coordinate matrix, which is
+    legitimately negative even under a fully constrained fit.
+    """
+    if not nn_modes:
+        return {}
+
+    violations: dict[int, float] = {}
+    for mode in sorted(set(nn_modes)):
+        if mode == 1:
+            columns = [projection @ factors[1] for projection in projections]
+        else:
+            columns = [factors[mode]]
+
+        worst = 0.0
+        for rank_index in range(factors[0].shape[1]):
+            values = torch.cat([c[:, rank_index].reshape(-1) for c in columns])
+            scale = float(values.abs().max())
+            if scale == 0.0:
+                continue
+            worst = max(worst, -min(0.0, float(values.min())) / scale)
+        violations[mode] = worst
+    return violations
+
+
+def _warn_if_nn_modes_violated(
+    violations: dict[int, float],
+    solver: PARAFAC2Solver,
+    threshold: float = 1e-3,
+) -> None:
+    """Warn when a constraint the caller asked for does not hold on output."""
+    offenders = {mode: value for mode, value in violations.items() if value > threshold}
+    if not offenders:
+        return
+    detail = ", ".join(
+        f"mode {mode} ({value:.2e} relative)" for mode, value in offenders.items()
+    )
+    warnings.warn(
+        f"PARAFAC2(solver={solver!r}): the returned factors violate the "
+        f"requested non-negativity on {detail}, beyond the {threshold:.0e} "
+        "relative threshold. A violation approaching 1.0 means that mode was "
+        "effectively unconstrained; a smaller one is feasibility-gap leakage, "
+        "which a larger PARAFAC2_max_iter or a tighter feasibility_tol (via "
+        "aoadmm_options) will reduce.",
+        stacklevel=3,
+    )
+
+
 def _warn_if_accepted_at_iteration_limit(
     diagnostics: PARAFAC2Diagnostics | None,
 ) -> None:
@@ -1431,6 +1565,17 @@ def run_PARAFAC2_decomposition_repeated(
         progress_bar,
         restart_procs=restart_procs,
     )
+
+    # Measured on the CPU float32 factors the caller actually receives, not
+    # on the solver's internals, so the check reflects what they will plot.
+    violations = _nn_violations(
+        best_factors,
+        best_projections,
+        best_diagnostics.nn_modes if best_diagnostics else None,
+    )
+    if best_diagnostics is not None:
+        best_diagnostics = replace(best_diagnostics, max_nn_violation=violations)
+        _warn_if_nn_modes_violated(violations, solver)
 
     _warn_if_accepted_at_iteration_limit(best_diagnostics)
     advisory = _build_restart_advisory(

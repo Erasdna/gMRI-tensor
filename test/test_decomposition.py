@@ -13,9 +13,12 @@ from gMRItensor import run_PARAFAC2_decomposition_repeated
 from gMRItensor import setup_backend
 from gMRItensor.decomposition import _in_worker_process
 from gMRItensor.decomposition import _init_restart_worker_backend
+from gMRItensor.decomposition import _nn_violations
 from gMRItensor.decomposition import _resolve_nn_modes
 from gMRItensor.decomposition import _suggest_max_iter
 from gMRItensor.decomposition import ConvergenceError
+from gMRItensor.plotting.evolving_mode import reconstruct_evolving_factors
+from gMRItensor.plotting.utils import scale_mode
 from tensorly.parafac2_tensor import Parafac2Tensor
 
 SOLVERS = ["tensorly", "matcouply"]
@@ -993,3 +996,158 @@ def test_PARAFAC2_one_kwargs_dict_routes_to_either_solver():
         )
         assert tuple(weights.shape) == (2,)
         assert torch.isfinite(error)
+
+
+# ---------------------------------------------------------------------------
+# Non-negativity actually holds in the factors we hand back
+# ---------------------------------------------------------------------------
+
+
+def make_parafac2_unexpressed_component(device, n_subjects=16, n_labels=24, rank=2):
+    """Data where some regions carry no signal, so a loading should be 0.
+
+    This is the shape that exposes the bug: AO-ADMM enforces non-negativity
+    exactly on its *auxiliary* variables and only to within the feasibility
+    gap on the primal. A loading that should be exactly 0 lands at about
+    -1e-07 in the primal, which is enough to flip the sign of everything it
+    multiplies.
+    """
+    rng = np.random.default_rng(1)
+    subject = np.abs(rng.normal(size=(n_subjects, rank))) + 0.5
+    labels = np.abs(rng.normal(size=(n_labels, rank))) + 0.5
+    labels[:5] = 0.0
+
+    def evolving(n_timepoints, shift):
+        time_grid = np.linspace(0, 10, n_timepoints)[:, None]
+        centres = np.array([3.0, 6.0])[None, :] + shift
+        return np.exp(-((time_grid - centres) ** 2) / 2.0)
+
+    return [
+        torch.tensor(
+            evolving(12, 0.1 * i) @ np.diag(subject[i]) @ labels.T
+            + 0.05 * rng.normal(size=(12, n_labels)),
+            dtype=torch.float32,
+        ).to(device)
+        for i in range(n_subjects)
+    ]
+
+
+def test_PARAFAC2_matcouply_subject_mode_exactly_non_negative():
+    # Regression test. The subject and region factors used to come from
+    # matcouply's primal variables, which satisfy non-negativity only to
+    # within the feasibility gap -- measured at -7.7e-07. They now come from
+    # the auxiliaries, which satisfy it exactly, so `>= 0.0` holds strictly
+    # rather than only `>= -1e-6`.
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    slices = make_parafac2_unexpressed_component(device)
+
+    _, factors, _, _ = run_PARAFAC2_decomposition_repeated(
+        slices,
+        rank=3,
+        max_iter=1500,
+        init_repeats=2,
+        device=device,
+        progress_bar=False,
+        solver="matcouply",
+    )
+    assert factors[0].min() >= 0.0
+    assert factors[2].min() >= 0.0
+
+
+def test_PARAFAC2_matcouply_amplitude_scaled_profiles_keep_sign():
+    # The reported symptom, end to end: scaling each subject's evolving
+    # factor by its own loading and then normalising per subject. A negative
+    # loading mirrors the whole curve, and scale_mode renormalises the
+    # 1e-07-magnitude result back to full amplitude.
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    slices = make_parafac2_unexpressed_component(device)
+
+    _, factors, projections, _ = run_PARAFAC2_decomposition_repeated(
+        slices,
+        rank=3,
+        max_iter=1500,
+        init_repeats=2,
+        device=device,
+        progress_bar=False,
+        solver="matcouply",
+    )
+    subject_mode, time_mode, roi_mode = factors
+    evolving = reconstruct_evolving_factors(
+        np.ones(time_mode.shape[-1]),
+        (subject_mode, time_mode, roi_mode),
+        projections,
+    )
+    amplitude_scaled = np.stack(evolving) * subject_mode.numpy()[:, None, :]
+    scaled = np.stack([scale_mode(s) for s in amplitude_scaled])
+
+    assert not np.isnan(scaled).any()
+    for subject in range(scaled.shape[0]):
+        for component in range(scaled.shape[2]):
+            curve = scaled[subject, :, component]
+            # A wholly-negative, full-amplitude curve is the bug's signature.
+            assert not ((curve <= 1e-12).all() and np.abs(curve).max() > 0.1)
+
+
+def test_PARAFAC2_unconstrained_mode_returns_primal():
+    # Only constrained modes have a non-negativity auxiliary to read, so an
+    # unconstrained mode must fall back to the primal rather than indexing
+    # into an empty aux list.
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    slices = make_parafac2_slices(device)
+
+    _, factors, _, _ = run_PARAFAC2_decomposition_repeated(
+        slices,
+        rank=2,
+        max_iter=500,
+        init_repeats=2,
+        device=device,
+        progress_bar=False,
+        solver="matcouply",
+        nn_modes=(0,),
+    )
+    assert factors[0].min() >= 0.0
+    assert [tuple(f.shape) for f in factors] == [(3, 2), (2, 2), (5, 2)]
+
+
+@pytest.mark.parametrize(
+    ("solver", "expected"),
+    [("tensorly", (0, 2)), ("matcouply", (0, 1, 2))],
+)
+def test_PARAFAC2_diagnostics_records_resolved_nn_modes(solver, expected):
+    # A fit should be self-describing: without this, "which nn_modes did this
+    # actually use?" cannot be answered after the fact.
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    slices = make_parafac2_slices(device)
+
+    *_, diagnostics = run_PARAFAC2_decomposition_repeated(
+        slices,
+        rank=2,
+        max_iter=500,
+        init_repeats=2,
+        device=device,
+        progress_bar=False,
+        solver=solver,
+        return_diagnostics=True,
+    )
+    assert diagnostics.nn_modes == expected
+    assert set(diagnostics.max_nn_violation) == set(expected)
+    assert all(v < 1e-3 for v in diagnostics.max_nn_violation.values())
+
+
+def test_nn_violation_is_relative_per_component():
+    # Scoring relative to each component's own scale is what catches the bug:
+    # a -1e-07 loading is invisible against a total norm of order 1, yet it
+    # flips every curve it multiplies.
+    weak = torch.tensor([[1.0, -1e-7], [2.0, 1e-7]])
+    strong = torch.tensor([[1.0, 2.0], [2.0, 1.0]])
+    projections = [torch.eye(2)]
+
+    violations = _nn_violations([weak, strong, strong], projections, (0,))
+    assert violations[0] == pytest.approx(1.0, rel=1e-6)
+
+    clean = _nn_violations([strong, strong, strong], projections, (0,))
+    assert clean[0] == 0.0

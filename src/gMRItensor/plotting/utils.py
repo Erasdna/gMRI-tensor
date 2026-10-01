@@ -5,9 +5,27 @@ import numpy as np
 plt.style.use(["science", "no-latex"])
 
 
-def scale_mode(arr: np.ndarray) -> np.ndarray:
-    """Scale a mode's columns to unit L2 norm."""
-    return arr / np.linalg.norm(arr, axis=0)[None, :]
+def scale_mode(arr: np.ndarray, rtol: float = 1e-10) -> np.ndarray:
+    """Scale a mode's columns to unit L2 norm; zero out negligible columns.
+
+    A column whose norm is negligible carries no shape, only solver residue,
+    so normalizing it to unit norm would manufacture a full-amplitude curve
+    out of numerical noise. Such columns are returned as zeros instead --
+    which also avoids the divide-by-zero NaN a genuinely all-zero column
+    used to produce.
+
+    `rtol` is relative to the largest column norm in the same array, not
+    absolute. An absolute floor fails both ways: low enough to be safe and
+    it misses ~1e-07 residue; high enough to catch that and it flattens a
+    real component in an array that is uniformly small-scale. Relative means
+    a column is zeroed only when it is vanishingly small next to its own
+    siblings, and never when every column shares a small scale.
+    """
+    norms = np.linalg.norm(arr, axis=0)
+    largest = norms.max(initial=0.0)
+    negligible = norms <= rtol * largest
+    safe_norms = np.where(negligible, 1.0, norms)
+    return np.where(negligible[None, :], 0.0, arr / safe_norms[None, :])
 
 
 def compute_figsize(
