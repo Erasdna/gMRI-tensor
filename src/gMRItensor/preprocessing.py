@@ -50,70 +50,40 @@ def compute_tracer_from_image(
     segmentation_path: Path,
     func: Callable | None = np.nanmedian,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray]]:
-    """Compute tracer signal per voxel or per ROI from a set of aligned NIfTI images.
+    """Compute tracer signal per voxel or per ROI from aligned NIfTI images.
 
-    Loads `baseline_path`, `post_injection_path`, `mask_path`, and
-    `segmentation_path`, reorienting each to the closest canonical (RAS+)
-    axis convention so images stored with an equivalent-but-different axis
-    order/flip aren't falsely rejected as misaligned (this does not
-    resample, so genuinely different grids -- different voxel size, origin,
-    or oblique rotation -- are still rejected). All four images must share
-    the same affine.
+    All four images are reoriented to the closest canonical (RAS+)
+    convention, so an equivalent-but-differently-stored axis order is not
+    falsely rejected. No resampling is done, so genuinely different grids
+    still raise.
 
-    The tracer signal (see `compute_tracer`) is computed for voxels inside
-    `mask` (`mask > 0`), then further restricted to voxels tagged with a
-    real ROI in `segmentation` (segmentation value > 1e-6); untagged/
-    background voxels (e.g. label 0) are always excluded, in both modes.
+    The tracer signal (`compute_tracer`) is computed inside `mask > 0` and
+    restricted to voxels tagged with a real ROI (segmentation > 1e-6);
+    background voxels are always excluded.
 
-    Parameters
-    ----------
-    baseline_path, post_injection_path : Path
-        Paths to the pre- and post-contrast-injection images.
-    signal_type : str
-        Passed to `compute_tracer` -- one of "T1map", "R1map", "T1w".
-    mask_path : Path
-        Path to a binary(-ish) mask image; voxels with mask > 0 are kept.
-    segmentation_path : Path
-        Path to an integer-valued ROI/label image, on the same grid as the
-        other images. Every voxel kept in the output is tagged with its own
-        ROI id from this image.
-    func : Callable | None, optional
-        Reduction function passed to `scipy.ndimage.labeled_comprehension`
-        (e.g. `np.nanmedian`, the default, or `np.nanmean`) to aggregate the
-        tracer signal to one value per ROI. If None, aggregation is skipped
-        and one row per voxel is returned instead, each still tagged with
-        its own ROI id.
+    `func` aggregates each ROI's voxels via
+    `scipy.ndimage.labeled_comprehension`. Pass None to skip aggregation and
+    get one row per voxel instead, each still tagged with its ROI id.
 
     Returns
     -------
     tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray]]
         `(labels, values, label_index, index_list)`, all length-matched:
 
-        - `labels[i]`: that row's ROI id (rounded to the nearest integer).
-          If `func` is not None: the sorted unique ROI ids present. If
-          `func` is None: the ROI id of the i-th kept voxel (repeats across
-          voxels of the same ROI).
-        - `values[i]`: `func` applied to that ROI's voxels, or (if `func`
-          is None) that single voxel's own unaggregated tracer signal.
-        - `label_index[i]`: 0-based rank of `labels[i]` among prior rows
-          sharing that same ROI id -- "the j-th voxel of this ROI" --
-          resetting per ROI. Always `0` in ROI-aggregate mode (one row per
-          ROI already). Exists so `(labels[i], label_index[i])` uniquely
-          identifies a row even in per-voxel mode, where `labels` repeats;
-          `prepare_tensor` pivots on that pair instead of `labels` alone,
-          without requiring ROI ids to be contiguous, or requiring the same
-          ROIs to be present in every image -- a subject missing an ROI
-          another has is still tolerated exactly as before, since
-          `label_index` is `0` for every ROI-aggregate row regardless.
-        - `index_list[i]`: `(n_i, ndim)` array of the voxel coordinate(s)
-          behind that row -- every voxel in that ROI (`func` not None) or
-          just that one voxel (`func` is None, `n_i == 1`).
+        - `labels[i]`: the row's ROI id. Sorted unique ids when aggregating,
+          otherwise the i-th voxel's id (so it repeats).
+        - `values[i]`: the aggregated or single-voxel tracer signal.
+        - `label_index[i]`: 0-based rank among prior rows sharing that ROI
+          id, so `(labels[i], label_index[i])` is unique even in per-voxel
+          mode. Always 0 when aggregating. `prepare_tensor` pivots on the
+          pair, which avoids requiring contiguous ROI ids or the same ROIs
+          in every image.
+        - `index_list[i]`: `(n_i, ndim)` coordinates behind that row.
 
     Raises
     ------
     ValueError
-        If any two of baseline/post-injection/mask/segmentation are not on
-        the same affine grid (after canonicalization).
+        If the images are not on the same affine grid.
     """
     baseline_nifti = cast(
         Nifti1Image,
@@ -201,14 +171,11 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
     `compute_tracer_from_image` (see its docstring), taken from the first
     image processed.
 
-    Images are *not* required to agree on which ROIs are present --
-    ROI-aggregate mode has always tolerated one subject/image missing an
-    ROI another has (`prepare_tensor` drops it via `dropna`), which is the
-    normal case for per-subject/native-space segmentations, not an error.
-    `index_list` is therefore only a faithful voxel-coordinate map for
-    every row if every image does happen to share the same voxel grid (e.g.
-    a shared template/atlas) -- true for the per-voxel use case, not
-    assumed or checked here otherwise.
+    Images need not agree on which ROIs are present; a subject missing an
+    ROI another has is normal for native-space segmentations and is dropped
+    by `prepare_tensor`. `index_list` is therefore only a faithful
+    coordinate map for every row when all images share a voxel grid (true
+    for the per-voxel case), which is neither assumed nor checked here.
     """
     results_dict = []
     index_list: list[np.ndarray] | None = None
@@ -249,23 +216,11 @@ def compute_tracer_parallel(args_list, n_procs: int = 5):
 def compute_roi_scaling(
     data: np.ndarray | list[np.ndarray],
 ) -> tuple[np.ndarray, np.ndarray]:
-    """Compute per-ROI mean and standard deviation from `prepare_tensor` output.
+    """Compute per-ROI `(mean, std)`, each shape `(labels,)`.
 
-    Pools over every subject and time point -- i.e. every axis except the
-    last (label/ROI) one -- ignoring NaNs, so it works whether `data` is the
-    regular `(subjects, time_points, labels)` array or the ragged
-    `list[np.ndarray]` of per-subject `(n_timepoints_i, labels)` slices that
-    `prepare_tensor(..., require_regular=False)` returns.
-
-    Parameters
-    ----------
-    data : np.ndarray | list[np.ndarray]
-        Output tensor or list of slices from `prepare_tensor`.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray]
-        `(mean, std)`, each of shape `(labels,)`.
+    Pools over every axis but the last, ignoring NaNs, so it accepts either
+    `prepare_tensor` output: the regular `(subjects, time_points, labels)`
+    array or the ragged list of per-subject slices.
     """
     pooled = (
         data.reshape(-1, data.shape[-1])
@@ -285,40 +240,22 @@ def scale_tensor(
 ) -> tuple[np.ndarray | list[np.ndarray], np.ndarray, np.ndarray]:
     """Scale `prepare_tensor` output per ROI, over all subjects and time points.
 
-    Handles both possible outputs of `prepare_tensor`: the regular
-    `(subjects, time_points, labels)` array (`require_regular=True`) and the
-    ragged `list[np.ndarray]` of per-subject slices (`require_regular=False`).
-    In both cases, scaling is per-label (last axis), pooling over every other
-    axis, matching the (subjects, time_points) pooling `compute_roi_scaling`
-    does.
+    Accepts either `prepare_tensor` output; scaling is per-label (last axis),
+    pooling over every other, as `compute_roi_scaling` does. `center`
+    subtracts the mean before dividing.
 
-    Parameters
-    ----------
-    data : np.ndarray | list[np.ndarray]
-        Output tensor or list of slices from `prepare_tensor`.
-    center : bool, optional
-        If True, subtract the per-ROI mean before dividing by the per-ROI
-        standard deviation. By default False.
-    mean, std : np.ndarray | None, optional
-        Precomputed per-ROI `(labels,)` mean/std to apply instead of
-        computing them from `data` -- e.g. to apply scaling fit on training
-        subjects to held-out ones. By default None, in which case both are
-        computed from `data` via `compute_roi_scaling`.
-
-    Returns
-    -------
-    tuple[np.ndarray | list[np.ndarray], np.ndarray, np.ndarray]
-        `(scaled, mean, std)`. `scaled` has the same type/shape as `data`.
-        `mean` and `std` are the values used, so the same scaling can be
-        re-applied later (e.g. to held-out data) by passing them back in.
+    Pass a precomputed `mean`/`std` to apply a scaling fit elsewhere, e.g.
+    from training subjects to held-out ones. Returns `(scaled, mean, std)`
+    with `scaled` the same type and shape as `data`, so the values used can
+    be fed back in later.
     """
     if mean is None or std is None:
         computed_mean, computed_std = compute_roi_scaling(data)
         mean = computed_mean if mean is None else mean
         std = computed_std if std is None else std
 
-    # A zero-variance ROI is already constant (equal to its own mean), so
-    # guard against a 0/0 NaN by leaving it undivided rather than raising.
+    # A zero-variance ROI is constant, so leave it undivided rather than
+    # producing a 0/0 NaN.
     safe_std = np.where(std == 0, 1.0, std)
 
     def _scale(arr: np.ndarray) -> np.ndarray:
@@ -334,23 +271,14 @@ def _pivot_tracer_df(
 ) -> pd.DataFrame:
     """Filter by group and pivot the long-format tracer DataFrame.
 
-    First step of `prepare_tensor`: optionally filters `df` to one group,
-    then pivots to a DataFrame indexed by (subject, time_point) with one
-    column per `(labels, label_index)` pair. Only (subject, time_point)
-    combinations actually present in `df` get a row -- no NaN-filled rows
-    are introduced for combinations that were never observed.
+    First step of `prepare_tensor`. Produces a frame indexed by (subject,
+    time_point) with one column per `(labels, label_index)` pair; only
+    observed (subject, time_point) combinations get a row.
 
-    Pivots on `(labels, label_index)` rather than `labels` alone: `labels`
-    (the ROI id) can repeat across many rows sharing one `(subject,
-    time_point)` when `df` was built from per-voxel
-    `compute_tracer_from_image` output (many voxels, one ROI id each) --
-    pivoting on `labels` directly would let `aggfunc="first"` silently keep
-    one arbitrary voxel and drop the rest. `label_index` disambiguates that
-    (see `compute_tracer_from_image`) and is always `0` in ROI-aggregate
-    mode, so there this is exactly equivalent to pivoting on `labels` alone
-    -- one subject/image missing an ROI another has is still tolerated the
-    same way it always was (that ROI's column is NaN for the missing
-    subject/time point, dropped later by `prepare_tensor`'s `dropna`).
+    Pivots on the pair rather than `labels` alone because in per-voxel mode
+    one ROI id spans many rows, where `aggfunc="first"` would silently keep
+    one arbitrary voxel. `label_index` is always 0 in ROI-aggregate mode, so
+    this stays equivalent to pivoting on `labels` there.
     """
     if group_filtering is not None:
         df = df.query(f"{group_filtering[0]}=='{group_filtering[1]}'")
@@ -371,67 +299,50 @@ def prepare_tensor(
 ):
     """Prepare subject x time x label tensor data from a long-format tracer DataFrame.
 
-    Subjects are not required to share the same set of time points: only
-    (subject, time_point) combinations that are actually observed are used
-    to decide which labels to keep, so one subject's missing scan no longer
-    forces a spatial region to be dropped for every subject. The label
-    (region) set still needs to be complete and shared across all
-    subjects/time points -- that constraint is unavoidable, since a value
-    genuinely missing at an observed time point can't be recovered here.
+    Subjects need not share the same time points: only observed (subject,
+    time_point) combinations decide which labels to keep, so one subject's
+    missing scan does not drop a region for everyone. The label set must
+    still be complete across all observed combinations, since a value
+    missing at an observed time point cannot be recovered here.
 
     Parameters
     ----------
     df : pd.DataFrame
-        Long-format tracer DataFrame (as produced by `compute_tracer_parallel`),
-        with `subject`, `time_point`, `labels`, `label_index`, `values`
-        columns.
+        Long-format tracer data from `compute_tracer_parallel`, with
+        `subject`, `time_point`, `labels`, `label_index`, `values` columns.
     group_filtering : tuple[str, str] | None, optional
-        `(column, value)` to filter `df` to a single group before pivoting.
-        By default None.
+        `(column, value)` to filter to a single group before pivoting.
     require_regular : bool, optional
-        If True (default), returns a single regular `(subjects, time_points,
-        labels)` array: any (subject, time_point) combination that was never
-        observed becomes a NaN row rather than being silently dropped or
-        crashing the reshape. That NaN-padded array is **not** directly
-        decomposable by `compute_CP_decomposition`, which doesn't support
-        missing values -- impute or mask those NaNs first.
+        If True (default), returns a regular `(subjects, time_points,
+        labels)` array where unobserved combinations become NaN rows. That
+        array is **not** directly decomposable by `compute_CP_decomposition`
+        -- impute or mask the NaNs first.
 
-        If False, returns a ragged `list[np.ndarray]` -- one
-        `(n_timepoints_i, n_labels)` slice per subject, using only that
-        subject's own observed time points, no NaN padding. This is the
-        shape `run_PARAFAC2_decomposition_repeated` expects, since PARAFAC2's
-        evolving mode can have a different size per subject.
+        If False, returns a ragged list of `(n_timepoints_i, n_labels)`
+        slices using only each subject's observed time points. This is what
+        `run_PARAFAC2_decomposition_repeated` expects.
     min_timepoints : int, optional
-        Minimum number of observed time points required to keep a subject;
-        subjects with fewer are dropped and reported. By default 1 (drop
-        only subjects with no data at all). If you plan to use
-        `require_regular=False` for PARAFAC2, consider raising this to 2, so
-        every subject's evolving factor has enough points to be meaningful.
+        Minimum observed time points to keep a subject; others are dropped
+        and reported. Consider raising to 2 for PARAFAC2, so every subject's
+        evolving factor has enough points to be meaningful.
 
     Returns
     -------
     If `require_regular`:
-        tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]
-            `(tensor, subjects, time_points, labels, label_index)`. `tensor`
-            has shape `(len(subjects), len(time_points), len(labels))` and
-            may contain NaN for subject/time_point combinations that were
-            never observed. `(labels[i], label_index[i])` is column `i`'s
-            key from `df` (see `compute_tracer_from_image`) -- together
-            they identify which original `compute_tracer_from_image` row
-            (and thus, in `compute_tracer_parallel`'s `index_list`, which
-            voxel coordinate(s)) this column corresponds to.
+        `(tensor, subjects, time_points, labels, label_index)`, with
+        `tensor` of shape `(subjects, time_points, labels)`, possibly
+        containing NaN. `(labels[i], label_index[i])` identifies which
+        `compute_tracer_from_image` row -- and so which voxel coordinates in
+        `compute_tracer_parallel`'s `index_list` -- column `i` came from.
     Otherwise:
-        tuple[list[np.ndarray], np.ndarray, list[np.ndarray], np.ndarray, np.ndarray]
-            `(slices, subjects, timepoints_per_subject, labels, label_index)`.
-            `slices[i]` has shape `(len(timepoints_per_subject[i]),
-            len(labels))`, ordered by `timepoints_per_subject[i]`.
+        `(slices, subjects, timepoints_per_subject, labels, label_index)`,
+        with `slices[i]` ordered by `timepoints_per_subject[i]`.
     """
     pivot_df = _pivot_tracer_df(df, group_filtering)
 
-    # Drop any label with a NaN among the *actually observed* (subject,
-    # time_point) rows. A subject's structurally missing time point is not a
-    # row here at all, so it can't force an otherwise well-observed label to
-    # be dropped for everyone else.
+    # Drop labels with a NaN among the *observed* rows only. A structurally
+    # missing time point is not a row here, so it cannot force an otherwise
+    # well-observed label to be dropped for everyone.
     valid_pivot = pivot_df.dropna(axis=1, how="any")
     # Columns are (labels, label_index) pairs -- see _pivot_tracer_df.
     columns = valid_pivot.columns.tolist()
@@ -463,9 +374,8 @@ def prepare_tensor(
     if not require_regular:
         return slices, subjects_arr, timepoints_per_subject, labels, label_index
 
-    # Build a regular (subjects x time_points x labels) array, filling any
-    # subject/time_point combination that was never observed with NaN,
-    # instead of assuming (and crashing if not) that one already exists.
+    # Unobserved subject/time_point combinations become NaN rather than
+    # being assumed to exist.
     all_timepoints = sorted({t for tps in timepoints_per_subject for t in tps})
     timepoint_index = {t: i for i, t in enumerate(all_timepoints)}
     tensor = np.full((len(subjects), len(all_timepoints), len(labels)), np.nan)

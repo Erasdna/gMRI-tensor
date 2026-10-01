@@ -23,54 +23,19 @@ def make_subject_boxplot(
     legend: bool = True,
     colors: list | None = None,
 ) -> tuple[tuple[float, float], float | None]:
-    """Create a boxplot with statistical annotations and optional legend.
+    """Boxplot `y_column` by `x_column`, with pairwise Mann-Whitney U tests.
 
-    Creates a boxplot comparing values across categories with Mann-Whitney U test
-    annotations for pairwise comparisons. Automatically generates a tab10-based
-    color palette if not provided.
-
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Axes object to plot on
-    df : pd.DataFrame
-        DataFrame containing the data to plot
-    x_column : str
-        Column name for categorical x-axis (grouping variable)
-    y_column : str
-        Column name for continuous y-axis values
-    legend : bool, optional
-        Whether to display a legend, by default True
-    colors : list | None, optional
-        List of colors for each category. If None, uses a tab10-based
-        palette with automatic scaling to number of categories. By default None.
-
-    Returns
-    -------
-    tuple[tuple[float, float], float | None]
-        A tuple containing:
-        - ylim: Tuple of (ymin, ymax) for the y-axis limits
-        - required_xlim: Required x-axis upper limit to accommodate legend,
-          or None if legend is False
-
-    Notes
-    -----
-    The function performs the following:
-    - Creates boxplots for each category with semi-transparent boxes
-    - Adds Mann-Whitney U test annotations for all pairwise comparisons
-    - Places legend in upper right if requested
-    - Calculates required x-axis limit to prevent legend overlap
-    - Uses integer positions for x-axis to ensure proper spacing
+    Falls back to a tab10-based palette when `colors` is None. Returns
+    `(ylim, required_xlim)`, the latter being the x-axis upper limit needed
+    to keep the legend from overlapping the data, or None without a legend.
     """
-    # Get unique categories and create a mapping to integer positions
+    # Integer x-positions keep the category spacing even.
     categories = df[x_column].unique()
     n_categories = len(categories)
 
-    # Generate colors if not provided
     if colors is None:
         colors = get_color_palette(n_categories)
 
-    # Create a temporary column with integer positions
     df_plot = df.copy()
     category_to_position = {cat: i for i, cat in enumerate(categories)}
     df_plot["_x_position"] = df_plot[x_column].map(category_to_position)
@@ -90,9 +55,7 @@ def make_subject_boxplot(
         saturation=1,
     )
 
-    # Add statistical annotation for pairwise comparisons
     if n_categories >= 2:
-        # Generate all pairwise comparisons using integer positions
         pairs = [
             (i, j) for i in range(n_categories) for j in range(i + 1, n_categories)
         ]
@@ -111,7 +74,6 @@ def make_subject_boxplot(
         )
         annotator.apply_and_annotate()
 
-    # Add legend inside plot area if requested
     required_xlim = None
     if legend:
         handles = [
@@ -126,25 +88,17 @@ def make_subject_boxplot(
             framealpha=0.9,
         )
 
-        # Draw the canvas to get accurate legend dimensions
+        # Draw first, or the legend has no measurable extent yet.
         ax.figure.canvas.draw()
-
-        # Get legend bounding box in display coordinates
         legend_bbox = leg.get_window_extent()
-
-        # Transform to data coordinates
         legend_bbox_data = legend_bbox.transformed(ax.transData.inverted())
 
-        # Calculate legend width in data coordinates
         legend_width = legend_bbox_data.x1 - legend_bbox_data.x0
 
-        # Calculate required xlim:
+        # 0.2 buffer + half the box width + the legend.
         rightmost_tick = n_categories - 1
-        # We compute the right limit of the plot:
-        # Use 0.2 as a buffer + half of box width + legend width
         required_xlim = rightmost_tick + 0.2 + 0.125 + legend_width
 
-    # Set tick positions and labels
     ax.set_xticks(range(n_categories))
     ax.set_xticklabels(categories)
     ax.set_xlabel(x_column)
@@ -163,32 +117,15 @@ def make_variable_correlation(
     legend: bool = True,
     colors: list | None = None,
 ) -> None:
-    """Create scatter plot with regression lines for each category.
+    """Scatter `y_column` against `x_column`, with a fit line per category.
 
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Axes object to plot on
-    df : pd.DataFrame
-        DataFrame containing the data to plot
-    x_column : str
-        Column name for x-axis variable
-    y_column : str
-        Column name for y-axis variable
-    category : str
-        Column name for categorical grouping variable
-    legend : bool, optional
-        Whether to display a legend with R² and p-values, by default True
-    colors : list | None, optional
-        List of colors for each category. If None, uses tab10 palette.
-        By default None.
+    The legend carries each category's R2 and p-value.
     """
 
     def fit_values(xs, ys, cat=""):
         fit = linregress(xs, ys)
         return fit
 
-    # Generate colors if not provided
     if colors is None:
         n_categories = df[category].nunique()
         colors = get_color_palette(n_categories)
@@ -255,32 +192,11 @@ def _prepare_plotting_dataframe(
     group_variable: str,
     additional_variables: list[str] | None = None,
 ) -> pd.DataFrame:
-    """Prepare a merged DataFrame for plotting subject mode data.
+    """Merge a scaled `(n_subjects, n_components)` subject mode with metadata.
 
-    Parameters
-    ----------
-    subject_mode : np.ndarray
-        Subject mode matrix with shape (n_subjects, n_components)
-    subjects : list[str]
-        List of subject identifiers
-    subject_info : pd.DataFrame
-        DataFrame containing subject metadata
-    group_variable : str
-        Column name in subject_info to use for grouping
-    additional_variables : list[str] | None, optional
-        Additional column names in subject_info to validate, by default None
-
-    Returns
-    -------
-    pd.DataFrame
-        Merged DataFrame with scaled subject mode components and metadata
-
-    Raises
-    ------
-    ValueError
-        If input validation fails
+    `additional_variables` names further `subject_info` columns to validate.
+    Raises `ValueError` if the inputs do not line up.
     """
-    # Validate input dimensions
     if subject_mode.shape[0] != len(subjects):
         raise ValueError(
             f"""Number of subjects ({len(subjects)}) does not
@@ -288,7 +204,6 @@ def _prepare_plotting_dataframe(
         )""",
         )
 
-    # Validate that required columns exist in subject_info
     required_columns = [group_variable]
     if additional_variables is not None:
         required_columns.extend(additional_variables)
@@ -301,11 +216,9 @@ def _prepare_plotting_dataframe(
             f"The following columns are missing from subject_info: {missing_columns}",
         )
 
-    # Validate that 'subjects' column exists in subject_info
     if "subjects" not in subject_info.columns:
         raise ValueError("subject_info must contain a 'subjects' column")
 
-    # Scale and create DataFrame
     scaled_subject_mode = scale_mode(subject_mode)
     subject_mode_df = pd.DataFrame(
         scaled_subject_mode,
@@ -314,7 +227,6 @@ def _prepare_plotting_dataframe(
     subject_mode_df["subjects"] = subjects
     plotting_df = pd.merge(subject_mode_df, subject_info, how="inner", on="subjects")
 
-    # Validate merge results
     if len(plotting_df) == 0:
         raise ValueError(
             "Merge resulted in empty DataFrame. Check that subject identifiers match "
@@ -327,7 +239,6 @@ def _prepare_plotting_dataframe(
             f"{missing_count} subject(s) from the subjects list were not found in subject_info",
         )
 
-    # Validate that group_variable has at least 2 unique values for comparison
     n_groups = plotting_df[group_variable].nunique()
     if n_groups < 2:
         raise ValueError(
@@ -345,30 +256,17 @@ def _finalize_boxplot_axes(
     boxplot_columns: list[int],
     mirror_xlims: bool = False,
 ) -> None:
-    """Apply consistent y-limits per row and a shared x-limit to boxplot columns.
+    """Apply per-row y-limits and a shared x-limit to the boxplot columns.
 
-    Shared second-pass layout logic used by both `plot_subject_mode` and
-    `plot_subject_mode_correlation`: every axes in row i gets the y-limits
-    computed by that row's boxplot (`ylims_list[i]`), and every boxplot axes
-    (identified by `boxplot_columns[i]` for row i) gets the same x-limit, wide
-    enough to fit the widest legend across all rows.
+    Second-pass layout for `plot_subject_mode` and
+    `plot_subject_mode_correlation`: every axes in row i takes that row's
+    boxplot y-limits, and every boxplot axes takes an x-limit wide enough
+    for the widest legend in the figure.
 
-    Parameters
-    ----------
-    axs : np.ndarray
-        2D array of axes with shape (n_rows, n_columns)
-    ylims_list : list[tuple[float, float]]
-        Per-row y-limits, as returned by `make_subject_boxplot` for that row
-    xlim_list : list[float]
-        Required x-limits collected from `make_subject_boxplot` calls that had
-        a legend
-    boxplot_columns : list[int]
-        For each row i, the column index holding that row's boxplot axes
-    mirror_xlims : bool, optional
-        If True (used for the component-correlation grid), non-boxplot axes
-        in column j additionally get their x-limits set to `ylims_list[j]`,
-        so each component's own boxplot range is mirrored onto the scatter
-        plots showing that component on the x-axis. By default False.
+    `boxplot_columns[i]` is the column holding row i's boxplot.
+    `mirror_xlims` additionally sets non-boxplot axes in column j to
+    `ylims_list[j]`, mirroring each component's boxplot range onto the
+    scatter plots that put that component on the x-axis.
     """
     max_xlim = max(xlim_list) if xlim_list else 1.5
     for i, ax_row in enumerate(axs):
@@ -388,37 +286,13 @@ def plot_subject_mode(
     page_width: float = 7.0,
     width_to_height_ratio: float = 1.618,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
-    """Plot subject mode components against group variables and plotting variables.
+    """Plot subject mode components against group and continuous variables.
 
-    Parameters
-    ----------
-    subject_mode : np.ndarray
-        Subject mode matrix with shape (n_subjects, n_components)
-    subjects : list[str]
-        List of subject identifiers
-    subject_info : pd.DataFrame
-        DataFrame containing subject metadata
-    group_variable : str
-        Column name in subject_info to use for grouping
-    plotting_variables : list[str]
-        List of column names in subject_info to correlate with components
-    page_width : float, optional
-        Target page width in inches (e.g., 3.5 for single column, 7.0 for double column).
-        By default 7.0.
-    width_to_height_ratio : float, optional
-        Desired width-to-height ratio for each subplot. By default 1.618 (golden ratio).
-
-    Returns
-    -------
-    tuple[matplotlib.figure.Figure, np.ndarray]
-        Figure and axes array
-
-    Raises
-    ------
-    ValueError
-        If input validation fails
+    One row per component: column 0 is a boxplot by `group_variable`,
+    followed by one scatter column per entry in `plotting_variables`. See
+    `compute_figsize` for the sizing arguments. Raises `ValueError` if the
+    inputs do not line up.
     """
-    # Prepare plotting DataFrame with validation
     plotting_df = _prepare_plotting_dataframe(
         subject_mode,
         subjects,
@@ -427,7 +301,6 @@ def plot_subject_mode(
         plotting_variables,
     )
 
-    # Compute figsize
     n_components = subject_mode.shape[1]
     n_columns = 1 + len(plotting_variables)
     figsize = compute_figsize(
@@ -447,7 +320,7 @@ def plot_subject_mode(
     )
     fig.tight_layout()
 
-    # First pass: create all plots and collect required xlims
+    # First pass: draw, collecting the limits each row needs.
     ylims_list = []
     xlim_list = []
 
@@ -484,7 +357,6 @@ def plot_subject_mode(
             if i == n_components - 1:
                 ax[j + 1].set_xlabel(var)
 
-    # Second pass: apply consistent xlim and ylim to all rows
     _finalize_boxplot_axes(
         axs,
         ylims_list,
@@ -503,46 +375,13 @@ def plot_subject_mode_correlation(
     page_width: float = 7.0,
     width_to_height_ratio: float = 1.0,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
-    """Plot correlation matrix of subject mode components with group comparisons.
+    """Plot a component-by-component matrix with group comparisons.
 
-    Creates a grid of plots showing pairwise correlations between all components.
-    The diagonal shows boxplots comparing component values across groups, while
-    off-diagonal plots show scatter plots with regression lines for each group.
-
-    Parameters
-    ----------
-    subject_mode : np.ndarray
-        Subject mode matrix with shape (n_subjects, n_components)
-    subjects : list[str]
-        List of subject identifiers
-    subject_info : pd.DataFrame
-        DataFrame containing subject metadata
-    group_variable : str
-        Column name in subject_info to use for grouping and color-coding
-    page_width : float, optional
-        Target page width in inches (e.g., 3.5 for single column, 7.0 for double column).
-        By default 7.0.
-    width_to_height_ratio : float, optional
-        Desired width-to-height ratio for each subplot. By default 1.0 (square subplots).
-
-    Returns
-    -------
-    tuple[matplotlib.figure.Figure, np.ndarray]
-        Figure and 2D array of axes
-
-    Raises
-    ------
-    ValueError
-        If input validation fails
-
-    Notes
-    -----
-    The resulting plot is a symmetric matrix where:
-    - Diagonal elements (i, i): Boxplots of component i values by group
-    - Off-diagonal elements (i, j): Scatter plot of component i vs component j
-      with separate regression lines for each group
+    Diagonal `(i, i)`: boxplot of component i by group. Off-diagonal
+    `(i, j)`: component i against component j, with a regression line per
+    group. See `compute_figsize` for the sizing arguments. Raises
+    `ValueError` if the inputs do not line up.
     """
-    # Prepare plotting DataFrame with validation
     plotting_df = _prepare_plotting_dataframe(
         subject_mode,
         subjects,
@@ -550,7 +389,6 @@ def plot_subject_mode_correlation(
         group_variable,
     )
 
-    # Compute figsize
     n_components = subject_mode.shape[1]
     figsize = compute_figsize(
         n_components,

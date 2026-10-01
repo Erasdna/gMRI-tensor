@@ -22,12 +22,10 @@ from tensorly.tenalg.core_tenalg.mttkrp import unfolding_dot_khatri_rao_memory
 from tlviz.factor_tools import degeneracy_score
 from tqdm import tqdm
 
-#: Which library fits the PARAFAC2 model. Not to be confused with TensorLy's
-#: *compute* backend (numpy/pytorch), which `setup_backend` configures.
+#: Library used to fit PARAFAC2. Distinct from TensorLy's compute backend
+#: (numpy/pytorch), which `setup_backend` configures.
 PARAFAC2Solver = Literal["tensorly", "matcouply"]
 
-#: Why a single restart was rejected. Tallied by `_repeat_with_restarts` so
-#: `run_PARAFAC2_decomposition_repeated` can tell the caller what to change.
 ConvergenceFailureReason = Literal[
     "max_iter",
     "reconstruction",
@@ -39,12 +37,9 @@ ConvergenceFailureReason = Literal[
 class ConvergenceError(Exception):
     """Raised when a single decomposition attempt fails to converge.
 
-    `reason` classifies the failure so `_repeat_with_restarts` can tally it
-    across restarts and `run_PARAFAC2_decomposition_repeated` can give
-    actionable advice (see `_build_restart_advisory`) rather than just
-    reporting that nothing converged. `suggested_max_iter` is set only for
-    `reason="reconstruction"`, where the observed error decay lets us
-    extrapolate how many iterations would actually have been needed.
+    `reason` is tallied across restarts to produce advice on what to change
+    (`_build_restart_advisory`). `suggested_max_iter` is set only for
+    `reason="reconstruction"`.
     """
 
     def __init__(
@@ -62,35 +57,21 @@ class ConvergenceError(Exception):
 
 @dataclass(frozen=True)
 class PARAFAC2Diagnostics:
-    """What a PARAFAC2 fit actually achieved, populated for both solvers.
+    """What a PARAFAC2 fit achieved. Populated for both solvers.
 
-    Some fields mean the same thing for `solver="tensorly"` and
-    `solver="matcouply"` and some do not -- mixing the two up is the easiest
-    way to draw a wrong conclusion when comparing solvers, so they are
-    separated here deliberately.
+    Comparable across solvers: `relative_reconstruction_error`
+    (``||X - X_hat|| / ||X||``, same definition in both) and
+    `reconstruction_error_change` against `reconstruction_tolerance`, the
+    acceptance gate.
 
-    **Comparable across solvers**
+    NOT comparable: `loss_converged` measures matcouply's penalized
+    objective, which has no TensorLy analogue -- a fit with
+    `loss_converged=False` is routinely better than a TensorLy fit reporting
+    convergence. `n_iter` counts different units of work per solver.
+    `feasible`/`max_feasibility_gap` are matcouply-only.
 
-    `relative_reconstruction_error` is ``||X - X_hat|| / ||X||`` under the
-    same definition in both (TensorLy's `_parafac2_reconstruction_error`
-    divided by the tensor norm; matcouply's `rec_errors`, divided by
-    `_root_sum_squared_list(matrices)`). `reconstruction_error_change`
-    against `reconstruction_tolerance` is the *acceptance gate*, applied with
-    TensorLy's criterion (`abs(rec[-2] - rec[-1]) < tol`) to both solvers --
-    so "this fit was accepted" means the same thing either way.
-
-    **Not comparable across solvers**
-
-    `loss_converged` is matcouply's own stopping condition, measured on the
-    *penalized objective*, which has no TensorLy analogue. A matcouply fit
-    with `loss_converged=False` is routinely better than a TensorLy fit that
-    reports convergence -- never gate a comparison on it. `n_iter` is not
-    comparable either: an ALS sweep and an AO-ADMM iteration are not the same
-    unit of work. `feasible`/`max_feasibility_gap` are matcouply-only, since
-    TensorLy has no constraint-satisfaction notion to compare against.
-
-    There is deliberately no single `converged` field: it would invite
-    exactly the cross-solver comparison that does not hold.
+    There is no single `converged` field, since it would invite the
+    cross-solver comparison that does not hold.
     """
 
     solver: PARAFAC2Solver
@@ -111,9 +92,7 @@ class PARAFAC2Diagnostics:
     message: str = ""
 
 
-#: matcouply `parafac2_aoadmm` keyword arguments the caller may set through
-#: `aoadmm_options`. Everything AO-ADMM-specific that this wrapper does not
-#: manage itself -- regularization, ADMM internals, init schemes.
+#: `parafac2_aoadmm` arguments callers may set via `aoadmm_options`.
 _AOADMM_PASSTHROUGH_OPTIONS: frozenset[str] = frozenset(
     {
         "l1_penalty",
@@ -142,9 +121,8 @@ _AOADMM_PASSTHROUGH_OPTIONS: frozenset[str] = frozenset(
     },
 )
 
-#: matcouply keyword arguments this wrapper owns. Passing one through
-#: `aoadmm_options` is an error naming the parameter that controls it,
-#: rather than a silent override of the wrapper's own bookkeeping.
+#: Arguments this wrapper owns, mapped to the parameter that sets them.
+#: Passing one via `aoadmm_options` raises rather than silently overriding.
 _AOADMM_MANAGED_OPTIONS: dict[str, str] = {
     "matrices": "pass the data as `tensor_slices`",
     "rank": "use `rank`",
@@ -159,9 +137,8 @@ _AOADMM_MANAGED_OPTIONS: dict[str, str] = {
     "parafac2": "always enabled",
 }
 
-#: Overridable defaults applied before `aoadmm_options`.
-#: `constant_feasibility_penalty=True` converges markedly faster on the
-#: ragged per-subject slices this package produces.
+#: Overridable defaults applied before `aoadmm_options`. The feasibility
+#: penalty converges markedly faster on ragged per-subject slices.
 _AOADMM_DEFAULTS: dict[str, Any] = {"constant_feasibility_penalty": True}
 
 #: matcouply's own default, used when reporting the feasibility gap.
@@ -170,9 +147,7 @@ _AOADMM_DEFAULT_FEASIBILITY_TOL: float = 1e-4
 #: Iterations of error history used to extrapolate a suggested `max_iter`.
 _DECAY_FIT_WINDOW: int = 50
 
-#: Never suggest a `max_iter` more than this many times the history we have.
-#: Extrapolating further is guesswork, and it is what keeps a near-flat
-#: error sequence from producing an astronomical suggestion.
+#: Cap on how far past the available history `_suggest_max_iter` extrapolates.
 _MAX_EXTRAPOLATION_FACTOR: int = 50
 
 
@@ -202,22 +177,13 @@ def compute_CP_decomposition(
 ):
     """Compute a single CP/PARAFAC decomposition attempt.
 
-    Notes
-    -----
-    If `allow_nan_imputation` is True, any NaN entries in `tensor` (e.g. from
-    `prepare_tensor(..., require_regular=True)`, where a subject's missing
-    time point becomes a NaN row) are treated as missing and imputed from the
-    model's own reconstruction at each iteration, via TensorLy's `mask`
-    support -- unlike PARAFAC2, where neither solver is wired up for
-    imputation here (see `compute_PARAFAC2_decomposition`; TensorLy's
-    `parafac2` has no mask support at all in this version, and while
-    matcouply's `parafac2_aoadmm` does accept a `mask`, it is not plumbed
-    through). If False (the default) and `tensor` contains NaN, a
-    `ValueError` is raised rather than silently fitting on/propagating NaN.
+    `allow_nan_imputation` treats NaN entries as missing and imputes them
+    from the model's own reconstruction each iteration, via TensorLy's
+    `mask`. Off by default, where NaN input raises instead. PARAFAC2 has no
+    equivalent (see `compute_PARAFAC2_decomposition`).
 
-    `non_negative` defaults to True (non-negative CP, appropriate for a
-    tracer signal that should physically be non-negative). Set it to False to
-    run plain, unconstrained CP instead.
+    `non_negative` defaults to True, appropriate for a tracer signal that is
+    physically non-negative.
     """
     mask = None
     if allow_nan_imputation:
@@ -263,38 +229,19 @@ def compute_CP_decomposition(
 def _matcouply_numeric_context(device: torch.device) -> Iterator[None]:
     """Make torch's defaults float64-on-`device` for the duration of a fit.
 
-    matcouply builds its factor, auxiliary and dual variables with a mix of
-    `tl.tensor(numpy_array)` (which, under TensorLy's pytorch backend,
-    produces a **float64 CPU** tensor regardless of torch's defaults) and
-    `tl.eye`/`tl.zeros` (which follow torch's *default* dtype and device). It
-    never threads `tl.context(matrices[0])` through, so with this package's
-    usual float32 CUDA setup the two kinds of tensor disagree and matcouply
-    fails with either
+    matcouply mixes `tl.tensor(numpy_array)` (always float64 CPU under the
+    pytorch backend) with `tl.eye`/`tl.zeros` (which follow torch's
+    defaults), and never threads `tl.context` through. Under this package's
+    float32 CUDA setup the two disagree and matcouply raises a dtype or
+    device mismatch. float32 is unreachable without patching matcouply;
+    results are cast back on the way out.
 
-        RuntimeError: expected m1 and m2 to have the same dtype,
-        but got: float != double
+    Scoped per fit rather than set in `setup_backend`, which would push the
+    CP path to float64 too. Spawned restart workers reach it automatically
+    via `_restart_worker`.
 
-    or, on GPU,
-
-        RuntimeError: Expected all tensors to be on the same device,
-        but got mat2 is on cpu, different from other tensors on cuda:0
-
-    Setting torch's defaults to float64 and to the input's device makes both
-    kinds agree. float32 is not reachable without monkeypatching matcouply
-    itself; results are cast back to float32 on the way out (see
-    `run_PARAFAC2_decomposition_repeated`'s `to_cpu`).
-
-    Scoped per fit rather than set globally in `setup_backend`: float64 would
-    otherwise apply to the CP path too, where it doubles memory and makes the
-    `torch.set_float32_matmul_precision("high")`/TF32 tuning meaningless.
-    Spawned restart workers pick this up automatically, since they reach it
-    via `_restart_worker` -> `compute_PARAFAC2_decomposition`, so
-    `_init_restart_worker_backend` needs no matcouply-specific setup.
-
-    Note these are process-global torch settings. That is safe here because
-    the restart pool and `evaluate_replicability_multiproc`'s pool are both
-    process-parallel; it would not be safe if fits were ever run on threads
-    within a single process.
+    These are process-global torch settings, safe only because restarts are
+    process-parallel rather than threaded.
     """
     previous_dtype = torch.get_default_dtype()
     previous_device = torch.get_default_device()
@@ -313,11 +260,9 @@ def _resolve_nn_modes(
 ) -> tuple[int, ...] | None:
     """Resolve the `"auto"` sentinel to the solver's default `nn_modes`.
 
-    The default is solver-dependent -- `(0, 2)` for TensorLy, whose ALS
-    cannot enforce non-negativity on mode 1, and `(0, 1, 2)` for matcouply,
-    whose AO-ADMM can (the reason this solver exists here). A sentinel is
-    needed rather than `None` as the default because `None` already has a
-    meaning: fit with no non-negativity constraint at all.
+    `(0, 2)` for TensorLy, whose ALS cannot constrain mode 1, and
+    `(0, 1, 2)` for matcouply, whose AO-ADMM can. A sentinel is needed
+    because `None` already means "unconstrained".
     """
     if nn_modes != "auto":
         return nn_modes
@@ -345,11 +290,8 @@ def _build_aoadmm_options(
 ) -> dict[str, Any]:
     """Validate and merge caller-supplied AO-ADMM options over the defaults.
 
-    Unknown keys and keys this wrapper manages itself are rejected rather
-    than forwarded, so a typo surfaces immediately instead of being silently
-    swallowed by matcouply, and so a caller cannot quietly override the
-    bookkeeping (`return_admm_vars`, `n_iter_max`, ...) the wrapper depends
-    on.
+    Unknown and wrapper-managed keys raise rather than being forwarded, so a
+    typo surfaces immediately instead of being swallowed by matcouply.
     """
     options = dict(_AOADMM_DEFAULTS)
     if not aoadmm_options:
@@ -376,18 +318,16 @@ def _normalize_parafac2_factors(
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
     """Scale each factor's columns to unit norm, folding norms into `weights`.
 
-    matcouply has no `normalize_factors` option of its own, so this
-    reproduces TensorLy's semantics. It is well defined for PARAFAC2 because
-    the projections are orthonormal: `||P_i @ B[:, r]|| == ||B[:, r]||`, so
-    normalizing the shared coordinate matrix `B` rescales every subject's
-    reconstructed time curve by the same factor.
+    Reproduces TensorLy's `normalize_factors` semantics, which matcouply
+    lacks. Well defined for PARAFAC2 because the projections are orthonormal
+    (`||P_i @ B[:, r]|| == ||B[:, r]||`), so normalizing the shared
+    coordinate matrix rescales every subject's time curve equally.
     """
     scaled_weights = weights.clone()
     scaled_factors = []
     for factor in factors:
         norms = torch.linalg.norm(factor, dim=0)
-        # Leave all-zero columns alone rather than dividing by zero; their
-        # weight contribution is zero either way.
+        # All-zero columns contribute no weight either way; avoid dividing by 0.
         safe_norms = torch.where(norms > 0, norms, torch.ones_like(norms))
         scaled_factors.append(factor / safe_norms)
         scaled_weights = scaled_weights * safe_norms
@@ -402,33 +342,28 @@ def _matcouply_to_parafac2_tensor(
 ) -> Parafac2Tensor:
     """Adapt matcouply's output to TensorLy's `Parafac2Tensor` contract.
 
-    matcouply returns `(weights, (A, B_is, C))` where `weights` is None and
-    `B_is` is a *ragged list* of per-slice `(J_i, rank)` matrices -- not the
-    `(weights, [A, B, C], projections)` form the rest of this package (and
-    `gMRItensor.plotting.evolving_mode.reconstruct_evolving_factors`, and
-    `gMRItensor.replicability`) is written against.
+    matcouply returns `(weights, (A, B_is, C))` with `weights=None` and
+    `B_is` a ragged list of per-slice `(J_i, rank)` matrices, rather than the
+    `(weights, [A, B, C], projections)` form the rest of this package expects.
 
-    The PARAFAC2 constraint is imposed through
-    `matcouply.penalties.Parafac2`, whose auxiliary variable is exactly the
-    Kiers parametrization `B_i = P_i @ B`: a list of orthonormal basis
-    matrices and the shared `rank x rank` coordinate matrix. Reading those
-    back out recovers TensorLy's representation faithfully -- in testing,
-    `||B_is[i] - P_i @ B|| / ||B_is[i]||` is ~1e-7 -- which is what lets
-    every downstream consumer work unchanged for both solvers.
+    `matcouply.penalties.Parafac2`'s auxiliary variable is exactly the Kiers
+    parametrization `B_i = P_i @ B` -- orthonormal basis matrices plus the
+    shared `rank x rank` coordinate matrix -- so reading it back recovers
+    TensorLy's representation to ~1e-7 relative error. This is what lets
+    downstream consumers work unchanged for both solvers.
 
-    Note `B` (the coordinate matrix, i.e. `factors[1]`) is NOT non-negative
-    even when mode 1 is constrained; the non-negativity holds on
-    `projections[i] @ factors[1]`. See `compute_PARAFAC2_decomposition`.
+    `factors[1]` (the coordinate matrix) is NOT non-negative even when mode 1
+    is constrained; non-negativity holds on `projections[i] @ factors[1]`.
     """
     _, (A, _B_is, C) = cmf
     mode_1_auxes = admm_vars.auxes[1]
+    # auxes[1][0] holding the (basis_matrices, coordinate_matrix) pair is
+    # internal matcouply layout, so check it rather than trusting it.
     layout_error = (
         "Could not read the PARAFAC2 basis/coordinate matrices out of "
-        "matcouply's ADMM auxiliary variables. This wrapper relies on "
-        "matcouply.decomposition._parse_mode_penalties prepending a "
-        "penalties.Parafac2 instance for mode 1, so that auxes[1][0] is the "
-        "(basis_matrices, coordinate_matrix) pair. That layout is internal to "
-        "matcouply and appears to have changed"
+        "matcouply's ADMM auxiliary variables; auxes[1][0] is expected to be "
+        "the (basis_matrices, coordinate_matrix) pair. This is internal "
+        "matcouply layout and appears to have changed"
     )
     if not mode_1_auxes or not isinstance(mode_1_auxes[0], tuple):
         raise RuntimeError(f"{layout_error}.")
@@ -464,11 +399,10 @@ def _matcouply_to_parafac2_tensor(
 
 
 def _as_optional_bool(value: Any) -> bool | None:
-    """Coerce matcouply's numpy bool_ flags to plain `bool` (or None).
+    """Coerce matcouply's `np.True_`/`np.False_` flags to plain `bool`.
 
-    matcouply returns `np.True_`/`np.False_` for its stopping and feasibility
-    conditions. Those compare equal to Python bools but fail `is True` /
-    `is False` identity checks, which both this module and callers use.
+    These compare equal to Python bools but fail the `is True` / `is False`
+    identity checks this module and its callers use.
     """
     return None if value is None else bool(value)
 
@@ -491,29 +425,20 @@ def _suggest_max_iter(
 ) -> int | None:
     """Extrapolate how many iterations would reach `tolerance`.
 
-    `abs(rec[-2] - rec[-1])` decays close to log-linearly for AO-ADMM, so a
+    `abs(rec[-2] - rec[-1])` decays roughly log-linearly for AO-ADMM, so a
     least-squares line through `log|delta|` over the last
-    `_DECAY_FIT_WINDOW` iterations can be solved for where it crosses
-    `tolerance`. Validated against a run carried out to 3000 iterations whose
-    true crossing of `tolerance=1e-5` was iteration 552: extrapolating from
-    iteration 200 estimated 399, from 300 estimated 497 and from 500
-    estimated 549.
+    `_DECAY_FIT_WINDOW` iterations can be solved for the crossing point. The
+    estimate is biased low when extrapolated early, hence `safety_factor` on
+    the extra iterations.
 
-    The estimate is therefore good but biased low when extrapolated from
-    early in the run, hence `safety_factor` on the *extra* iterations.
-    Returns None rather than guessing when the decay cannot be extrapolated:
-    too little history, an error that isn't decreasing (more iterations are
-    not the answer), or a decay so slow that reaching `tolerance` is further
-    away than this much history can honestly speak to. That last guard
-    matters -- a flat error sequence has a slope that is only
-    infinitesimally negative through floating-point noise, which without it
-    extrapolates to absurdities like 5e18 iterations.
+    Returns None when the decay cannot be extrapolated: too little history,
+    an error that is not decreasing, or a crossing further away than
+    `_MAX_EXTRAPOLATION_FACTOR` times the available history.
     """
     deltas = [
         abs(rec_errors[i + 1] - rec_errors[i]) for i in range(len(rec_errors) - 1)
     ]
-    # Need a couple of points to fit a slope, and strictly positive deltas to
-    # take logs of.
+    # Need several points to fit a slope, and positive deltas to take logs of.
     usable = [delta for delta in deltas[-_DECAY_FIT_WINDOW:] if delta > 0]
     if len(usable) < 5:
         return None
@@ -537,15 +462,13 @@ def _suggest_max_iter(
         return None
 
     observed = len(rec_errors) - 1
-    # Refuse to extrapolate more than _MAX_EXTRAPOLATION_FACTOR beyond the
-    # history we actually have. Besides being dishonest, this is what stops a
-    # near-flat sequence -- whose fitted slope is negative only through
-    # floating-point noise -- from suggesting an astronomically large number.
+    # Also stops a near-flat sequence, whose slope is negative only through
+    # floating-point noise, from suggesting an astronomical number.
     if extra > _MAX_EXTRAPOLATION_FACTOR * max(observed, 1):
         return None
 
     suggested = observed + extra * safety_factor
-    # Round up to something human-sized rather than quoting a false precision.
+    # Round up rather than quoting a false precision.
     magnitude = 10 ** max(1, int(math.log10(suggested)) - 1)
     return int(math.ceil(suggested / magnitude) * magnitude)
 
@@ -599,9 +522,8 @@ def _compute_PARAFAC2_matcouply(
             normalize_factors,
         )
 
-    # Everything below runs with torch's defaults already restored, so
-    # neither the float64 dtype nor the device leaks into what we hand back
-    # -- including on the error paths.
+    # Below here torch's defaults are restored, so neither float64 nor the
+    # device leaks into what we return -- including on the error paths.
     rec_errors = [float(error) for error in diagnostics.rec_errors]
     losses = [float(loss) for loss in diagnostics.regularized_loss]
     max_gap = _max_feasibility_gap(diagnostics.feasibility_gaps)
@@ -611,9 +533,7 @@ def _compute_PARAFAC2_matcouply(
         if len(losses) >= 2 and losses[-2] != 0
         else None
     )
-    # Coerce before comparing: matcouply reports these as numpy bool_, which
-    # compares equal to a Python bool but is not identical to one, so an
-    # `is False` check against the raw value would silently never fire.
+    # Coerce before comparing: `is False` against a raw numpy bool_ never fires.
     feasible = _as_optional_bool(diagnostics.satisfied_feasibility_condition)
     loss_converged = _as_optional_bool(diagnostics.satisfied_stopping_condition)
 
@@ -732,105 +652,76 @@ def compute_PARAFAC2_decomposition(
 ) -> tuple[Parafac2Tensor, list[torch.Tensor], PARAFAC2Diagnostics]:
     """Compute a single PARAFAC2 decomposition attempt.
 
-    PARAFAC2 relaxes CP/PARAFAC by allowing one mode (here: time) to have a
-    different size per slice (here: per subject) -- its "evolving factor".
-    `tensor_slices` may be a single regular 3D tensor or a list of 2D slices
-    with a shared number of columns but a varying number of rows (e.g. one
-    (n_timepoints_i, n_labels) array per subject).
+    PARAFAC2 allows one mode (here: time) to vary in size per slice (here:
+    per subject). `tensor_slices` may be a regular 3D tensor or a list of 2D
+    slices sharing their column count.
 
-    The returned `factors = [A, B, C]` are always regular, fixed-shape
-    matrices: `A` (subjects x rank), `B` (rank x rank, the shared evolving-mode
-    basis), `C` (labels x rank). The actual subject-specific time pattern is
-    `projections[i] @ B` -- see `gMRItensor.plotting.evolving_mode.
-    reconstruct_evolving_factors`. This holds for **both** solvers: the
-    matcouply result is adapted to exactly this shape (see
-    `_matcouply_to_parafac2_tensor`), so downstream consumers never branch on
+    `factors = [A, B, C]` are always regular matrices: `A` (subjects x rank),
+    `B` (rank x rank, shared evolving-mode basis), `C` (labels x rank). The
+    subject-specific time pattern is `projections[i] @ B` -- see
+    `gMRItensor.plotting.evolving_mode.reconstruct_evolving_factors`. Both
+    solvers return this same shape, so downstream code never branches on
     `solver`.
 
     Choosing a solver
     -----------------
-    `solver="tensorly"` (default) uses `tensorly.decomposition.parafac2`
-    (ALS/HALS). `solver="matcouply"` uses
-    `matcouply.decomposition.parafac2_aoadmm` (AO-ADMM), which exists here
-    for one main reason: **it can enforce non-negativity on mode 1**, the
-    evolving/time mode, which TensorLy's ALS cannot. It also offers L1/L2/TV,
-    unimodality and bound constraints via `aoadmm_options`.
+    `solver="tensorly"` (default) uses ALS/HALS. `solver="matcouply"` uses
+    AO-ADMM, which can enforce non-negativity on mode 1 (the evolving/time
+    mode) where TensorLy's ALS cannot, and offers L1/L2/TV, unimodality and
+    bound constraints via `aoadmm_options`.
 
-    `nn_modes` therefore defaults to `"auto"`, which resolves to `(0, 2)` for
-    TensorLy (subject and region modes only) and `(0, 1, 2)` for matcouply.
-    Pass `None` for a wholly unconstrained fit. Asking TensorLy for mode 1
-    raises: it accepts the request but only warns and silently leaves the
-    mode unconstrained, which is worse than refusing.
+    `nn_modes="auto"` resolves to `(0, 2)` for TensorLy and `(0, 1, 2)` for
+    matcouply; pass `None` for an unconstrained fit. Asking TensorLy for
+    mode 1 raises, since it would otherwise only warn and leave the mode
+    unconstrained.
 
-    Caveat specific to matcouply: `factors[1]` is AO-ADMM's *coordinate
-    matrix*, and it carries negative entries even when mode 1 is fully
-    constrained (measured min ~-0.93 on a fit whose per-subject factors were
-    non-negative to ~5e-8). The non-negativity holds on
-    `projections[i] @ factors[1]`, which is the quantity with a physical
-    meaning. Assert there, not on `factors[1]`.
-
-    matcouply also runs in float64 regardless of `setup_backend`'s float32
-    setup -- see `_matcouply_numeric_context` for why -- so the TF32 and
-    `set_float32_matmul_precision` tuning does not apply to it. Results are
-    cast back to float32 by `run_PARAFAC2_decomposition_repeated`.
-
-    matcouply's `init` vocabulary is `"random"`, `"svd"`, `"threshold_svd"`,
-    `"parafac2_als"`, `"cp_als"` and `"cp_hals"`. Note the non-random ones
-    ignore `random_state`, which makes every restart identical.
+    With matcouply, `factors[1]` is AO-ADMM's coordinate matrix and carries
+    negative entries even under a fully constrained fit; non-negativity holds
+    on `projections[i] @ factors[1]`. matcouply also runs in float64
+    regardless of `setup_backend` (see `_matcouply_numeric_context`), and its
+    non-random `init` options ignore `random_state`, making restarts
+    identical.
 
     Convergence: AO-ADMM has two thresholds
     ---------------------------------------
-    TensorLy's `tol` tests the change in *relative reconstruction error*;
-    matcouply's own `tol` tests the change in the *penalized objective*. The
-    same number is not the same stopping rule, so matcouply's own
-    convergence flag cannot be used to decide whether a fit is acceptable
-    (empirically it is routinely `False` on fits that are better than a
-    TensorLy fit reporting success).
+    TensorLy's `tol` tests the relative reconstruction error; matcouply's
+    tests the penalized objective. These are not the same stopping rule, and
+    matcouply's own convergence flag is routinely False on fits better than a
+    TensorLy fit reporting success -- so it cannot gate acceptance. Hence:
 
-    So the two are separated:
+    - `aoadmm_loss_tolerance` becomes matcouply's `tol` and governs only when
+      AO-ADMM stops iterating. Defaults tighter than matcouply's own 1e-8,
+      since a loose value lets it stop while the reconstruction error is
+      still moving, wasting the restart on the gate below.
+    - `PARAFAC2_tolerance` is the acceptance gate and means the same thing
+      for both solvers: `abs(rec[-2] - rec[-1]) < tolerance`.
 
-    - `aoadmm_loss_tolerance` is handed to matcouply as its `tol` and governs
-      only *when AO-ADMM stops iterating*. It defaults to 1e-10, tighter than
-      matcouply's own 1e-8, because a loose value lets AO-ADMM stop while the
-      reconstruction error is still moving -- which the gate below then
-      rejects, wasting the whole restart.
-    - `PARAFAC2_tolerance` is the **acceptance gate**, and means the same
-      thing for both solvers: `abs(rec[-2] - rec[-1]) < tolerance`, TensorLy's
-      own criterion, applied by this function to matcouply's reconstruction
-      errors. Failing it raises `ConvergenceError`.
+    Unlike `compute_CP_decomposition`, neither solver is `torch.compile`-d:
+    the ragged per-slice loop cannot be traced into one graph, so compiling
+    adds overhead without a speedup.
 
     Returns
     -------
     tuple[Parafac2Tensor, list[torch.Tensor], PARAFAC2Diagnostics]
         The fit, its per-iteration relative reconstruction errors, and what
-        the fit actually achieved. See `PARAFAC2Diagnostics` for which of its
-        fields may be compared across solvers and which may not.
-
-    Notes
-    -----
-    Unlike `compute_CP_decomposition`, this is not wrapped in `torch.compile`:
-    TensorLy's `parafac2` has per-iteration convergence/linesearch checks and
-    an inherently ragged per-slice Python loop that cannot be traced into one
-    graph (confirmed to produce dozens of graph breaks on trivial inputs), so
-    compiling it adds overhead without a real speedup.
+        it achieved. See `PARAFAC2Diagnostics` for which fields are
+        comparable across solvers.
 
     Raises
     ------
     ValueError
-        If any slice contains NaN; if `solver` is unknown; if an
-        AO-ADMM-only option is passed with `solver="tensorly"`; or if
-        `nn_modes` includes mode 1 with `solver="tensorly"`.
+        NaN input, unknown `solver`, an AO-ADMM-only option passed with
+        `solver="tensorly"`, or `nn_modes` including mode 1 for TensorLy.
     ConvergenceError
-        If the fit does not meet the acceptance gate above, if matcouply's
-        constraints are left infeasible, or if the result is degenerate.
+        The acceptance gate failed, matcouply's constraints were left
+        infeasible, or the result is degenerate.
     """
     slices_to_check = (
         tensor_slices if isinstance(tensor_slices, list) else [tensor_slices]
     )
     if any(torch.isnan(s).any() for s in slices_to_check):
-        # Neither path imputes: TensorLy's parafac2 has no mask support in
-        # this version at all, and while matcouply does accept a `mask`, it
-        # is not wired up here.
+        # TensorLy's parafac2 has no mask support; matcouply accepts a `mask`
+        # but it is not wired up here.
         raise ValueError(
             "tensor_slices contains NaN values, but neither PARAFAC2 solver is "
             "set up for NaN imputation here -- remove or impute missing values "
@@ -892,8 +783,8 @@ def compute_PARAFAC2_decomposition(
             nn_modes=resolved_nn_modes,
         )
 
-    # Shared across solvers: the matcouply adapter returns a real
-    # Parafac2Tensor with real weights, so this needs no branching.
+    # No branching needed: the matcouply adapter returns a real
+    # Parafac2Tensor with real weights.
     w = result.weights.float()
     f = [ff.float() for ff in result.factors]
     if degeneracy_score((w, f)) < -0.85:
@@ -910,21 +801,16 @@ def _restart_worker(
 ) -> tuple[Any, Any, PARAFAC2Diagnostics | None, ConvergenceError | None]:
     """Pool worker: run a single random-restart attempt.
 
-    Only used by `_repeat_with_restarts`'s parallel (CPU-only, `restart_procs
-    >= 2`) path -- the sequential path calls `compute_CP_decomposition`/
-    `compute_PARAFAC2_decomposition` directly, in-process, so it also works
-    with a GPU tensor and reuses the `torch.compile` cache across restarts.
+    Only used by `_repeat_with_restarts`'s parallel (`restart_procs >= 2`)
+    path; the sequential path calls the compute functions in-process, so it
+    also works on GPU and reuses the `torch.compile` cache across restarts.
 
     Returns `(decomp, errors, diagnostics, None)` on success and
-    `(None, None, None, exc)` on `ConvergenceError`, rather than raising, so
-    one failed restart doesn't kill the whole `Pool.imap_unordered` --
-    matching the sequential loop's "skip and continue" behavior. The
-    exception is handed back rather than discarded so the parallel path can
-    tally failure reasons exactly like the sequential one; a
-    `ConvergenceError` pickles fine across the process boundary. Failure and
-    diagnostics get their own slots so neither is ever read as the other.
-
-    `diagnostics` is a `PARAFAC2Diagnostics` for PARAFAC2 and None for CP.
+    `(None, None, None, exc)` on `ConvergenceError` rather than raising, so
+    one failed restart does not kill the whole `Pool.imap_unordered`. The
+    exception is returned so the parallel path can tally failure reasons like
+    the sequential one; failure and diagnostics get separate slots so neither
+    is read as the other. `diagnostics` is None for CP.
     """
     method, random_state, payload, kwargs = args
     try:
@@ -944,25 +830,13 @@ def _restart_worker(
 
 
 def _init_restart_worker_backend(num_threads: int) -> None:
-    """Pool initializer: set up TensorLy's backend and cap this worker's threads.
+    """Pool initializer: set TensorLy's backend and cap this worker's threads.
 
-    `tl.set_backend("pytorch")` is needed with the "spawn" start method used
-    here (see `gMRItensor.replicability._init_worker_backend`, which does the
-    same thing for the same reason).
-
-    `torch.set_num_threads(num_threads)` guards against thread
-    oversubscription: `torch.set_num_threads` is process-local state, so it
-    does *not* carry over from the parent into a freshly "spawn"ed worker --
-    left unset, each of the `restart_procs` worker processes falls back to
-    its own default intra-op thread pool (often sized to *all* visible
-    cores), so `restart_procs` processes each also fanning out into a full
-    thread pool massively oversubscribes the CPU (this is what made the
-    parallel path effectively not work: `restart_procs` workers x each
-    worker's own large thread pool, rather than `restart_procs` total
-    threads of work). `_repeat_with_restarts` computes `num_threads` so that
-    `restart_procs * num_threads` stays close to the parent's own
-    `torch.get_num_threads()` (e.g. set via `setup_backend`'s
-    `CPUS_PER_TASK` handling).
+    Both settings are process-local and so do not survive "spawn".
+    Without the thread cap each worker falls back to a thread pool sized to
+    all visible cores, so `restart_procs` workers oversubscribe the CPU
+    badly. `_repeat_with_restarts` picks `num_threads` to keep
+    `restart_procs * num_threads` near the parent's `torch.get_num_threads()`.
     """
     tl.set_backend("pytorch")
     torch.set_num_threads(num_threads)
@@ -971,14 +845,10 @@ def _init_restart_worker_backend(num_threads: int) -> None:
 def _in_worker_process() -> bool:
     """True if already running inside a multiprocessing worker.
 
-    `multiprocessing.current_process()` is the `"MainProcess"` only for the
-    process that was never handed off into a `Pool` -- a worker spawned by
-    `evaluate_replicability_multiproc`'s own `Pool` has some other name
-    (e.g. `"SpawnPoolWorker-1"`). Used to refuse restart-level
-    multiprocessing there: spawning a second layer of processes from inside
-    an already-parallel worker just multiplies process-startup/backend-init
-    overhead without adding real parallelism (the outer pool is already
-    using all the requested workers).
+    Used to refuse restart-level multiprocessing inside e.g.
+    `evaluate_replicability_multiproc`'s pool: a second layer of processes
+    adds startup and backend-init overhead without real parallelism, since
+    the outer pool already uses all requested workers.
     """
     return current_process().name != "MainProcess"
 
@@ -986,10 +856,9 @@ def _in_worker_process() -> bool:
 class RestartTally:
     """What happened across a run's random restarts.
 
-    Previously a restart that raised `ConvergenceError` was silently skipped,
-    so a run where most restarts ran out of iterations looked identical to a
-    healthy one. Recording *why* each restart was rejected is what lets
-    `_build_restart_advisory` tell the caller which knob to turn.
+    Records *why* each restart was rejected so `_build_restart_advisory` can
+    tell the caller which knob to turn, rather than a run that mostly ran out
+    of iterations looking identical to a healthy one.
     """
 
     def __init__(self, attempted: int) -> None:
@@ -1056,12 +925,11 @@ def _build_restart_advisory(
     tolerance: float,
     aoadmm_loss_tolerance: float,
 ) -> str | None:
-    """Advise on thresholds when restarts are *systematically* struggling.
+    """Advise on thresholds when restarts are systematically struggling.
 
-    Deliberately only fires on a pattern (at least half the restarts), not on
-    a single unlucky restart -- an advisory that cries wolf gets filtered out
-    mentally, which defeats the point. Returns None when the run looks
-    healthy.
+    Fires only on a pattern (at least half the restarts), never on a single
+    unlucky one, so the advisory stays worth reading. Returns None when the
+    run looks healthy.
     """
     if tally.attempted == 0:
         return None
@@ -1082,10 +950,8 @@ def _build_restart_advisory(
                 f" Median level reached: |delta rel. reconstruction error| = "
                 f"{level:.2e} vs tolerance {tolerance:.1e}"
             )
-            # Within an order of magnitude means the fit is nearly there and
-            # more iterations will close it; far off points at the model
-            # (rank, init, over-constraint) instead, where more iterations
-            # would just burn time.
+            # Within an order of magnitude, more iterations will close it;
+            # far off points at the model instead (rank, init, constraints).
             if level < 10 * tolerance:
                 message += " -- close, so this is an iteration-budget issue."
             else:
@@ -1156,58 +1022,43 @@ def _repeat_with_restarts(
     Parameters
     ----------
     method : Literal["CP", "PARAFAC2"]
-        Which of `compute_CP_decomposition`/`compute_PARAFAC2_decomposition`
-        to call for each restart.
+        Which compute function to call for each restart.
     payload : Any
-        The `tensor`/`tensor_slices` positional argument to pass to that
-        function.
+        The `tensor`/`tensor_slices` argument for that function.
     kwargs : dict[str, Any]
-        The rest of that function's arguments (everything except
-        `random_state`, which is filled in per restart).
+        Its remaining arguments; `random_state` is filled in per restart.
     to_cpu : Callable[[Any], Any]
         Moves the winning `decomp` to CPU/float precision.
     init_repeats : int
         Number of random restarts to try.
     device : torch.device
-        Device the input tensor(s) live on (used for CUDA memory management,
-        and to reject `restart_procs >= 2`, which isn't safe on CUDA -- see
-        Raises).
+        Device the input lives on. Used for CUDA memory management and to
+        reject `restart_procs >= 2`.
     verbose_level : int
         If > 0, prints each `ConvergenceError` encountered.
     progress_bar : bool
         Whether to show a tqdm progress bar over the restarts.
     restart_procs : int, optional
-        Number of worker processes to run restarts in parallel with. By
-        default 1 (sequential, in-process, unchanged behavior). Only takes
-        effect when `device.type == "cpu"` and this isn't already running
-        inside another worker process (see `_in_worker_process`) -- e.g. one
-        of `evaluate_replicability_multiproc`'s own workers -- in which case
-        it silently falls back to 1 to avoid nesting process pools.
+        Worker processes to spread restarts across; 1 (default) runs
+        sequentially in-process. Falls back to 1 inside another worker
+        process, to avoid nesting pools.
 
-        Each worker process is pinned to `torch.get_num_threads() //
-        restart_procs` intra-op threads (see
-        `_init_restart_worker_backend`), so the *total* CPU budget stays
-        close to whatever the calling process's own `torch.get_num_threads()`
-        already is (e.g. as set by `setup_backend` from `CPUS_PER_TASK`) --
-        pick `restart_procs` as a number of workers to split that budget
-        across, not as extra CPUs on top of it.
+        Each worker is pinned to `torch.get_num_threads() // restart_procs`
+        threads, so this splits the caller's existing CPU budget rather than
+        adding to it.
 
     Returns
     -------
     tuple[Any, torch.Tensor, Any, RestartTally]
-        `(best_decomp, best_error, best_extra, tally)`, with `best_decomp`
-        already moved to CPU. `best_extra` is whatever third value the
-        compute function returned for the winning restart (a
-        `PARAFAC2Diagnostics` for PARAFAC2, None for CP). `tally` records
-        what happened across all restarts, so the caller can tell the user
-        *why* restarts were rejected rather than just how many.
+        `(best_decomp, best_error, best_extra, tally)`, `best_decomp` already
+        on CPU. `best_extra` is the winning restart's `PARAFAC2Diagnostics`,
+        or None for CP.
 
     Raises
     ------
     ConvergenceError
-        If no restart converged. The last failure is chained as `__cause__`
-        and summarised in the message, since that is where the numbers saying
-        what to change actually live.
+        If no restart converged. The last failure is chained as `__cause__`,
+        since that carries the numbers saying what to change.
     ValueError
         If `restart_procs >= 2` and `device` is CUDA.
     """
@@ -1265,7 +1116,7 @@ def _repeat_with_restarts(
 
             del decomp, errors
 
-            # Reduce some memory issues by clearing cache when memory usage is high
+            # Clear the cache when VRAM is running tight.
             if device.type == "cuda":
                 mem_reserved = torch.cuda.memory_reserved(device)
                 total_mem = torch.cuda.get_device_properties(device).total_memory
@@ -1274,9 +1125,8 @@ def _repeat_with_restarts(
             sys.stdout.flush()
     else:
         task_args = [(method, i, payload, kwargs) for i in range(init_repeats)]
-        # Split the parent's own thread budget across restart_procs workers
-        # rather than letting each worker default to its own (often much
-        # larger) thread pool -- see _init_restart_worker_backend.
+        # Split the parent's thread budget rather than letting each worker
+        # default to its own pool -- see _init_restart_worker_backend.
         threads_per_proc = max(1, torch.get_num_threads() // restart_procs)
         with get_context("spawn").Pool(
             restart_procs,
@@ -1301,14 +1151,13 @@ def _repeat_with_restarts(
                 del decomp, errors
 
     gc.collect()
-    # Force PyTorch to release its internal cached memory back to the OS/GPU
+    # Release PyTorch's cached memory back to the OS/GPU.
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
     if best_decomp is None:
-        # Chain the last failure rather than swallowing it: its message is
-        # where the numbers saying what to change (iteration counts,
-        # feasibility gaps, a suggested max_iter) actually live.
+        # Chain the last failure: its message carries the numbers saying what
+        # to change (iteration counts, feasibility gaps, suggested max_iter).
         raise ConvergenceError(
             f"No decomposition converged within {init_repeats} repeats"
             f"{tally.failure_summary()}",
@@ -1321,11 +1170,8 @@ def _repeat_with_restarts(
 def _maybe_register_memory_efficient_khatri_rao(enabled: bool) -> None:
     """Register TensorLy's memory-efficient MTTKRP backend method, if enabled.
 
-    `tl.tenalg.register_backend_method` is a global TensorLy backend
-    registration, not specific to any one decomposition -- shared by
-    `run_CP_decomposition_repeated` and `run_PARAFAC2_decomposition_repeated`,
-    since both algorithms' ALS iterations rely on the same underlying
-    MTTKRP operation.
+    A global TensorLy registration shared by both decompositions, since both
+    rely on the same underlying MTTKRP operation.
     """
     if enabled:
         tl.tenalg.register_backend_method(
@@ -1352,21 +1198,13 @@ def run_CP_decomposition_repeated(
 ) -> tuple[torch.Tensor, list[torch.Tensor], torch.Tensor]:
     """Repeatedly fit a CP/PARAFAC decomposition from random restarts.
 
-    See `compute_CP_decomposition` for the meaning of `allow_nan_imputation`
-    and `non_negative`, and `_repeat_with_restarts` for `restart_procs`.
+    See `compute_CP_decomposition` for `allow_nan_imputation` and
+    `non_negative`, and `_repeat_with_restarts` for `restart_procs`.
 
-    Notes
-    -----
-    Shares its option names (`max_iter`, `init_repeats`, `verbose_level`,
-    `tolerance`, `normalize`, `use_memory_efficient_khatri_rao`,
-    `progress_bar`, `device`, `rank`, `restart_procs`) with
-    `run_PARAFAC2_decomposition_repeated` -- see that function's docstring
-    for the options it doesn't share (`nn_modes` instead of `non_negative`;
-    the PARAFAC2-only `solver`, `aoadmm_options`, `aoadmm_loss_tolerance`
-    and `return_diagnostics`; no `allow_nan_imputation`). Kept in sync so a
-    single `**kwargs` dict of shared options (e.g.
-    `gMRItensor.replicability.evaluate_replicability_multiproc`'s
-    `CP_kwargs`) can be forwarded to either function.
+    Shared option names are kept in sync with
+    `run_PARAFAC2_decomposition_repeated` so one `**kwargs` dict can be
+    forwarded to either (as `evaluate_replicability_multiproc` does). Only
+    `non_negative` and `allow_nan_imputation` are CP-specific.
     """
     _maybe_register_memory_efficient_khatri_rao(use_memory_efficient_khatri_rao)
 
@@ -1404,12 +1242,10 @@ def _warn_if_accepted_at_iteration_limit(
 ) -> None:
     """Explain an accepted fit whose own solver reports it didn't converge.
 
-    For matcouply this combination is the normal case, not a red flag: its
-    stopping criterion is on the penalized objective, which routinely keeps
-    inching along after the reconstruction error has settled. Saying so
-    explicitly, with the levels reached, is better than either staying silent
-    (the caller never learns the iteration budget was exhausted) or raising
-    (which would reject fits that are in fact good).
+    Normal for matcouply, whose criterion is on the penalized objective and
+    keeps inching along after the reconstruction error has settled. Reporting
+    it beats staying silent (the caller never learns the budget was
+    exhausted) or raising (which would reject good fits).
     """
     if diagnostics is None or not diagnostics.reached_max_iter:
         return
@@ -1460,9 +1296,7 @@ PARAFAC2ResultWithDiagnostics = tuple[
 
 
 # Overloaded on `return_diagnostics` so callers that leave it off keep the
-# plain 4-tuple type -- without this, every existing call site (e.g.
-# `gMRItensor.replicability._decomposition_worker`) would have to narrow a
-# union before unpacking.
+# plain 4-tuple type instead of having to narrow a union before unpacking.
 @overload
 def run_PARAFAC2_decomposition_repeated(
     tensor_slices: list[torch.Tensor] | torch.Tensor,
@@ -1529,40 +1363,26 @@ def run_PARAFAC2_decomposition_repeated(
     """Repeatedly fit a PARAFAC2 decomposition from random restarts.
 
     See `compute_PARAFAC2_decomposition` for `solver`, `nn_modes`,
-    `aoadmm_options`, `aoadmm_loss_tolerance`, the two-threshold convergence
-    scheme, and why this is not `torch.compile`-wrapped; and
-    `_repeat_with_restarts` for `restart_procs`.
+    `aoadmm_options`, `aoadmm_loss_tolerance` and the two-threshold
+    convergence scheme; `_repeat_with_restarts` for `restart_procs`.
 
-    The return contract is identical for both solvers -- same arity, same
-    types, same shapes, same float32 CPU tensors -- so calling code never has
-    to branch on `solver`.
+    The return contract is identical for both solvers -- same arity, types,
+    shapes and float32 CPU tensors -- so calling code never branches on
+    `solver`. `return_diagnostics=True` appends the winning restart's
+    `PARAFAC2Diagnostics`; it is off by default so the 4-tuple contract
+    `gMRItensor.replicability` unpacks stays unchanged.
 
-    Parameters
-    ----------
-    return_diagnostics : bool, optional
-        If True, append the winning restart's `PARAFAC2Diagnostics` to the
-        returned tuple. Off by default so the 4-tuple contract that
-        `gMRItensor.replicability._decomposition_worker` unpacks is
-        unchanged.
+    Option names are kept in sync with `run_CP_decomposition_repeated` so one
+    `**kwargs` dict routes to either. Not shared: `nn_modes` replaces CP's
+    `non_negative` (it picks *which* modes are constrained); `solver`,
+    `aoadmm_options`, `aoadmm_loss_tolerance` and `return_diagnostics` are
+    PARAFAC2-only; and there is no `allow_nan_imputation`, since NaN input
+    always raises here.
 
-    Notes
-    -----
-    Shares its option names (`max_iter`, `init_repeats`, `verbose_level`,
-    `tolerance`, `normalize`, `use_memory_efficient_khatri_rao`,
-    `progress_bar`, `device`, `rank`, `restart_procs`) with
-    `run_CP_decomposition_repeated` -- see that function's `Notes`. The
-    options that aren't shared: `nn_modes` replaces CP's flat `non_negative`
-    bool (it's strictly more expressive -- it picks *which* modes are
-    constrained); `solver`, `aoadmm_options`, `aoadmm_loss_tolerance` and
-    `return_diagnostics` are PARAFAC2-only; and there's no
-    `allow_nan_imputation`, since neither PARAFAC2 solver is wired up for
-    imputation here -- unlike CP, NaN input always raises.
-
-    This function emits `UserWarning`s rather than staying silent when the
-    solver is struggling: once if the winning fit was accepted at the
-    iteration limit, and once more if *most* restarts were rejected for the
-    same reason (see `_build_restart_advisory`). Both carry the levels
-    actually reached and name the threshold to change.
+    Emits a `UserWarning` rather than staying silent when the solver is
+    struggling: once if the winning fit was accepted at the iteration limit,
+    and once if most restarts were rejected for the same reason (see
+    `_build_restart_advisory`).
 
     Returns
     -------
@@ -1570,11 +1390,10 @@ def run_PARAFAC2_decomposition_repeated(
         `(best_weights, best_factors, best_projections, best_error)`, plus
         `best_diagnostics` when `return_diagnostics=True`.
         `best_factors = [A, B, C]` (subject, shared evolving-mode basis,
-        region); `best_projections[i]` is the per-subject orthonormal
-        projection needed to reconstruct that subject's own time pattern
-        (`projections[i] @ best_factors[1]`). `best_error` is the relative
-        reconstruction error, defined identically for both solvers and hence
-        directly comparable between them.
+        region); `best_projections[i] @ best_factors[1]` reconstructs subject
+        `i`'s time pattern. `best_error` is the relative reconstruction
+        error, defined identically for both solvers and so comparable
+        between them.
     """
     _maybe_register_memory_efficient_khatri_rao(use_memory_efficient_khatri_rao)
 
@@ -1636,11 +1455,13 @@ def run_PARAFAC2_decomposition_repeated(
 
 
 def setup_backend():
-    # Check if use gpu flag is passed
-    # Note that if variable is not defined this will be false
+    """Configure TensorLy's compute backend and return the device to use.
+
+    Reads `GMRITENSOR_USE_GPU` and, on CPU, `CPUS_PER_TASK` (SLURM).
+    """
     use_gpu = True if os.environ.get("GMRITENSOR_USE_GPU") == "TRUE" else False
 
-    # Use pytorch backend from openMP + GPU support
+    # pytorch backend, for OpenMP + GPU support.
     tl.set_backend("pytorch")
     torch.set_float32_matmul_precision("high")
 
@@ -1651,7 +1472,7 @@ def setup_backend():
     else:
         device = torch.device("cpu")
         slurm_cpus = os.environ.get("CPUS_PER_TASK")
-        # Run sequential if number of CPUs is not made explicit
+        # Sequential unless the CPU count is made explicit.
         torch.set_num_threads(int(slurm_cpus) if slurm_cpus else 1)
         print(f"Running on: Multi-CPU ({torch.get_num_threads()} threads)")
     return device

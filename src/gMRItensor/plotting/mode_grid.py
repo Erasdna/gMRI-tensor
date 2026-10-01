@@ -35,20 +35,11 @@ def plot_mode_grid(
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """Plot a component-per-row grid: time, subject boxplot, and spatial mode.
 
-    See `gMRItensor.plotting.spatial_mode.plot_spatial_mode` for the two
-    spatial columns' `mask`/percentile-scaling behavior -- the same
-    approach is used here for the Parenchyma/CSF columns.
-
-    Parameters
-    ----------
-    share_colorbar_scaling : bool, optional
-        If True, a given component's Parenchyma and CSF colorbars share one
-        `vmin`/`vmax` (5th-95th percentile of positive values, pooled from
-        both regions), making that component's color intensity directly
-        comparable between the two spatial columns. If False (the default,
-        unchanged behavior), each column is scaled independently from only
-        its own masked values. By default False. Mirrors
-        `plot_spatial_mode`'s parameter of the same name.
+    The Parenchyma/CSF columns use the same masking and percentile scaling
+    as `plot_spatial_mode`. `share_colorbar_scaling` likewise mirrors that
+    function's parameter: True pools both regions into one `vmin`/`vmax`
+    per component, so color intensity is comparable between the two spatial
+    columns; False (default) scales each column from its own values.
     """
     # TODO: Verify the all inpute modes have same nb of components
     n_components = spatial_mode.shape[1]
@@ -59,12 +50,11 @@ def plot_mode_grid(
 
     combined_index_mask = parenchyma_index_mask | csf_index_mask
 
-    # Calculate width ratios based on actual image aspect ratios
-    # Get the shape of the sagittal slice
+    # Width ratios follow the real image aspect ratio.
     sagittal_shape = background[sagittal_slice].shape  # (height, width)
     image_aspect_ratio = sagittal_shape[0] / sagittal_shape[1]
 
-    # Create temporary figure to measure colorbar width
+    # Throwaway figure, only to measure the colorbar's width.
     temp_fig, temp_ax = plt.subplots(1, 1, figsize=(5, 5))
     temp_data = np.random.rand(10, 10)
     temp_im = temp_ax.imshow(temp_data)
@@ -85,13 +75,11 @@ def plot_mode_grid(
         None,
     )
 
-    # Calculate colorbar width fraction in axes coordinates
-    # Colorbar is 5% width + text_width_offset + bbox_to_anchor offset (0.25)
+    # 5% width + text offset + the 0.25 bbox_to_anchor offset.
     colorbar_width_fraction = 0.05 + text_width_offset + 0.25
     plt.close(temp_fig)
 
-    # Time and subject plots are roughly square (aspect ratio ~1)
-    # Spatial images need extra width for colorbar
+    # Time/subject plots are ~square; spatial ones need colorbar room.
     image_with_colorbar_ratio = image_aspect_ratio * (1 + colorbar_width_fraction)
 
     width_ratios = [1, 1, image_with_colorbar_ratio, image_with_colorbar_ratio]
@@ -126,7 +114,6 @@ def plot_mode_grid(
 
     for component in range(n_components):
 
-        # Plot time mode
         time_ax = axs[component, 0]
         time_ax.plot(
             time_points,
@@ -140,7 +127,6 @@ def plot_mode_grid(
         time_ax.set_xticks(time_points)
         time_ax.set_ylim(-0.1, 1.1 * np.max(scaled_time_mode))
 
-        # Plot subject mode
         subject_ax = axs[component, 1]
 
         make_subject_boxplot(
@@ -157,7 +143,6 @@ def plot_mode_grid(
         else:
             subject_ax.set_xlabel("")
 
-        # Plot spatial mode
         parenchyma_ax = axs[component, 2]
         csf_ax = axs[component, 3]
 
@@ -190,7 +175,7 @@ def plot_mode_grid(
                 vmax=vmax,
                 mask=np.flip(np.rot90(voxel_mask[sagittal_slice], 1), 1),
             )
-            # Create temporary colorbar to measure exponent text width
+            # Measure the exponent text, then reposition around it.
             temp_cax = inset_axes(
                 ax,
                 width="5%",
@@ -202,9 +187,7 @@ def plot_mode_grid(
             )
             text_width_offset = create_colorbar_with_offset(fig, ax, im, temp_cax, None)
 
-            # Remove temporary colorbar
             temp_cax.remove()
-            # Create final colorbar with adjusted position
             cax_divider = inset_axes(
                 ax,
                 width="5%",

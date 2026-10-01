@@ -22,13 +22,8 @@ class ReplicabilityEngine(ABC):
         self,
         seed: int = 0,
     ) -> None:
-        """Initialize the replicability engine.
-
-        Args:
-            seed: Random seed for reproducibility
-        """
+        """Initialize the replicability engine."""
         self.seed = seed
-        # Set seed
         torch.manual_seed(self.seed)
         np.random.seed(seed)
 
@@ -49,18 +44,11 @@ class ReplicabilityEngine(ABC):
 
         Notes
         -----
-        `inds`/`stratification` are index-bookkeeping arrays consumed by
-        scikit-learn's splitters (`self.rskf.split` in the subclasses),
-        which need plain CPU/numpy-convertible data -- not the tensors being
-        decomposed (whose device is handled separately, per call, in
-        `evaluate_replicability_multiproc`) -- so they're always kept on
-        CPU here, including an explicitly-passed `stratification` that
-        happens to be on another device. A previous version of this engine
-        stored a `device` and moved these arrays onto it, which broke
-        scikit-learn for a CUDA-configured engine even with no
-        multiprocessing involved at all (`TypeError: can't convert cuda:0
-        device type tensor to numpy`); removed since nothing here needs a
-        device in the first place.
+        `inds`/`stratification` are index-bookkeeping arrays for
+        scikit-learn's splitters, which need numpy-convertible CPU data, so
+        they are always kept on CPU -- including a `stratification` passed in
+        on another device. The decomposed tensors' device is handled
+        separately, in `evaluate_replicability_multiproc`.
         """
         inds = torch.arange(n_tot)
         if stratification is None:
@@ -75,13 +63,10 @@ class ReplicabilityEngine(ABC):
         self,
         decomposition_results: dict[Any, tuple[list[int], Any, list[torch.Tensor]]],
     ):
-        """Processes factor outputs and calculates pairwise FMS scores.
+        """Compute pairwise FMS scores from each task's factors.
 
-        Args:
-            decomposition_results: Dictionary mapping task_id to (indices, weights, factors)
-
-        Returns:
-            List of FMS score tuples (format depends on engine type)
+        `decomposition_results` maps task_id to (indices, weights, factors).
+        The returned tuple format depends on the engine.
         """
         pass
 
@@ -94,12 +79,7 @@ class HalfHalfEngine(ReplicabilityEngine):
         repeats: int,
         seed: int = 0,
     ) -> None:
-        """Initialize half-half split engine.
-
-        Args:
-            repeats: Number of random half-half splits to perform
-            seed: Random seed for reproducibility
-        """
+        """Initialize half-half split engine, with `repeats` random splits."""
         super().__init__(seed)
         self.repeats = repeats
         self.rskf = StratifiedShuffleSplit(
@@ -113,15 +93,7 @@ class HalfHalfEngine(ReplicabilityEngine):
         n_tot: int,
         stratification: torch.Tensor | None = None,
     ) -> list[tuple[tuple[int, int], list[int]]]:
-        """Generate half-half split tasks.
-
-        Args:
-            n_tot: Total number of samples
-            stratification: Optional stratification labels
-
-        Returns:
-            List of ((split_index, half_index), indices) tuples
-        """
+        """Generate ((split_index, half_index), indices) tasks."""
         inds, stratification = super().generate_tasks(n_tot, stratification)
         tasks = []
         for i, (train_idx, test_idx) in enumerate(
@@ -140,14 +112,7 @@ class HalfHalfEngine(ReplicabilityEngine):
             tuple[list[int], Any, list[torch.Tensor]],
         ],
     ) -> list[tuple[int, float]]:
-        """Compute FMS between paired halves.
-
-        Args:
-            decomposition_results: Dictionary mapping (split, half) to decomposition results
-
-        Returns:
-            List of (split_index, fms_score) tuples
-        """
+        """Compute FMS between paired halves, as (split_index, fms) tuples."""
         fms_results = []
         for s in range(self.repeats):
             _, weights_0, factors_0 = decomposition_results[(s, 0)]
@@ -172,13 +137,7 @@ class CrossValidationEngine(ReplicabilityEngine):
         repeats: int,
         seed: int = 0,
     ) -> None:
-        """Initialize cross-validation engine.
-
-        Args:
-            splits: Number of folds per repeat
-            repeats: Number of times to repeat the cross-validation
-            seed: Random seed for reproducibility
-        """
+        """Initialize a `repeats` x `splits`-fold cross-validation engine."""
         super().__init__(seed)
         self.splits = splits
         self.repeats = repeats
@@ -195,15 +154,7 @@ class CrossValidationEngine(ReplicabilityEngine):
         n_tot: int,
         stratification: torch.Tensor | None = None,
     ) -> list[tuple[int, list[int]]]:
-        """Generate cross-validation fold tasks.
-
-        Args:
-            n_tot: Total number of samples
-            stratification: Optional stratification labels
-
-        Returns:
-            List of (fold_index, train_indices) tuples
-        """
+        """Generate (fold_index, train_indices) tasks."""
         inds, stratification = super().generate_tasks(n_tot, stratification)
         tasks = []
         for fold_idx, (train_idx, _) in enumerate(
@@ -218,11 +169,7 @@ class CrossValidationEngine(ReplicabilityEngine):
     ) -> list[tuple[np.ndarray, int, int, float]]:
         """Compute pairwise FMS between folds within each repeat.
 
-        Args:
-            decomposition_results: Dictionary mapping fold_index to decomposition results
-
-        Returns:
-            List of (common_subjects, fold_i, fold_j, fms_score) tuples
+        Returns (common_subjects, fold_i, fold_j, fms_score) tuples.
         """
         fms_results = []
         for repeat in range(self.repeats):
@@ -279,14 +226,9 @@ def _get_device(tensor: torch.Tensor | list[torch.Tensor]) -> torch.device:
 def _init_worker_backend() -> None:
     """Pool initializer: set up TensorLy's backend in each worker process.
 
-    With the "fork" start method, a worker inherits the parent process's
-    memory wholesale, including whatever `tl.set_backend("pytorch")` the
-    caller already ran (typically via `gMRItensor.setup_backend`). With
-    "spawn" (used here -- see `evaluate_replicability_multiproc`'s Pool
-    call for why), each worker starts as a fresh Python process that never
-    ran that setup, so TensorLy falls back to its default numpy backend and
-    fails to interpret the torch tensors handed to it. Registered as the
-    `Pool` initializer so it runs once per worker before any task.
+    A "spawn"ed worker is a fresh process that never ran `setup_backend`, so
+    without this TensorLy falls back to numpy and cannot interpret the torch
+    tensors handed to it.
     """
     tl.set_backend("pytorch")
 
@@ -304,16 +246,13 @@ def _decomposition_worker(
     """Worker function for parallel CP/PARAFAC2 decomposition.
 
     Args:
-        task_args: Tuple of (task_id, indices, full_tensor, rank, method, kwargs)
+        task_args: (task_id, indices, full_tensor, rank, method, kwargs)
 
     Returns:
-        Tuple of (task_id, indices, weights, factors) with tensors on CPU.
-        For "PARAFAC2", the per-subject projections are dropped here: they're
-        only needed to reconstruct subject-specific time patterns for
-        plotting, not for the replicability score -- `HalfHalfEngine`/
-        `CrossValidationEngine` only ever need `(weights, factors)`, and
-        PARAFAC2's `factors = [A, B, C]` are regular-shaped just like CP's,
-        so `compute_fms` needs no PARAFAC2-specific handling.
+        (task_id, indices, weights, factors), tensors on CPU. PARAFAC2's
+        projections are dropped: they only matter for reconstructing
+        per-subject time patterns, and its `factors = [A, B, C]` are regular
+        like CP's, so `compute_fms` needs no method-specific handling.
     """
     task_id, indices, full_tensor, rank, method, kwargs = task_args
 
@@ -360,33 +299,27 @@ def evaluate_replicability_multiproc(
         rank: Number of components for the decomposition
         method: "CP" or "PARAFAC2"
         stratification: Optional stratification labels for splitting
-        n_procs: Number of parallel processes. Must be 1 if `tensor` is on
-            CUDA -- see Raises.
-        **CP_kwargs: Additional arguments passed to
-            run_CP_decomposition_repeated / run_PARAFAC2_decomposition_repeated.
-            This is how PARAFAC2-only options reach the solver -- notably
-            `solver="matcouply"` (plus `nn_modes`, `aoadmm_options` and
-            `aoadmm_loss_tolerance`), which is why this module needs no
-            PARAFAC2-solver-specific code of its own. They will `TypeError`
-            with `method="CP"`. Do not pass `return_diagnostics`: the worker
-            below unpacks a fixed 4-tuple.
+        n_procs: Number of parallel processes. Must be 1 on CUDA.
+        **CP_kwargs: Forwarded to run_CP_decomposition_repeated /
+            run_PARAFAC2_decomposition_repeated. This is how PARAFAC2-only
+            options reach the solver -- `solver="matcouply"`, `nn_modes`,
+            `aoadmm_options`, `aoadmm_loss_tolerance` -- which is why this
+            module needs no solver-specific code. They `TypeError` with
+            `method="CP"`. Do not pass `return_diagnostics`: the worker
+            unpacks a fixed 4-tuple.
 
     Returns:
         List of FMS score tuples (format depends on engine type)
 
     Raises:
         ValueError: If `n_procs >= 2` and `tensor` is on CUDA. Worker
-            processes touching a CUDA context derived from an already
-            CUDA-initialized parent is unreliable across GPU driver/runtime
-            setups (regardless of multiprocessing start method), so this is
-            rejected outright rather than silently falling back to
-            single-process execution. Pass `n_procs=1` for CUDA, or move
-            `tensor` to CPU first to use multiple processes.
+            processes against a CUDA context from an already-initialized
+            parent are unreliable across driver setups, so this is rejected
+            rather than silently falling back to one process.
     """
     is_cuda = _get_device(tensor).type == "cuda"
     if is_cuda and n_procs >= 2:
-        # Checked first, before generate_tasks/decomposition do any work: fail
-        # fast on this misconfiguration rather than partway through a run.
+        # Checked before any work starts, to fail fast on misconfiguration.
         raise ValueError(
             f"n_procs={n_procs} requests multiprocessing, but `tensor` is on "
             "CUDA. Running multiple worker processes against a CUDA context "

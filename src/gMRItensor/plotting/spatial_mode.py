@@ -93,15 +93,11 @@ def plot_brain(
 
     ax[-1].set_axis_off()
 
-    # Create temporary colorbar to measure exponent text width
+    # Measure the exponent text, then shift the real colorbar clear of it.
     temp_cax = inset_axes(ax[-1], width="100%", height="70%", loc="center right")
     # text_width_offset = create_colorbar_with_offset(fig, ax[-1], im, temp_cax, label)
-
-    # Remove temporary colorbar
     temp_cax.remove()
 
-    # Create final colorbar with adjusted position
-    # Shift left by the text width offset to prevent overlap
     cax = inset_axes(
         ax[-1],
         width="100%",
@@ -130,13 +126,12 @@ def _percentile_vlim(
     low: float = 5,
     high: float = 95,
 ) -> tuple[float, float]:
-    """5th/95th (by default) percentile of `values`' nonzero entries.
+    """Percentile range of `values`' nonzero entries.
 
-    Zero is excluded rather than clipped to, since `scatter_to_volume` fills
-    voxels outside the mask/background with exact 0 -- not a real value --
-    which would otherwise dominate and skew the percentile. This does not
-    require `values` to be non-negative: real negative entries (e.g. from an
-    unconstrained CP/PARAFAC2 spatial mode) are kept.
+    Zero is excluded rather than clipped to: `scatter_to_volume` fills
+    voxels outside the mask with exact 0, which is not a real value and
+    would otherwise dominate the percentile. Genuine negative entries, e.g.
+    from an unconstrained spatial mode, are kept.
     """
     nonzero = values[values != 0]
     return np.percentile(nonzero, low), np.percentile(nonzero, high)
@@ -161,39 +156,30 @@ def plot_spatial_mode(
     Parameters
     ----------
     spatial_mode : np.ndarray
-        Spatial mode matrix, one row per entry in `index_list`.
+        One row per entry in `index_list`.
     index_list : np.ndarray
-        `(n_voxels, ndim)` array of voxel coordinates, one row per row of
-        `spatial_mode`.
+        `(n_voxels, ndim)` voxel coordinates, one row per `spatial_mode` row.
     region_masks : dict[str, np.ndarray]
-        Named `(n_voxels,)` boolean masks partitioning `index_list`'s rows
-        into the regions to plot separately (e.g. `{"CSF": ..., "Parenchyma":
-        ...}`), as built by
-        `gMRItensor.plotting.utils.region_masks_from_segmentations`.
+        Named `(n_voxels,)` boolean masks splitting `index_list`'s rows into
+        regions to plot separately, as built by
+        `region_masks_from_segmentations`.
     background : np.ndarray
-        Background image
+        Background image.
     slices : list
-        List of slice indices to plot
-    page_width : float, optional
-        Target page width in inches (e.g., 3.5 for single column, 7.0 for double column).
-        By default 7.0.
-    width_to_height_ratio : float, optional
-        Desired width-to-height ratio for each subplot. By default 1.618 (golden ratio).
+        Slice indices to plot.
+    page_width, width_to_height_ratio : float, optional
+        Figure sizing, see `compute_figsize`.
     share_colorbar_scaling : bool, optional
-        If True, a given component's colorbar (5th-95th percentile of its
-        positive values) is computed once from the union of all
-        `region_masks`, and that same `vmin`/`vmax` is reused for every
-        region's figure -- so a component's color intensity is directly
-        comparable across regions. If False (the default, unchanged
-        behavior), each region's colorbar is scaled independently from only
-        its own masked values, which is not comparable across regions but
-        makes the best use of each region's own color range. By default
-        False.
+        If True, each component's colorbar range is computed once over the
+        union of all `region_masks` and reused, making color intensity
+        comparable across regions. If False (default), each region is scaled
+        from its own values only -- not comparable, but uses each region's
+        color range fully.
 
     Yields
     ------
     tuple
-        (figure, axes, name) for each region in `region_masks`
+        `(figure, axes, name)` per region in `region_masks`.
     """
     assert spatial_mode.shape[0] == index_list.shape[0]
 
@@ -218,7 +204,6 @@ def plot_spatial_mode(
             for component in range(n_components)
         ]
 
-    # Compute figsize
     figsize = compute_figsize(
         n_components=n_components,
         n_columns=sum(width_ratios),

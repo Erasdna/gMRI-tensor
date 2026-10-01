@@ -30,24 +30,11 @@ def reconstruct_evolving_factors(
 ) -> list[np.ndarray]:
     """Reconstruct each subject's own PARAFAC2 evolving-mode (time) factor.
 
-    PARAFAC2's shared evolving-mode basis `factors[1]` (`B`, shape
-    `(rank, rank)`) isn't directly interpretable per subject; each subject's
-    own time pattern is `projections[i] @ B`. Thin wrapper around
-    `tensorly.parafac2_tensor.apply_parafac2_projections`, converting the
-    result to plain numpy arrays, since the rest of this plotting module
-    operates on numpy (not torch) throughout.
-
-    Parameters
-    ----------
-    weights, factors, projections
-        As returned by `gMRItensor.run_PARAFAC2_decomposition_repeated`
-        (`factors = [A, B, C]`; `projections[i]` has shape
-        `(n_timepoints_i, rank)`).
-
-    Returns
-    -------
-    list[np.ndarray]
-        One `(n_timepoints_i, rank)` array per subject.
+    The shared basis `factors[1]` is not interpretable per subject; each
+    subject's time pattern is `projections[i] @ factors[1]`. Takes
+    `run_PARAFAC2_decomposition_repeated`'s output and returns one
+    `(n_timepoints_i, rank)` numpy array per subject, since the rest of this
+    module works in numpy rather than torch.
     """
     _, (_, evolving_factors, _) = apply_parafac2_projections(
         (weights, factors, projections),
@@ -64,27 +51,10 @@ def _build_long_evolving_dataframe(
 ) -> pd.DataFrame:
     """Stack per-subject evolving-mode factors into one long-form frame.
 
-    One row per `(subject, timepoint, component)`. Timepoints are kept as
-    their raw values (not binned or interpolated), so a later
-    `groupby("timepoint")` is exactly the "exact-value match" alignment
-    used to aggregate ragged per-subject timepoints across a group.
-
-    Parameters
-    ----------
-    scaled_factors : list[np.ndarray]
-        Per-subject, per-subject-scaled evolving-mode factors.
-    timepoints_per_subject : list[np.ndarray]
-        Per-subject time point arrays matching `scaled_factors[i]`'s rows.
-    subjects, groups : list[str]
-        Subject identifiers and their group labels, same order as
-        `scaled_factors`.
-    n_components : int
-        Number of components (columns) in each subject's factor.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns `subject`, `group`, `timepoint`, `component`, `value`.
+    One row per `(subject, timepoint, component)`, with columns `subject`,
+    `group`, `timepoint`, `component`, `value`. Timepoints keep their raw
+    values rather than being binned, so a later `groupby("timepoint")`
+    aligns ragged per-subject timepoints by exact value.
     """
     component_columns = [str(c) for c in range(n_components)]
     frames = []
@@ -111,20 +81,11 @@ def _build_long_evolving_dataframe(
 
 
 def _compute_group_ribbon_stats(long_df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate a long-form evolving-mode frame into per-group ribbon stats.
+    """Aggregate `_build_long_evolving_dataframe` output into ribbon stats.
 
-    Parameters
-    ----------
-    long_df : pd.DataFrame
-        As returned by `_build_long_evolving_dataframe`.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns `component`, `group`, `timepoint`, `mean`, `sem`, `n`.
-        `sem` (standard error of the mean) is `NaN` from pandas at `n == 1`;
-        it is filled to `0.0` here so a ribbon band doesn't gap at
-        single-subject timepoints.
+    Returns columns `component`, `group`, `timepoint`, `mean`, `sem`, `n`.
+    `sem` is filled from NaN to 0.0 at `n == 1`, so the ribbon does not gap
+    at single-subject timepoints.
     """
     stats = (
         long_df.groupby(["component", "group", "timepoint"])["value"]
@@ -142,37 +103,18 @@ def _test_group_differences_over_time(
 ) -> pd.DataFrame:
     """Test for a group difference at each timepoint, per component.
 
-    A timepoint is only tested for a component if every group in
-    `categories` has at least `min_group_n` subjects with data at that
-    exact timepoint value -- the smallest `n` at which the rank-based tests
-    below are non-degenerate. With exactly two groups, a two-sided
-    Mann-Whitney U test is used (matching the test already used for
-    categorical group comparisons in
-    `gMRItensor.plotting.subject_mode.make_subject_boxplot`); with more
-    than two groups, its multi-group generalization, Kruskal-Wallis, is
-    used instead. With fewer than two groups no comparison is possible and
-    nothing is tested.
+    A timepoint is tested only if every group in `categories` has at least
+    `min_group_n` subjects at that exact timepoint value -- the smallest `n`
+    at which these rank-based tests are non-degenerate. Two groups use a
+    two-sided Mann-Whitney U (as `subject_mode.make_subject_boxplot` does);
+    more use Kruskal-Wallis; fewer are not tested at all.
 
-    P-values are corrected for multiple comparisons with Benjamini-Hochberg
-    FDR, scoped *per component* -- i.e. all timepoints tested for a given
-    component form one hypothesis-testing family, not the whole figure.
+    P-values are Benjamini-Hochberg FDR corrected *per component*, so each
+    component's timepoints form one hypothesis family rather than the whole
+    figure.
 
-    Parameters
-    ----------
-    long_df : pd.DataFrame
-        As returned by `_build_long_evolving_dataframe`.
-    categories : list[str]
-        Group labels to compare, e.g. `sorted(set(groups))`.
-    min_group_n : int, optional
-        Minimum number of subjects each group must have at a timepoint for
-        it to be tested. By default 2.
-
-    Returns
-    -------
-    pd.DataFrame
-        Columns `component`, `timepoint`, `p_value`, `p_adj`. Empty (but
-        correctly columned) if fewer than two groups are given or no
-        timepoint meets `min_group_n` for every group.
+    Returns columns `component`, `timepoint`, `p_value`, `p_adj`, empty if
+    nothing was testable.
     """
     columns = ["component", "timepoint", "p_value", "p_adj"]
     if len(categories) < 2:
@@ -223,24 +165,11 @@ def _plot_ribbon_column(
     categories: list[str],
     color_by_group: dict[str, str],
 ) -> tuple[float, float]:
-    """Draw a mean +/- SEM ribbon per group.
+    """Draw a mean +/- SEM ribbon per group, for one component.
 
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Axes to draw on.
-    ribbon_stats : pd.DataFrame
-        `_compute_group_ribbon_stats` output, pre-filtered to one
-        component.
-    categories : list[str]
-        Group labels, in the order they should be plotted/legended.
-    color_by_group : dict[str, str]
-        Color for each group.
-
-    Returns
-    -------
-    tuple[float, float]
-        `(ymin, ymax)` actually drawn, for row-wise y-limit finalization.
+    `ribbon_stats` is `_compute_group_ribbon_stats` output pre-filtered to
+    that component. Returns the `(ymin, ymax)` actually drawn, for row-wise
+    y-limit finalization.
     """
     ymin, ymax = np.inf, -np.inf
     for category in categories:
@@ -270,23 +199,9 @@ def _plot_group_subject_column(
 ) -> tuple[float, float]:
     """Draw one group's individual subject curves for one component.
 
-    Parameters
-    ----------
-    ax : matplotlib.axes.Axes
-        Axes to draw on.
-    factors : list[np.ndarray]
-        Scaled evolving-mode factors, restricted to this group's subjects.
-    timepoints_per_subject : list[np.ndarray]
-        Matching per-subject time point arrays.
-    component : int
-        Component index (column of each factor) to plot.
-    color : str
-        Line color for this group.
-
-    Returns
-    -------
-    tuple[float, float]
-        `(ymin, ymax)` actually drawn, for row-wise y-limit finalization.
+    `factors` are the scaled evolving-mode factors for this group's subjects
+    only. Returns the `(ymin, ymax)` actually drawn, for row-wise y-limit
+    finalization.
     """
     ymin, ymax = np.inf, -np.inf
     for factor, timepoints in zip(factors, timepoints_per_subject):
@@ -303,18 +218,10 @@ def _finalize_evolving_mode_axes(
 ) -> None:
     """Apply a shared, padded y-limit across each row's axes.
 
-    Direct analogue of `subject_mode._finalize_boxplot_axes`'s two-pass
-    pattern: rendering happens first so the actual data range is known,
-    then every axes in a row is given the same y-limits so the ribbon
-    column and per-group columns stay visually comparable.
-
-    Parameters
-    ----------
-    axs : np.ndarray
-        2D axes array, shape `(n_components, n_columns)`.
-    row_ylims : list[tuple[float, float]]
-        One `(ymin, ymax)` per row (component), as returned by
-        `_plot_ribbon_column`/`_plot_group_subject_column`.
+    Same two-pass pattern as `subject_mode._finalize_boxplot_axes`: draw
+    first so the data range is known, then equalize each row so the ribbon
+    and per-group columns stay visually comparable. `row_ylims` holds one
+    `(ymin, ymax)` per component.
     """
     for component, (ymin, ymax) in enumerate(row_ylims):
         if not (np.isfinite(ymin) and np.isfinite(ymax)):
@@ -347,45 +254,32 @@ def plot_evolving_mode(
     Parameters
     ----------
     evolving_factors : list[np.ndarray]
-        Per-subject evolving-mode factors -- `evolving_factors[i]` has shape
-        `(n_timepoints_i, rank)`, e.g. from `reconstruct_evolving_factors`.
+        Per-subject `(n_timepoints_i, rank)` factors, e.g. from
+        `reconstruct_evolving_factors`.
     timepoints_per_subject : list[np.ndarray]
-        Per-subject time point arrays matching `evolving_factors[i]`'s rows.
+        Time point arrays matching `evolving_factors[i]`'s rows.
     subjects : list[str]
-        Subject identifiers, in the same order as `evolving_factors`.
+        Subject identifiers, in `evolving_factors` order.
     subject_info : pd.DataFrame
-        DataFrame containing subject metadata, with a `subjects` column and
-        a `group_variable` column.
+        Subject metadata, with a `subjects` column and a `group_variable`
+        column.
     group_variable : str
-        Column name in `subject_info` to color-code subjects by.
-    page_width : float, optional
-        Target page width in inches. By default 7.0.
-    width_to_height_ratio : float, optional
-        Desired width-to-height ratio for each subplot. By default 1.618
-        (golden ratio).
+        Column in `subject_info` to color-code by.
+    page_width, width_to_height_ratio : float, optional
+        Figure sizing, see `compute_figsize`.
     min_group_n : int, optional
-        Minimum number of subjects a group must have at a timepoint for a
-        group-difference test to be run there. By default 2, the smallest
-        `n` at which the underlying rank-based test is non-degenerate.
+        Minimum subjects per group at a timepoint for it to be tested.
     significance_alpha : float, optional
-        FDR-corrected p-value threshold below which a timepoint is flagged
-        `significant` in the returned DataFrame. By default 0.05.
+        FDR-corrected threshold for the `significant` column.
 
     Returns
     -------
     tuple[matplotlib.figure.Figure, np.ndarray, pd.DataFrame]
-        `(fig, axs, significance)`:
-        - `fig`, `axs`: figure and 2D axes array with shape
-          `(n_components, 1 + n_groups)` -- note this is a wider grid than
-          this function used to return (previously `(n_components, 1)`):
-          column 0 is the ribbon plot, columns 1..n_groups are one per
-          group (in `sorted(set(groups))` order).
-        - `significance`: per-timepoint group-difference test results, with
-          columns `component`, `timepoint`, `p_value`, `p_adj`,
-          `significant` (`p_adj < significance_alpha`). Empty (but
-          correctly columned) if fewer than two groups are given or no
-          timepoint had enough subjects per group to test -- see
-          `_test_group_differences_over_time`.
+        `(fig, axs, significance)`. `axs` is `(n_components, 1 + n_groups)`:
+        column 0 is the ribbon, the rest one per group in
+        `sorted(set(groups))` order. `significance` has columns
+        `component`, `timepoint`, `p_value`, `p_adj`, `significant`, and is
+        empty if nothing was testable.
 
     Raises
     ------
@@ -394,29 +288,17 @@ def plot_evolving_mode(
 
     Notes
     -----
-    Unlike `scale_mode`'s usual whole-matrix usage elsewhere in this
-    package, each subject's evolving-mode slice is scaled independently
-    here: there is no single shared axis-0 to normalize across subjects at
-    once, since subjects can have different numbers of time points.
+    Each subject's slice is scaled independently, unlike `scale_mode`'s
+    usual whole-matrix use: subjects can have different numbers of time
+    points, so there is no shared axis to normalize across.
 
-    Ribbon aggregation aligns subjects by *exact* timepoint value (no
-    interpolation or binning): a group's mean/SEM at a given timepoint is
-    computed from whichever of its subjects have data at that exact value.
-    A group's SEM is filled to `0.0` (instead of pandas' `NaN`) at
-    timepoints with only one subject, so the ribbon band doesn't gap.
+    Ribbon aggregation aligns subjects by *exact* timepoint value, with no
+    interpolation or binning.
 
-    Group-difference testing (see `_test_group_differences_over_time`) uses
-    a two-sided Mann-Whitney U test for two groups, or Kruskal-Wallis for
-    more than two, run independently at each timepoint that has at least
-    `min_group_n` subjects per group, with Benjamini-Hochberg FDR
-    correction applied per component. Results are returned as a DataFrame
-    rather than drawn on the plot: a significance marker repeated at every
-    tested point along a continuous time axis doesn't read well, and
-    `statannotations.Annotator` (used for boxplots in
-    `gMRItensor.plotting.subject_mode.make_subject_boxplot`) is built for
-    bracket annotations between fixed categorical x-positions, which
-    doesn't fit here either. With a single group, no comparison is
-    possible and no tests are run.
+    Significance is returned rather than drawn: a marker repeated at every
+    tested point along a continuous axis reads poorly, and
+    `statannotations.Annotator` (used in `subject_mode`) only does bracket
+    annotations between categorical x-positions.
     """
     if not (len(evolving_factors) == len(timepoints_per_subject) == len(subjects)):
         raise ValueError(
