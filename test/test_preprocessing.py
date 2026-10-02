@@ -656,7 +656,6 @@ def test_write_tracer_parquet_round_trips_to_same_tensor(tmp_path, func):
         n_procs=1,
     )
 
-    assert coords_path == tmp_path / "tracer.coords.parquet"
     # One row group per image, so the file can later be read image by image.
     assert pq.ParquetFile(tracer_path).num_row_groups == len(args_list)
 
@@ -673,17 +672,29 @@ def test_write_tracer_parquet_round_trips_to_same_tensor(tmp_path, func):
     for got_part, expected_part in zip(got, expected):
         np.testing.assert_array_equal(got_part, expected_part)
 
+    if func is not None:
+        # ROI mode: coordinates from one image need not describe another's
+        # ROIs (native-space segmentations), so no sidecar is written.
+        assert coords_path is None
+        assert not (tmp_path / "tracer.coords.parquet").exists()
+        return
+
+    assert coords_path == tmp_path / "tracer.coords.parquet"
     coords = pd.read_parquet(coords_path)
-    expected_coords = (
-        expected_index_list if func is None else np.concatenate(expected_index_list)
+    np.testing.assert_array_equal(
+        coords[["i", "j", "k"]].to_numpy(),
+        expected_index_list,
     )
-    np.testing.assert_array_equal(coords[["i", "j", "k"]].to_numpy(), expected_coords)
     # Each coordinate row keeps the (labels, label_index) key of its tensor
     # column, so spatial modes can be mapped back onto voxels.
     segmentation = nib.load(args_list[0]["segmentation_path"]).get_fdata()
     np.testing.assert_array_equal(
         coords["labels"],
-        segmentation[*expected_coords.T],
+        segmentation[*expected_index_list.T],
+    )
+    np.testing.assert_array_equal(
+        coords["label_index"],
+        expected_df.query("subject == 's0' and time_point == 0")["label_index"],
     )
 
 

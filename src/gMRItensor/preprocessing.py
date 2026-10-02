@@ -277,20 +277,12 @@ def _tracer_table(result: TracerResult) -> pa.Table:
 
 
 def _coords_table(result: TracerResult) -> pa.Table:
-    """Flatten `index_list` to one `(labels, label_index, i, j, k)` row per voxel."""
-    if isinstance(result.index_list, np.ndarray):
-        labels, label_index = result.labels, result.label_index
-        coords = result.index_list
-    else:
-        sizes = [len(c) for c in result.index_list]
-        labels = np.repeat(result.labels, sizes)
-        label_index = np.repeat(result.label_index, sizes)
-        # The empty seed keeps this valid when there are no ROIs at all.
-        coords = np.concatenate([np.empty((0, 3), dtype=np.int64), *result.index_list])
+    """One `(labels, label_index, i, j, k)` row per voxel of a per-voxel result."""
+    coords = cast(np.ndarray, result.index_list)
     return pa.table(
         {
-            "labels": np.asarray(labels).astype(np.int64),
-            "label_index": np.asarray(label_index).astype(np.int64),
+            "labels": np.asarray(result.labels).astype(np.int64),
+            "label_index": np.asarray(result.label_index).astype(np.int64),
             "i": coords[:, 0],
             "j": coords[:, 1],
             "k": coords[:, 2],
@@ -302,21 +294,24 @@ def write_tracer_parquet(
     args_list: list[dict[str, Any]],
     output_path: Path | str,
     n_procs: int = 5,
-) -> tuple[Path, Path]:
+) -> tuple[Path, Path | None]:
     """Stream `iter_tracer_results` to parquet, one row group per image.
 
     Writes the long-format frame `prepare_tensor` consumes (read it back with
-    `pd.read_parquet`) while holding at most a few images in memory. Voxel
-    coordinates go to a `.coords.parquet` sidecar, one `(labels,
-    label_index, i, j, k)` row per voxel, taken from the first image -- like
-    `compute_tracer_parallel`'s `index_list`, so all images are assumed to
-    share one template. Files are only moved into place on success.
+    `pd.read_parquet`) while holding at most a few images in memory. In
+    per-voxel mode (`func=None`) voxel coordinates also go to a
+    `.coords.parquet` sidecar, one `(labels, label_index, i, j, k)` row per
+    voxel, taken from the first image -- so all images are assumed to share
+    one template. ROI mode writes no sidecar, since one image's ROI voxels
+    need not describe any other's. Files are only moved into place on
+    success.
 
-    Returns `(tracer_path, coords_path)`.
+    Returns `(tracer_path, coords_path)`, `coords_path` None in ROI mode.
     """
     if not args_list:
         raise ValueError("args_list is empty; nothing to write")
 
+    per_voxel = args_list[0]["func"] is None
     tracer_path = Path(output_path)
     coords_path = tracer_path.with_suffix(".coords.parquet")
     tmp_tracer = tracer_path.with_name(tracer_path.name + ".tmp")
@@ -325,7 +320,7 @@ def write_tracer_parquet(
     try:
         with pq.ParquetWriter(tmp_tracer, _TRACER_SCHEMA) as writer:
             for i, result in enumerate(iter_tracer_results(args_list, n_procs)):
-                if i == 0:
+                if i == 0 and per_voxel:
                     pq.write_table(_coords_table(result), tmp_coords)
                 table = _tracer_table(result)
                 writer.write_table(table, row_group_size=max(table.num_rows, 1))
@@ -335,6 +330,8 @@ def write_tracer_parquet(
         raise
 
     tmp_tracer.replace(tracer_path)
+    if not per_voxel:
+        return tracer_path, None
     tmp_coords.replace(coords_path)
     return tracer_path, coords_path
 
