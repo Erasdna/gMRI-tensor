@@ -740,16 +740,18 @@ def test_PARAFAC2_matcouply_advises_raising_max_iter():
     assert excinfo.value.__cause__.suggested_max_iter > 150
 
 
-def test_PARAFAC2_no_advisory_when_healthy():
-    # Guards against the nudge turning into noise: a run that converges
-    # comfortably must say nothing at all.
+def test_PARAFAC2_healthy_run_is_silent():
+    # Guards against the warnings turning into noise. A comfortable run must
+    # emit neither the restart advisory nor the non-negativity warning -- the
+    # latter only stays quiet because negligible residue is zeroed in every
+    # constrained mode, so there is nothing left to report.
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     device = setup_backend()
     slices = make_parafac2_slices(device)
 
     with warnings.catch_warnings(record=True) as caught:
         warnings.simplefilter("always")
-        run_PARAFAC2_decomposition_repeated(
+        model, _ = run_PARAFAC2_decomposition_repeated(
             slices,
             rank=2,
             max_iter=2000,
@@ -758,8 +760,13 @@ def test_PARAFAC2_no_advisory_when_healthy():
             progress_bar=False,
             solver="matcouply",
         )
-    advisories = [w for w in caught if "PARAFAC2(solver=" in str(w.message)]
-    assert advisories == []
+    ours = [w for w in caught if "PARAFAC2(solver=" in str(w.message)]
+    assert [str(w.message) for w in ours] == []
+
+    # The reason it is silent: no negative residue survives anywhere.
+    assert model.subject_mode.min() >= 0.0
+    assert model.label_mode.min() >= 0.0
+    assert min(float(b.min()) for b in model.evolving_states) >= 0.0
 
 
 def make_decaying_rec_errors(decay=0.95, n_iter=400, step=0.1):

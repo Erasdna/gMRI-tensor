@@ -384,6 +384,31 @@ def _zero_negligible_loadings(
     return torch.where(factor.abs() <= rtol * scale, torch.zeros_like(factor), factor)
 
 
+def _zero_negligible_evolving(
+    evolving_states: list[torch.Tensor],
+    rtol: float,
+) -> list[torch.Tensor]:
+    """Zero negligible entries across the ragged evolving mode.
+
+    Scaled per component against the largest value over *all* subjects, not
+    each subject's own maximum -- otherwise a subject whose whole time course
+    is residue would be rescaled against its own noise and kept.
+    """
+    if rtol <= 0 or not evolving_states:
+        return evolving_states
+    scale = (
+        torch.stack(
+            [B.abs().max(dim=0).values for B in evolving_states],
+        )
+        .max(dim=0)
+        .values
+    )
+    return [
+        torch.where(B.abs() <= rtol * scale, torch.zeros_like(B), B)
+        for B in evolving_states
+    ]
+
+
 def _evolving_cross_product(evolving_states: list[torch.Tensor]) -> torch.Tensor:
     """`B_i.T @ B_i`, the PARAFAC2 invariant, averaged over subjects.
 
@@ -579,12 +604,17 @@ def _compute_PARAFAC2_matcouply(
         # factors; synthesise ones so the contract matches TensorLy's.
         _, (A, evolving_states, C) = cmf
         evolving_states = list(evolving_states)
-        # A negligible loading means "not expressed"; see
+        # A negligible entry means "not expressed"; see
         # `_zero_negligible_loadings` for why leaving the residue is unsafe.
         if nn_modes and 0 in nn_modes:
             A = _zero_negligible_loadings(A, negligible_rtol)
         if nn_modes and 2 in nn_modes:
             C = _zero_negligible_loadings(C, negligible_rtol)
+        if nn_modes and 1 in nn_modes:
+            evolving_states = _zero_negligible_evolving(
+                evolving_states,
+                negligible_rtol,
+            )
         weights = torch.ones(rank, dtype=A.dtype, device=A.device)
         if normalize_factors:
             weights, A, evolving_states, C = _normalize_parafac2_factors(
