@@ -15,6 +15,79 @@ from tlviz.factor_tools import factor_match_score
 from tqdm import tqdm
 
 
+#: One fit's factors. For PARAFAC2 the middle entry is a ragged list of
+#: per-subject evolving states; for CP it is a regular matrix.
+Factors = list[Any]
+
+
+def _comparable_modes(factors: Factors) -> list[torch.Tensor]:
+    """The modes that mean the same thing across two disjoint-subject fits.
+
+    CP's `[A, B, C]` are all regular and shared, so it passes through
+    unchanged. PARAFAC2's evolving mode is indexed by *that subject's* own
+    timepoints, so it is dropped; `A` is kept only so `skip_mode=0` still
+    names mode 0.
+    """
+    subject_mode, evolving, label_mode = factors
+    if isinstance(evolving, torch.Tensor):
+        return [subject_mode, evolving, label_mode]
+    return [subject_mode, label_mode]
+
+
+def _factor_to_cpu(factor: Any) -> Any:
+    """Move one factor to CPU, ragged evolving-state lists included."""
+    if isinstance(factor, torch.Tensor):
+        return factor.cpu()
+    return [f.cpu() for f in factor]
+
+
+def _align_pair(
+    factors_i: Factors,
+    rows_i: list[int],
+    factors_j: Factors,
+    rows_j: list[int],
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
+    """Restrict two fits to the same subjects, as regular matrices.
+
+    Mode 0 is row-selected. PARAFAC2's evolving mode is a ragged list, which
+    `factor_match_score` rejects outright -- `tlviz` raises `TypeError` on a
+    list sitting beside tensors -- so the selected `B_i` are concatenated
+    into one `(sum_i J_i, rank)` matrix.
+
+    That stacking is exact rather than a convenience: the PARAFAC2 constraint
+    fixes `||B_i[:, r]||` independent of `i`, so the stacked column cosine
+    equals the mean per-subject cosine, and a subject with 2 timepoints
+    weighs the same as one with 40.
+
+    Both fits are built here together so the per-subject block heights can be
+    cross-checked. A subject-index misalignment is otherwise silent whenever
+    the totals happen to agree.
+    """
+    subject_i, evolving_i, label_i = factors_i
+    subject_j, evolving_j, label_j = factors_j
+    selected_i = [subject_i[rows_i], evolving_i, label_i]
+    selected_j = [subject_j[rows_j], evolving_j, label_j]
+
+    if isinstance(evolving_i, torch.Tensor):  # CP, or any shared regular mode
+        return selected_i, selected_j
+
+    blocks_i = [evolving_i[k] for k in rows_i]
+    blocks_j = [evolving_j[k] for k in rows_j]
+    heights_i = [b.shape[0] for b in blocks_i]
+    heights_j = [b.shape[0] for b in blocks_j]
+    if heights_i != heights_j:
+        raise ValueError(
+            "The two fits disagree on how many timepoints the shared subjects "
+            f"have ({heights_i} vs {heights_j}). The same subject is "
+            "decomposed from the same slice in both fits, so this means the "
+            "subject-index mapping is wrong, not the data.",
+        )
+
+    selected_i[1] = torch.cat(blocks_i, dim=0)
+    selected_j[1] = torch.cat(blocks_j, dim=0)
+    return selected_i, selected_j
+
+
 class ReplicabilityEngine(ABC):
     """Base class for replicability analysis engines."""
 
@@ -112,15 +185,24 @@ class HalfHalfEngine(ReplicabilityEngine):
             tuple[list[int], Any, list[torch.Tensor]],
         ],
     ) -> list[tuple[int, float]]:
-        """Compute FMS between paired halves, as (split_index, fms) tuples."""
+        """Compute FMS between paired halves, as (split_index, fms) tuples.
+
+        The two halves are disjoint subject sets, so mode 0 has no
+        correspondence -- hence `skip_mode=0`. For PARAFAC2 the evolving mode
+        is per-subject and so has none either, leaving the label mode as the
+        only comparable one. It is dropped rather than summarised: the
+        subject-independent part of the evolving mode is `B_i.T @ B_i`, which
+        measures component geometry rather than shape and scores a perfect
+        1.0 for two fits with completely unrelated time courses.
+        """
         fms_results = []
         for s in range(self.repeats):
             _, weights_0, factors_0 = decomposition_results[(s, 0)]
             _, weights_1, factors_1 = decomposition_results[(s, 1)]
 
             score = factor_match_score(
-                (weights_0, factors_0),
-                (weights_1, factors_1),
+                (weights_0, _comparable_modes(factors_0)),
+                (weights_1, _comparable_modes(factors_1)),
                 skip_mode=0,
                 consider_weights=False,
             )
@@ -184,17 +266,14 @@ class CrossValidationEngine(ReplicabilityEngine):
                     if len(common_subjects) == 0:
                         continue
 
-                    # Align Mode 0 indices
                     id_map_i = {sub_id: idx for idx, sub_id in enumerate(ids_i)}
                     id_map_j = {sub_id: idx for idx, sub_id in enumerate(ids_j)}
-
-                    # Take only overlapping subjects when comparing factors
-                    fac_i_aligned = [
-                        fac_i[0][[id_map_i[s] for s in common_subjects]],
-                    ] + fac_i[1:]
-                    fac_j_aligned = [
-                        fac_j[0][[id_map_j[s] for s in common_subjects]],
-                    ] + fac_j[1:]
+                    fac_i_aligned, fac_j_aligned = _align_pair(
+                        fac_i,
+                        [id_map_i[s] for s in common_subjects],
+                        fac_j,
+                        [id_map_j[s] for s in common_subjects],
+                    )
 
                     score = factor_match_score(
                         (weights_i, fac_i_aligned),
@@ -249,10 +328,10 @@ def _decomposition_worker(
         task_args: (task_id, indices, full_tensor, rank, method, kwargs)
 
     Returns:
-        (task_id, indices, weights, factors), tensors on CPU. PARAFAC2's
-        projections are dropped: they only matter for reconstructing
-        per-subject time patterns, and its `factors = [A, B, C]` are regular
-        like CP's, so `compute_fms` needs no method-specific handling.
+        (task_id, indices, weights, factors), tensors on CPU. For PARAFAC2
+        `factors` is `[subject_mode, evolving_states, label_mode]`, whose
+        middle entry is a ragged per-subject list -- see `_align_pair` and
+        `_comparable_modes` for how the engines handle that.
     """
     task_id, indices, full_tensor, rank, method, kwargs = task_args
 
@@ -265,14 +344,20 @@ def _decomposition_worker(
             )
         elif method == "PARAFAC2":
             sub_slices = [full_tensor[i] for i in indices]
-            weights, factors, _projections, _ = run_PARAFAC2_decomposition_repeated(
+            model, _ = run_PARAFAC2_decomposition_repeated(
                 sub_slices, rank=rank, device=_get_device(sub_slices), **kwargs
             )
+            weights = model.weights
+            factors = [
+                model.subject_mode,
+                model.evolving_states,
+                model.label_mode,
+            ]
         else:
             raise ValueError(f"Unknown decomposition method: {method!r}")
 
         # Move results to CPU to avoid device memory issues in multiprocessing
-        factors = [f.cpu() for f in factors]
+        factors = [_factor_to_cpu(f) for f in factors]
         weights = weights.cpu() if isinstance(weights, torch.Tensor) else weights
 
         return task_id, indices, weights, factors

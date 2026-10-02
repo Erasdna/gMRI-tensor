@@ -8,6 +8,7 @@ import torch
 from gMRItensor import compute_CP_decomposition
 from gMRItensor import compute_PARAFAC2_decomposition
 from gMRItensor import PARAFAC2Diagnostics
+from gMRItensor import PARAFAC2Model
 from gMRItensor import run_CP_decomposition_repeated
 from gMRItensor import run_PARAFAC2_decomposition_repeated
 from gMRItensor import setup_backend
@@ -16,10 +17,10 @@ from gMRItensor.decomposition import _init_restart_worker_backend
 from gMRItensor.decomposition import _nn_violations
 from gMRItensor.decomposition import _resolve_nn_modes
 from gMRItensor.decomposition import _suggest_max_iter
+from gMRItensor.decomposition import _zero_negligible_loadings
 from gMRItensor.decomposition import ConvergenceError
-from gMRItensor.plotting.evolving_mode import reconstruct_evolving_factors
+from gMRItensor.plotting.evolving_mode import evolving_factors_to_numpy
 from gMRItensor.plotting.utils import scale_mode
-from tensorly.parafac2_tensor import Parafac2Tensor
 
 SOLVERS = ["tensorly", "matcouply"]
 
@@ -121,7 +122,7 @@ def run_PARAFAC2(use_gpu):
     device = setup_backend()
 
     slices = make_parafac2_slices(device)
-    weights, factors, projections, error = run_PARAFAC2_decomposition_repeated(
+    model, error = run_PARAFAC2_decomposition_repeated(
         slices,
         rank=2,
         max_iter=200,
@@ -130,10 +131,11 @@ def run_PARAFAC2(use_gpu):
         progress_bar=False,
     )
 
-    assert weights.shape == (2,)
-    # factors = [A (subjects x rank), B (rank x rank), C (labels x rank)]
-    assert [f.shape for f in factors] == [(3, 2), (2, 2), (5, 2)]
-    assert [p.shape for p in projections] == [(4, 2), (5, 2), (6, 2)]
+    assert model.weights.shape == (2,)
+    assert model.subject_mode.shape == (3, 2)
+    assert model.label_mode.shape == (5, 2)
+    # One (n_timepoints_i, rank) time course per subject.
+    assert [b.shape for b in model.evolving_states] == [(4, 2), (5, 2), (6, 2)]
     assert error.numel() == 1
 
 
@@ -153,7 +155,7 @@ def test_PARAFAC2_normalize_factors():
     device = setup_backend()
 
     slices = make_parafac2_slices(device)
-    _, factors, _, _ = run_PARAFAC2_decomposition_repeated(
+    model, _ = run_PARAFAC2_decomposition_repeated(
         slices,
         rank=2,
         max_iter=200,
@@ -162,9 +164,13 @@ def test_PARAFAC2_normalize_factors():
         progress_bar=False,
         normalize=True,
     )
-    for factor in factors:
+    for factor in (model.subject_mode, model.label_mode):
         norms = torch.linalg.norm(factor, dim=0)
         assert torch.allclose(norms, torch.ones_like(norms), atol=1e-4)
+    # The evolving mode shares one scalar per component across subjects, so
+    # the unit norm lives on the cross-product, not each B_i's columns.
+    gram = sum(b.T @ b for b in model.evolving_states) / len(model.evolving_states)
+    assert torch.allclose(torch.diagonal(gram), torch.ones(2), atol=1e-3)
 
 
 def test_PARAFAC2_no_convergence_raises():
@@ -274,7 +280,7 @@ def test_PARAFAC2_restart_procs_parallel_succeeds():
     device = setup_backend()
     slices = make_parafac2_slices(device)
 
-    weights, factors, projections, error = run_PARAFAC2_decomposition_repeated(
+    model, error = run_PARAFAC2_decomposition_repeated(
         slices,
         rank=2,
         max_iter=200,
@@ -283,7 +289,7 @@ def test_PARAFAC2_restart_procs_parallel_succeeds():
         progress_bar=False,
         restart_procs=2,
     )
-    assert weights.shape == (2,)
+    assert model.weights.shape == (2,)
     assert torch.isfinite(error)
 
 
@@ -363,7 +369,7 @@ def test_PARAFAC2_matcouply_non_negative_mode1():
     device = setup_backend()
     slices = make_parafac2_slices(device)
 
-    _, factors, projections, _ = run_PARAFAC2_decomposition_repeated(
+    model, _ = run_PARAFAC2_decomposition_repeated(
         slices,
         rank=2,
         max_iter=500,
@@ -373,14 +379,12 @@ def test_PARAFAC2_matcouply_non_negative_mode1():
         solver="matcouply",
         nn_modes=(0, 1, 2),
     )
-    assert (factors[0] >= -1e-6).all()
-    assert (factors[2] >= -1e-6).all()
-    # factors[1] is AO-ADMM's *coordinate matrix*, not a per-subject factor,
-    # and is expected to carry negative entries even under a fully
-    # non-negative fit. The constraint holds on projections[i] @ factors[1],
-    # which is the quantity with a physical meaning.
-    for projection in projections:
-        assert (projection @ factors[1] >= -1e-4).all()
+    assert (model.subject_mode >= -1e-6).all()
+    assert (model.label_mode >= -1e-6).all()
+    # The evolving states are matcouply's primal, constrained directly --
+    # not rebuilt from a projection, which is what used to flip signs.
+    for evolving in model.evolving_states:
+        assert (evolving >= -1e-4).all()
 
 
 def test_PARAFAC2_tensorly_rejects_nn_mode1():
@@ -455,7 +459,7 @@ def test_PARAFAC2_matcouply_restart_procs_parallel_succeeds():
     device = setup_backend()
     slices = make_parafac2_slices(device)
 
-    weights, _, _, error = run_PARAFAC2_decomposition_repeated(
+    model, error = run_PARAFAC2_decomposition_repeated(
         slices,
         rank=2,
         max_iter=500,
@@ -465,7 +469,7 @@ def test_PARAFAC2_matcouply_restart_procs_parallel_succeeds():
         solver="matcouply",
         restart_procs=2,
     )
-    assert weights.shape == (2,)
+    assert model.weights.shape == (2,)
     assert torch.isfinite(error)
 
 
@@ -477,7 +481,7 @@ def test_PARAFAC2_matcouply_normalize_factors():
     device = setup_backend()
     slices = make_parafac2_slices(device)
 
-    weights, factors, _, _ = run_PARAFAC2_decomposition_repeated(
+    model, _ = run_PARAFAC2_decomposition_repeated(
         slices,
         rank=2,
         max_iter=500,
@@ -487,30 +491,40 @@ def test_PARAFAC2_matcouply_normalize_factors():
         solver="matcouply",
         normalize=True,
     )
-    for factor in factors:
+    for factor in (model.subject_mode, model.label_mode):
         norms = torch.linalg.norm(factor, dim=0)
         assert torch.allclose(norms, torch.ones_like(norms), atol=1e-4)
-    assert not torch.allclose(weights, torch.ones_like(weights))
+    assert not torch.allclose(model.weights, torch.ones_like(model.weights))
 
 
-def test_PARAFAC2_matcouply_projections_orthonormal():
-    # Guards the undocumented matcouply layout this wrapper reads the
-    # basis/coordinate matrices out of (auxes[1][0]): if a future matcouply
-    # reorders its penalties, the "projections" would stop being orthonormal
-    # here rather than failing loudly elsewhere.
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_PARAFAC2_return_projections_opt_in(solver):
+    # The Kiers form is available on request but never by default: rebuilding
+    # B_i = P_i @ Delta is what introduced per-subject sign flips, so the
+    # default path must not depend on it.
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     device = setup_backend()
     slices = make_parafac2_slices(device)
-
-    _, _, projections, _ = run_PARAFAC2_decomposition_repeated(
-        slices,
+    common = dict(
         rank=2,
         max_iter=500,
         init_repeats=2,
         device=device,
         progress_bar=False,
-        solver="matcouply",
+        solver=solver,
     )
+
+    default_model, _ = run_PARAFAC2_decomposition_repeated(slices, **common)
+    assert default_model.kiers is None
+
+    model, _ = run_PARAFAC2_decomposition_repeated(
+        slices,
+        return_projections=True,
+        **common,
+    )
+    coordinate_matrix, projections = model.kiers
+    assert tuple(coordinate_matrix.shape) == (2, 2)
+    assert [tuple(p.shape) for p in projections] == [(4, 2), (5, 2), (6, 2)]
     identity = torch.eye(2)
     for projection in projections:
         assert torch.allclose(projection.T @ projection, identity, atol=1e-5)
@@ -603,7 +617,7 @@ def test_PARAFAC2_matcouply_gpu():
     device = setup_backend()
     slices = make_parafac2_slices(device)
 
-    weights, factors, projections, error = run_PARAFAC2_decomposition_repeated(
+    model, error = run_PARAFAC2_decomposition_repeated(
         slices,
         rank=2,
         max_iter=500,
@@ -612,9 +626,9 @@ def test_PARAFAC2_matcouply_gpu():
         progress_bar=False,
         solver="matcouply",
     )
-    assert weights.shape == (2,)
-    assert [f.shape for f in factors] == [(3, 2), (2, 2), (5, 2)]
-    assert [p.shape for p in projections] == [(4, 2), (5, 2), (6, 2)]
+    assert model.weights.shape == (2,)
+    assert model.subject_mode.shape == (3, 2)
+    assert [b.shape for b in model.evolving_states] == [(4, 2), (5, 2), (6, 2)]
     assert torch.isfinite(error)
 
 
@@ -854,29 +868,43 @@ def test_PARAFAC2_return_contract(solver):
     )
 
     result = run_PARAFAC2_decomposition_repeated(slices, **common)
-    assert len(result) == 4
-    weights, factors, projections, error = result
+    assert len(result) == 2
+    model, error = result
 
     with_diagnostics = run_PARAFAC2_decomposition_repeated(
         slices,
         return_diagnostics=True,
         **common,
     )
-    assert len(with_diagnostics) == 5
-    assert isinstance(with_diagnostics[4], PARAFAC2Diagnostics)
+    assert len(with_diagnostics) == 3
+    assert isinstance(with_diagnostics[2], PARAFAC2Diagnostics)
 
-    assert isinstance(weights, torch.Tensor)
-    assert isinstance(factors, list) and len(factors) == 3
-    assert isinstance(projections, list) and len(projections) == len(slices)
+    assert isinstance(model, PARAFAC2Model)
+    assert isinstance(model.weights, torch.Tensor)
+    assert isinstance(model.evolving_states, list)
+    assert len(model.evolving_states) == len(slices)
     assert isinstance(error, torch.Tensor)
 
-    assert tuple(weights.shape) == (2,)
-    assert [tuple(f.shape) for f in factors] == [(3, 2), (2, 2), (5, 2)]
-    assert [tuple(p.shape) for p in projections] == [(4, 2), (5, 2), (6, 2)]
+    assert tuple(model.weights.shape) == (2,)
+    assert tuple(model.subject_mode.shape) == (3, 2)
+    assert tuple(model.label_mode.shape) == (5, 2)
+    assert [tuple(b.shape) for b in model.evolving_states] == [
+        (4, 2),
+        (5, 2),
+        (6, 2),
+    ]
+    # Each subject's evolving state has that subject's own row count.
+    assert [b.shape[0] for b in model.evolving_states] == [s.shape[0] for s in slices]
 
     # matcouply runs in float64 internally; it must still hand back float32
     # CPU tensors like the TensorLy path does.
-    for tensor in [weights, error, *factors, *projections]:
+    for tensor in [
+        model.weights,
+        model.subject_mode,
+        model.label_mode,
+        error,
+        *model.evolving_states,
+    ]:
         assert tensor.dtype == torch.float32
         assert tensor.device.type == "cpu"
 
@@ -886,9 +914,9 @@ def test_PARAFAC2_return_contract(solver):
 
 
 @pytest.mark.parametrize("solver", SOLVERS)
-def test_compute_PARAFAC2_returns_parafac2_tensor(solver):
-    # Anything typed against TensorLy's container keeps working for both
-    # solvers -- the matcouply result is adapted, not a parallel type.
+def test_compute_PARAFAC2_returns_model(solver):
+    # Both solvers return the same coupled-matrix type, so callers never
+    # branch on solver.
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     device = setup_backend()
     slices = make_parafac2_slices(device)
@@ -899,7 +927,7 @@ def test_compute_PARAFAC2_returns_parafac2_tensor(solver):
         PARAFAC2_max_iter=500,
         solver=solver,
     )
-    assert isinstance(result, Parafac2Tensor)
+    assert isinstance(result, PARAFAC2Model)
     assert isinstance(errors, list) and errors
     assert isinstance(diagnostics, PARAFAC2Diagnostics)
     assert diagnostics.solver == solver
@@ -915,26 +943,30 @@ def test_PARAFAC2_solvers_are_structurally_interchangeable():
     tensorly_fit, matcouply_fit = fits["tensorly"], fits["matcouply"]
 
     assert len(tensorly_fit) == len(matcouply_fit)
-    for left, right in zip(tensorly_fit, matcouply_fit):
-        assert type(left) is type(right)
-        if isinstance(left, torch.Tensor):
-            assert left.shape == right.shape
-            assert left.dtype == right.dtype
-            assert left.device == right.device
-        elif isinstance(left, list):
-            assert len(left) == len(right)
-            for left_item, right_item in zip(left, right):
-                assert left_item.shape == right_item.shape
-                assert left_item.dtype == right_item.dtype
-                assert left_item.device == right_item.device
+    left_model, right_model = tensorly_fit[0], matcouply_fit[0]
+    for field in ("weights", "subject_mode", "label_mode"):
+        left = getattr(left_model, field)
+        right = getattr(right_model, field)
+        assert left.shape == right.shape
+        assert left.dtype == right.dtype
+        assert left.device == right.device
+    assert len(left_model.evolving_states) == len(right_model.evolving_states)
+    for left, right in zip(
+        left_model.evolving_states,
+        right_model.evolving_states,
+    ):
+        assert left.shape == right.shape
+        assert left.dtype == right.dtype
+        assert left.device == right.device
+    assert (left_model.kiers is None) == (right_model.kiers is None)
 
 
 def test_PARAFAC2_diagnostics_fields_line_up_across_solvers():
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     device = setup_backend()
     _, fits = fit_both_solvers(device)
-    tensorly_diag = fits["tensorly"][4]
-    matcouply_diag = fits["matcouply"][4]
+    tensorly_diag = fits["tensorly"][2]
+    matcouply_diag = fits["matcouply"][2]
 
     field_names = [f.name for f in dataclasses.fields(PARAFAC2Diagnostics)]
     assert [f.name for f in dataclasses.fields(tensorly_diag)] == field_names
@@ -966,7 +998,7 @@ def test_PARAFAC2_diagnostics_fields_line_up_across_solvers():
 
     # The returned error is the quantity the diagnostics report.
     for solver in SOLVERS:
-        error, diagnostics = fits[solver][3], fits[solver][4]
+        error, diagnostics = fits[solver][1], fits[solver][2]
         assert float(error) == pytest.approx(
             diagnostics.relative_reconstruction_error,
             rel=1e-5,
@@ -989,12 +1021,12 @@ def test_PARAFAC2_one_kwargs_dict_routes_to_either_solver():
     )
 
     for solver in SOLVERS:
-        weights, _, _, error = run_PARAFAC2_decomposition_repeated(
+        model, error = run_PARAFAC2_decomposition_repeated(
             slices,
             solver=solver,
             **shared,
         )
-        assert tuple(weights.shape) == (2,)
+        assert tuple(model.weights.shape) == (2,)
         assert torch.isfinite(error)
 
 
@@ -1006,11 +1038,9 @@ def test_PARAFAC2_one_kwargs_dict_routes_to_either_solver():
 def make_parafac2_unexpressed_component(device, n_subjects=16, n_labels=24, rank=2):
     """Data where some regions carry no signal, so a loading should be 0.
 
-    This is the shape that exposes the bug: AO-ADMM enforces non-negativity
-    exactly on its *auxiliary* variables and only to within the feasibility
-    gap on the primal. A loading that should be exactly 0 lands at about
-    -1e-07 in the primal, which is enough to flip the sign of everything it
-    multiplies.
+    A subject that barely expresses a component is where the old Kiers
+    retrofit went wrong: the Procrustes fit for that direction was weakly
+    determined and could land reflected, mirroring that subject's curve.
     """
     rng = np.random.default_rng(1)
     subject = np.abs(rng.normal(size=(n_subjects, rank))) + 0.5
@@ -1042,7 +1072,7 @@ def test_PARAFAC2_matcouply_subject_mode_exactly_non_negative():
     device = setup_backend()
     slices = make_parafac2_unexpressed_component(device)
 
-    _, factors, _, _ = run_PARAFAC2_decomposition_repeated(
+    model, _ = run_PARAFAC2_decomposition_repeated(
         slices,
         rank=3,
         max_iter=1500,
@@ -1051,8 +1081,8 @@ def test_PARAFAC2_matcouply_subject_mode_exactly_non_negative():
         progress_bar=False,
         solver="matcouply",
     )
-    assert factors[0].min() >= 0.0
-    assert factors[2].min() >= 0.0
+    assert model.subject_mode.min() >= 0.0
+    assert model.label_mode.min() >= 0.0
 
 
 def test_PARAFAC2_matcouply_amplitude_scaled_profiles_keep_sign():
@@ -1064,7 +1094,7 @@ def test_PARAFAC2_matcouply_amplitude_scaled_profiles_keep_sign():
     device = setup_backend()
     slices = make_parafac2_unexpressed_component(device)
 
-    _, factors, projections, _ = run_PARAFAC2_decomposition_repeated(
+    model, _ = run_PARAFAC2_decomposition_repeated(
         slices,
         rank=3,
         max_iter=1500,
@@ -1073,13 +1103,8 @@ def test_PARAFAC2_matcouply_amplitude_scaled_profiles_keep_sign():
         progress_bar=False,
         solver="matcouply",
     )
-    subject_mode, time_mode, roi_mode = factors
-    evolving = reconstruct_evolving_factors(
-        np.ones(time_mode.shape[-1]),
-        (subject_mode, time_mode, roi_mode),
-        projections,
-    )
-    amplitude_scaled = np.stack(evolving) * subject_mode.numpy()[:, None, :]
+    evolving = evolving_factors_to_numpy(model.evolving_states)
+    amplitude_scaled = np.stack(evolving) * model.subject_mode.numpy()[:, None, :]
     scaled = np.stack([scale_mode(s) for s in amplitude_scaled])
 
     assert not np.isnan(scaled).any()
@@ -1090,15 +1115,14 @@ def test_PARAFAC2_matcouply_amplitude_scaled_profiles_keep_sign():
             assert not ((curve <= 1e-12).all() and np.abs(curve).max() > 0.1)
 
 
-def test_PARAFAC2_unconstrained_mode_returns_primal():
-    # Only constrained modes have a non-negativity auxiliary to read, so an
-    # unconstrained mode must fall back to the primal rather than indexing
-    # into an empty aux list.
+def test_PARAFAC2_partial_nn_modes():
+    # Only mode 0 constrained: the other modes are free, and nothing in the
+    # contract changes.
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     device = setup_backend()
     slices = make_parafac2_slices(device)
 
-    _, factors, _, _ = run_PARAFAC2_decomposition_repeated(
+    model, _ = run_PARAFAC2_decomposition_repeated(
         slices,
         rank=2,
         max_iter=500,
@@ -1108,8 +1132,13 @@ def test_PARAFAC2_unconstrained_mode_returns_primal():
         solver="matcouply",
         nn_modes=(0,),
     )
-    assert factors[0].min() >= 0.0
-    assert [tuple(f.shape) for f in factors] == [(3, 2), (2, 2), (5, 2)]
+    assert model.subject_mode.min() >= -1e-6
+    assert tuple(model.subject_mode.shape) == (3, 2)
+    assert [tuple(b.shape) for b in model.evolving_states] == [
+        (4, 2),
+        (5, 2),
+        (6, 2),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1144,10 +1173,67 @@ def test_nn_violation_is_relative_per_component():
     # flips every curve it multiplies.
     weak = torch.tensor([[1.0, -1e-7], [2.0, 1e-7]])
     strong = torch.tensor([[1.0, 2.0], [2.0, 1.0]])
-    projections = [torch.eye(2)]
 
-    violations = _nn_violations([weak, strong, strong], projections, (0,))
+    def model(subject_mode):
+        return PARAFAC2Model(
+            weights=torch.ones(2),
+            subject_mode=subject_mode,
+            evolving_states=[strong],
+            label_mode=strong,
+        )
+
+    violations = _nn_violations(model(weak), (0,))
     assert violations[0] == pytest.approx(1.0, rel=1e-6)
 
-    clean = _nn_violations([strong, strong, strong], projections, (0,))
+    clean = _nn_violations(model(strong), (0,))
     assert clean[0] == 0.0
+
+
+def test_zero_negligible_loadings_both_signs():
+    # A loading negligible relative to its component means the subject does
+    # not express it. Sign is irrelevant to that judgement -- and a small
+    # POSITIVE loading is just as dangerous as a negative one, since
+    # normalising the amplitude-scaled curve restores either to full
+    # amplitude.
+    factor = torch.tensor(
+        [
+            [1.0, 1.0],
+            [2.0, -3e-8],  # negligible, negative
+            [4.0, 5e-8],  # negligible, positive
+            [0.5, 0.25],  # small but real -- must survive
+        ],
+    )
+    zeroed = _zero_negligible_loadings(factor, rtol=1e-6)
+
+    assert zeroed[1, 1] == 0.0
+    assert zeroed[2, 1] == 0.0
+    assert zeroed[3, 1] == pytest.approx(0.25)
+    # The other component is untouched: the tolerance is per component.
+    assert torch.equal(zeroed[:, 0], factor[:, 0])
+    # rtol=0 disables it entirely.
+    assert torch.equal(_zero_negligible_loadings(factor, rtol=0.0), factor)
+
+
+def test_PARAFAC2_negligible_loadings_become_exactly_zero():
+    # End to end: an unexpressed subject-component should read as 0, not as
+    # solver residue whose sign flips the whole curve.
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    slices = make_parafac2_unexpressed_component(device)
+
+    model, _ = run_PARAFAC2_decomposition_repeated(
+        slices,
+        rank=3,
+        max_iter=1500,
+        init_repeats=2,
+        device=device,
+        progress_bar=False,
+        solver="matcouply",
+    )
+    # No residue of either sign survives in a constrained mode.
+    assert model.subject_mode.min() >= 0.0
+    assert model.label_mode.min() >= 0.0
+    nonzero = model.subject_mode[model.subject_mode != 0]
+    if nonzero.numel():
+        scale = model.subject_mode.abs().max()
+        assert (nonzero.abs() > 1e-6 * scale).all()

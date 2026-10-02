@@ -11,7 +11,6 @@ from gMRItensor.plotting.utils import scale_mode
 from scipy.stats import kruskal
 from scipy.stats import mannwhitneyu
 from statsmodels.stats.multitest import multipletests
-from tensorly.parafac2_tensor import apply_parafac2_projections
 
 plt.style.use(["science", "no-latex"])
 matplotlib.use("Agg")
@@ -23,23 +22,16 @@ def _to_numpy(array: torch.Tensor | np.ndarray) -> np.ndarray:
     return np.asarray(array)
 
 
-def reconstruct_evolving_factors(
-    weights: torch.Tensor | np.ndarray,
-    factors: list[torch.Tensor] | list[np.ndarray],
-    projections: list[torch.Tensor] | list[np.ndarray],
+def evolving_factors_to_numpy(
+    evolving_states: list[torch.Tensor] | list[np.ndarray],
 ) -> list[np.ndarray]:
-    """Reconstruct each subject's own PARAFAC2 evolving-mode (time) factor.
+    """Convert a model's `evolving_states` to numpy for plotting.
 
-    The shared basis `factors[1]` is not interpretable per subject; each
-    subject's time pattern is `projections[i] @ factors[1]`. Takes
-    `run_PARAFAC2_decomposition_repeated`'s output and returns one
-    `(n_timepoints_i, rank)` numpy array per subject, since the rest of this
-    module works in numpy rather than torch.
+    `run_PARAFAC2_decomposition_repeated` now returns each subject's time
+    course directly, so no reconstruction is needed -- this only bridges
+    torch to the numpy the rest of this module works in.
     """
-    _, (_, evolving_factors, _) = apply_parafac2_projections(
-        (weights, factors, projections),
-    )
-    return [_to_numpy(factor) for factor in evolving_factors]
+    return [_to_numpy(factor) for factor in evolving_states]
 
 
 def _build_long_evolving_dataframe(

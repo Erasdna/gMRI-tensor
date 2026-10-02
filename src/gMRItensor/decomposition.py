@@ -18,7 +18,7 @@ from typing import overload
 import tensorly as tl
 import torch
 from matcouply.decomposition import parafac2_aoadmm
-from tensorly.parafac2_tensor import Parafac2Tensor
+from tensorly.parafac2_tensor import apply_parafac2_projections
 from tensorly.tenalg.core_tenalg.mttkrp import unfolding_dot_khatri_rao_memory
 from tlviz.factor_tools import degeneracy_score
 from tqdm import tqdm
@@ -96,6 +96,31 @@ class PARAFAC2Diagnostics:
     max_feasibility_gap: float | None = None
     feasibility_tol: float | None = None
     message: str = ""
+
+
+@dataclass(frozen=True)
+class PARAFAC2Model:
+    """A fitted PARAFAC2 model, in coupled-matrix form.
+
+    `evolving_states[i]` is subject `i`'s own `(n_timepoints_i, rank)` time
+    course -- directly interpretable, and what both solvers now return. This
+    is matcouply's native form; TensorLy is converted into it with its public
+    `apply_parafac2_projections`.
+
+    `kiers` holds the compact `(coordinate_matrix, projections)`
+    parametrization with `evolving_states[i] == projections[i] @
+    coordinate_matrix`. It is populated only when the caller asks for it, and
+    is deliberately not the primary form: `coordinate_matrix` is identifiable
+    only up to an orthogonal rotation (`Delta -> Q Delta` with `P_i -> P_i
+    Q.T` leaves the model unchanged), so it must never be compared across
+    fits.
+    """
+
+    weights: torch.Tensor
+    subject_mode: torch.Tensor
+    evolving_states: list[torch.Tensor]
+    label_mode: torch.Tensor
+    kiers: tuple[torch.Tensor, list[torch.Tensor]] | None = None
 
 
 #: `parafac2_aoadmm` arguments callers may set via `aoadmm_options`.
@@ -234,17 +259,7 @@ def compute_CP_decomposition(
 @contextmanager
 def _matcouply_numeric_context(device: torch.device) -> Iterator[None]:
     """Make torch's defaults float64-on-`device` for the duration of a fit.
-
-    matcouply mixes `tl.tensor(numpy_array)` (always float64 CPU under the
-    pytorch backend) with `tl.eye`/`tl.zeros` (which follow torch's
-    defaults), and never threads `tl.context` through. Under this package's
-    float32 CUDA setup the two disagree and matcouply raises a dtype or
-    device mismatch. float32 is unreachable without patching matcouply;
-    results are cast back on the way out.
-
-    Scoped per fit rather than set in `setup_backend`, which would push the
-    CP path to float64 too. Spawned restart workers reach it automatically
-    via `_restart_worker`.
+    Necessary to be compatible with matcouply, which does not accept float32.
 
     These are process-global torch settings, safe only because restarts are
     process-parallel rather than threaded.
@@ -318,131 +333,121 @@ def _build_aoadmm_options(
     return options
 
 
-def _normalize_parafac2_factors(
-    weights: torch.Tensor,
-    factors: list[torch.Tensor],
+def _matcouply_kiers_form(
+    admm_vars: Any,
 ) -> tuple[torch.Tensor, list[torch.Tensor]]:
-    """Scale each factor's columns to unit norm, folding norms into `weights`.
+    """Read `(coordinate_matrix, projections)` out of matcouply's ADMM state.
 
-    Reproduces TensorLy's `normalize_factors` semantics, which matcouply
-    lacks. Well defined for PARAFAC2 because the projections are orthonormal
-    (`||P_i @ B[:, r]|| == ||B[:, r]||`), so normalizing the shared
-    coordinate matrix rescales every subject's time curve equally.
+    `matcouply.penalties.Parafac2`'s auxiliary is exactly the Kiers
+    parametrization. Only consulted when the caller asks for the compact
+    form; the default path never touches it, since rebuilding `B_i` from it
+    is what introduced per-subject sign flips.
+
+    `auxes[1][0]` is internal matcouply layout, so it is checked rather than
+    trusted.
     """
-    scaled_weights = weights.clone()
-    scaled_factors = []
-    for factor in factors:
-        norms = torch.linalg.norm(factor, dim=0)
-        # All-zero columns contribute no weight either way; avoid dividing by 0.
-        safe_norms = torch.where(norms > 0, norms, torch.ones_like(norms))
-        scaled_factors.append(factor / safe_norms)
-        scaled_weights = scaled_weights * safe_norms
-    return scaled_weights, scaled_factors
-
-
-def _constrained_factor(
-    admm_vars: Any,
-    mode: int,
-    primal: torch.Tensor,
-    nn_modes: tuple[int, ...] | None,
-) -> torch.Tensor:
-    """Return the factor that actually satisfies the non-negativity constraint.
-
-    AO-ADMM splits each factor into a primal variable, which fits the data,
-    and an auxiliary, which satisfies the constraint. They agree only at
-    exact convergence, so matcouply's returned primal is non-negative merely
-    to within the feasibility gap -- in testing its minimum sat at -7.7e-07
-    where the auxiliary's was exactly 0.
-
-    That residue is not harmless. A subject that does not express a
-    component should load 0 on it; a loading of -1e-07 instead flips the sign
-    of everything it multiplies, and `scale_mode` then renormalizes the
-    result back to full amplitude -- turning numerical dust into an
-    entirely negative, mirrored curve.
-
-    Only modes with a non-negativity penalty have an auxiliary to read.
-    """
-    if not nn_modes or mode not in nn_modes:
-        return primal
-    auxes = admm_vars.auxes[mode]
-    return auxes[0] if auxes else primal
-
-
-def _matcouply_to_parafac2_tensor(
-    cmf: Any,
-    admm_vars: Any,
-    rank: int,
-    normalize_factors: bool,
-    nn_modes: tuple[int, ...] | None,
-) -> Parafac2Tensor:
-    """Adapt matcouply's output to TensorLy's `Parafac2Tensor` contract.
-
-    matcouply returns `(weights, (A, B_is, C))` with `weights=None` and
-    `B_is` a ragged list of per-slice `(J_i, rank)` matrices, rather than the
-    `(weights, [A, B, C], projections)` form the rest of this package expects.
-
-    `matcouply.penalties.Parafac2`'s auxiliary variable is exactly the Kiers
-    parametrization `B_i = P_i @ B` -- orthonormal basis matrices plus the
-    shared `rank x rank` coordinate matrix -- so reading it back recovers
-    TensorLy's representation to ~1e-7 relative error. This is what lets
-    downstream consumers work unchanged for both solvers.
-
-    Modes 0 and 2 are taken from their non-negativity auxiliaries rather
-    than the primal, so a requested constraint actually holds in what is
-    returned (see `_constrained_factor`). Mode 1 must keep the PARAFAC2
-    auxiliary, since that is what supplies `P_i` and the coordinate matrix,
-    so `projections[i] @ factors[1]` stays non-negative only to within the
-    feasibility gap -- reported by `_check_nn_modes_satisfied` rather than
-    silently corrected.
-
-    `factors[1]` (the coordinate matrix) is NOT non-negative even when mode 1
-    is constrained; non-negativity holds on `projections[i] @ factors[1]`.
-    """
-    _, (A, _B_is, C) = cmf
-    mode_1_auxes = admm_vars.auxes[1]
-    # auxes[1][0] holding the (basis_matrices, coordinate_matrix) pair is
-    # internal matcouply layout, so check it rather than trusting it.
     layout_error = (
         "Could not read the PARAFAC2 basis/coordinate matrices out of "
         "matcouply's ADMM auxiliary variables; auxes[1][0] is expected to be "
         "the (basis_matrices, coordinate_matrix) pair. This is internal "
         "matcouply layout and appears to have changed"
     )
+    mode_1_auxes = admm_vars.auxes[1]
     if not mode_1_auxes or not isinstance(mode_1_auxes[0], tuple):
         raise RuntimeError(f"{layout_error}.")
-
-    parafac2_aux = mode_1_auxes[0]
-    if len(parafac2_aux) != 2:
+    if len(mode_1_auxes[0]) != 2:
         raise RuntimeError(f"{layout_error} (expected a 2-tuple).")
-    basis_matrices, coordinate_matrix = parafac2_aux
 
-    if tuple(coordinate_matrix.shape) != (rank, rank):
-        raise RuntimeError(
-            f"{layout_error}: expected a {rank}x{rank} coordinate matrix, got "
-            f"{tuple(coordinate_matrix.shape)}.",
-        )
-    if len(basis_matrices) != A.shape[0]:
-        raise RuntimeError(
-            f"{layout_error}: expected {A.shape[0]} basis matrices, got "
-            f"{len(basis_matrices)}.",
-        )
-    for index, (basis, B_i) in enumerate(zip(basis_matrices, _B_is)):
-        if tuple(basis.shape) != (B_i.shape[0], rank):
-            raise RuntimeError(
-                f"{layout_error}: basis matrix {index} has shape "
-                f"{tuple(basis.shape)}, expected {(B_i.shape[0], rank)}.",
-            )
+    basis_matrices, coordinate_matrix = mode_1_auxes[0]
+    return coordinate_matrix, list(basis_matrices)
 
-    weights = torch.ones(rank, dtype=A.dtype, device=A.device)
-    factors = [
-        _constrained_factor(admm_vars, 0, A, nn_modes),
-        coordinate_matrix,
-        _constrained_factor(admm_vars, 2, C, nn_modes),
-    ]
-    if normalize_factors:
-        weights, factors = _normalize_parafac2_factors(weights, factors)
 
-    return Parafac2Tensor((weights, factors, list(basis_matrices)))
+def _zero_negligible_loadings(
+    factor: torch.Tensor,
+    rtol: float,
+) -> torch.Tensor:
+    """Zero entries too small to mean anything, per component.
+
+    A loading this far below its component's largest means the subject (or
+    region) does not express that component. Leaving it as solver residue is
+    not harmless: AO-ADMM returns the primal, which sits within the
+    feasibility gap of non-negative, so such an entry can be ~-1e-08. Using
+    it as a multiplier propagates that sign, and normalizing the result
+    restores it to full amplitude as a mirrored curve.
+
+    Scaled per component rather than absolutely, so it adapts to however the
+    fit distributed scale between the modes.
+    """
+    if rtol <= 0:
+        return factor
+    scale = factor.abs().max(dim=0, keepdim=True).values
+    return torch.where(factor.abs() <= rtol * scale, torch.zeros_like(factor), factor)
+
+
+def _evolving_cross_product(evolving_states: list[torch.Tensor]) -> torch.Tensor:
+    """`B_i.T @ B_i`, the PARAFAC2 invariant, averaged over subjects.
+
+    The constraint makes this identical for every subject, so it is the only
+    subject-independent summary of the evolving mode. Averaged rather than
+    taken from subject 0 because matcouply's primal satisfies the constraint
+    only to within the feasibility gap.
+    """
+    grams = torch.stack([B.T @ B for B in evolving_states])
+    return grams.mean(dim=0)
+
+
+def _cross_product_factor(evolving_states: list[torch.Tensor]) -> torch.Tensor:
+    """A `(rank, rank)` stand-in for the ragged evolving mode.
+
+    Any matrix whose Gram equals `B_i.T @ B_i` has the same component
+    cosines as every `B_i`, which is all `degeneracy_score` needs. Built with
+    `eigh` and a clamp rather than Cholesky: a collapsed component makes the
+    cross-product singular, which Cholesky rejects outright.
+    """
+    eigenvalues, eigenvectors = torch.linalg.eigh(
+        _evolving_cross_product(evolving_states),
+    )
+    return (eigenvectors * torch.sqrt(eigenvalues.clamp(min=0.0))).T
+
+
+def _normalize_parafac2_factors(
+    weights: torch.Tensor,
+    subject_mode: torch.Tensor,
+    evolving_states: list[torch.Tensor],
+    label_mode: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor], torch.Tensor]:
+    """Scale each mode's components to unit norm, folding scale into `weights`.
+
+    The evolving mode needs one scalar per component shared by **every**
+    subject, not a per-subject column norm. Normalizing each `B_i`
+    independently would destroy `B_i.T @ B_i = Phi`, which is the PARAFAC2
+    constraint itself -- and silently corrupt any replicability comparison
+    built on it. `sqrt(diag(Phi))` is the shared per-component norm.
+    """
+    scaled_weights = weights.clone()
+    scaled = []
+    for factor in (subject_mode, label_mode):
+        norms = torch.linalg.norm(factor, dim=0)
+        safe = torch.where(norms > 0, norms, torch.ones_like(norms))
+        scaled.append(factor / safe)
+        scaled_weights = scaled_weights * safe
+
+    evolving_norms = torch.sqrt(
+        torch.diagonal(_evolving_cross_product(evolving_states)).clamp(min=0.0),
+    )
+    safe_evolving = torch.where(
+        evolving_norms > 0,
+        evolving_norms,
+        torch.ones_like(evolving_norms),
+    )
+    scaled_weights = scaled_weights * safe_evolving
+
+    return (
+        scaled_weights,
+        scaled[0],
+        [B / safe_evolving for B in evolving_states],
+        scaled[1],
+    )
 
 
 def _as_optional_bool(value: Any) -> bool | None:
@@ -532,8 +537,16 @@ def _compute_PARAFAC2_matcouply(
     nn_modes: tuple[int, ...] | None,
     aoadmm_options: dict[str, Any] | None,
     aoadmm_loss_tolerance: float,
-) -> tuple[Parafac2Tensor, list[torch.Tensor], PARAFAC2Diagnostics]:
-    """Fit PARAFAC2 with matcouply's AO-ADMM and adapt it to TensorLy's shape.
+    return_projections: bool,
+    negligible_rtol: float,
+) -> tuple[PARAFAC2Model, list[torch.Tensor], PARAFAC2Diagnostics]:
+    """Fit PARAFAC2 with matcouply's AO-ADMM.
+
+    Returns matcouply's primal `cmf` essentially as-is. It is deliberately
+    NOT converted to TensorLy's `(A, Delta, C) + projections` form: rebuilding
+    `B_i = P_i @ Delta` runs an orthogonal Procrustes fit whose solution is
+    weakly determined for a subject that barely expresses a component, and can
+    land on a reflected `P_i` -- flipping that subject's whole curve.
 
     See `compute_PARAFAC2_decomposition` for the two-threshold convergence
     scheme this implements.
@@ -562,12 +575,30 @@ def _compute_PARAFAC2_matcouply(
             return_admm_vars=True,
             **options,
         )
-        result = _matcouply_to_parafac2_tensor(
-            cmf,
-            admm_vars,
-            rank,
-            normalize_factors,
-            nn_modes,
+        # matcouply leaves `weights` as None, distributing scale among the
+        # factors; synthesise ones so the contract matches TensorLy's.
+        _, (A, evolving_states, C) = cmf
+        evolving_states = list(evolving_states)
+        # A negligible loading means "not expressed"; see
+        # `_zero_negligible_loadings` for why leaving the residue is unsafe.
+        if nn_modes and 0 in nn_modes:
+            A = _zero_negligible_loadings(A, negligible_rtol)
+        if nn_modes and 2 in nn_modes:
+            C = _zero_negligible_loadings(C, negligible_rtol)
+        weights = torch.ones(rank, dtype=A.dtype, device=A.device)
+        if normalize_factors:
+            weights, A, evolving_states, C = _normalize_parafac2_factors(
+                weights,
+                A,
+                evolving_states,
+                C,
+            )
+        result = PARAFAC2Model(
+            weights=weights,
+            subject_mode=A,
+            evolving_states=list(evolving_states),
+            label_mode=C,
+            kiers=_matcouply_kiers_form(admm_vars) if return_projections else None,
         )
 
     # Below here torch's defaults are restored, so neither float64 nor the
@@ -650,8 +681,14 @@ def _compute_PARAFAC2_tensorly(
     tolerance: float,
     normalize_factors: bool,
     nn_modes: tuple[int, ...] | None,
-) -> tuple[Parafac2Tensor, list[torch.Tensor], PARAFAC2Diagnostics]:
-    """Fit PARAFAC2 with TensorLy's ALS. Behaviour unchanged from before."""
+    return_projections: bool,
+) -> tuple[PARAFAC2Model, list[torch.Tensor], PARAFAC2Diagnostics]:
+    """Fit PARAFAC2 with TensorLy's ALS, converted to coupled-matrix form.
+
+    `apply_parafac2_projections` is TensorLy's own public converter and
+    already returns exactly matcouply's native `(weights, (A, B_is, C))`
+    structure, so both solvers share one contract.
+    """
     result, errors = tl.decomposition.parafac2(
         tensor_slices,
         rank=rank,
@@ -683,7 +720,17 @@ def _compute_PARAFAC2_tensorly(
         nn_modes=nn_modes,
         message="converged",
     )
-    return result, errors, diagnostics
+    weights, (A, evolving_states, C) = apply_parafac2_projections(result)
+    model = PARAFAC2Model(
+        weights=weights,
+        subject_mode=A,
+        evolving_states=list(evolving_states),
+        label_mode=C,
+        kiers=(result.factors[1], list(result.projections))
+        if return_projections
+        else None,
+    )
+    return model, errors, diagnostics
 
 
 def compute_PARAFAC2_decomposition(
@@ -699,19 +746,21 @@ def compute_PARAFAC2_decomposition(
     solver: PARAFAC2Solver = "tensorly",
     aoadmm_options: dict[str, Any] | None = None,
     aoadmm_loss_tolerance: float = 1e-10,
-) -> tuple[Parafac2Tensor, list[torch.Tensor], PARAFAC2Diagnostics]:
+    return_projections: bool = False,
+    negligible_rtol: float = 1e-6,
+) -> tuple[PARAFAC2Model, list[torch.Tensor], PARAFAC2Diagnostics]:
     """Compute a single PARAFAC2 decomposition attempt.
 
     PARAFAC2 allows one mode (here: time) to vary in size per slice (here:
     per subject). `tensor_slices` may be a regular 3D tensor or a list of 2D
     slices sharing their column count.
 
-    `factors = [A, B, C]` are always regular matrices: `A` (subjects x rank),
-    `B` (rank x rank, shared evolving-mode basis), `C` (labels x rank). The
-    subject-specific time pattern is `projections[i] @ B` -- see
-    `gMRItensor.plotting.evolving_mode.reconstruct_evolving_factors`. Both
-    solvers return this same shape, so downstream code never branches on
-    `solver`.
+    Returns a `PARAFAC2Model` in coupled-matrix form: `subject_mode`
+    (subjects x rank), `evolving_states[i]` (that subject's own
+    `(n_timepoints_i, rank)` time course) and `label_mode` (labels x rank).
+    Both solvers return this same form, so downstream code never branches on
+    `solver`. `return_projections=True` additionally fills `kiers` with the
+    compact `(coordinate_matrix, projections)` parametrization.
 
     Choosing a solver
     -----------------
@@ -724,56 +773,6 @@ def compute_PARAFAC2_decomposition(
     matcouply; pass `None` for an unconstrained fit. Asking TensorLy for
     mode 1 raises, since it would otherwise only warn and leave the mode
     unconstrained.
-
-    matcouply also runs in float64 regardless of `setup_backend` (see
-    `_matcouply_numeric_context`), and its non-random `init` options ignore
-    `random_state`, making restarts identical.
-
-    What "non-negative" means here
-    ------------------------------
-    AO-ADMM splits each factor into a primal variable, which fits the data,
-    and an auxiliary, which satisfies the constraint; they agree only at
-    exact convergence. Modes 0 and 2 are therefore returned from their
-    auxiliaries, so those constraints hold **exactly**. Mode 1 must keep the
-    PARAFAC2 auxiliary (it supplies `projections` and `factors[1]`), so its
-    non-negativity holds only to within the feasibility gap --
-    `PARAFAC2Diagnostics.max_nn_violation` reports how far.
-
-    Note `factors[1]` is AO-ADMM's coordinate matrix and carries negative
-    entries even under a fully constrained fit. The non-negative quantity is
-    `projections[i] @ factors[1]`; assert there, not on `factors[1]`.
-
-    On sign flips
-    -------------
-    PARAFAC2 has a per-component sign/scale indeterminacy -- scale `a_r`,
-    `b_r`, `c_r` by `alpha, beta, gamma` with `alpha*beta*gamma = 1`, of
-    which sign flips are `alpha = beta = -1`. Non-negativity on all three
-    modes removes the sign freedom entirely.
-
-    Once two modes are constrained, flipping the third is **not** a free
-    reparametrisation: it changes the reconstruction. So a wholly negative
-    component is a genuinely different model, representing signal below
-    baseline, and must not be flipped back for plotting -- that would require
-    flipping another mode, making it negative instead.
-
-    Convergence: AO-ADMM has two thresholds
-    ---------------------------------------
-    TensorLy's `tol` tests the relative reconstruction error; matcouply's
-    tests the penalized objective. These are not the same stopping rule, and
-    matcouply's own convergence flag is routinely False on fits better than a
-    TensorLy fit reporting success -- so it cannot gate acceptance. Hence:
-
-    - `aoadmm_loss_tolerance` becomes matcouply's `tol` and governs only when
-      AO-ADMM stops iterating. Defaults tighter than matcouply's own 1e-8,
-      since a loose value lets it stop while the reconstruction error is
-      still moving, wasting the restart on the gate below.
-    - `PARAFAC2_tolerance` is the acceptance gate and means the same thing
-      for both solvers: `abs(rec[-2] - rec[-1]) < tolerance`.
-
-    Unlike `compute_CP_decomposition`, neither solver is `torch.compile`-d:
-    the ragged per-slice loop cannot be traced into one graph, so compiling
-    adds overhead without a speedup.
-
     Returns
     -------
     tuple[Parafac2Tensor, list[torch.Tensor], PARAFAC2Diagnostics]
@@ -843,6 +842,8 @@ def compute_PARAFAC2_decomposition(
             nn_modes=resolved_nn_modes,
             aoadmm_options=aoadmm_options,
             aoadmm_loss_tolerance=aoadmm_loss_tolerance,
+            return_projections=return_projections,
+            negligible_rtol=negligible_rtol,
         )
     else:
         result, errors, diagnostics = _compute_PARAFAC2_tensorly(
@@ -855,12 +856,19 @@ def compute_PARAFAC2_decomposition(
             tolerance=PARAFAC2_tolerance,
             normalize_factors=normalize_factors,
             nn_modes=resolved_nn_modes,
+            return_projections=return_projections,
         )
 
-    # No branching needed: the matcouply adapter returns a real
-    # Parafac2Tensor with real weights.
+    # `degeneracy_score` needs a regular mode 1, but the evolving states are
+    # ragged. Component cosines depend only on the Gram matrix, and PARAFAC2
+    # makes `B_i.T @ B_i` subject-independent, so a factor built from that
+    # cross-product is an exact stand-in.
     w = result.weights.float()
-    f = [ff.float() for ff in result.factors]
+    f = [
+        result.subject_mode.float(),
+        _cross_product_factor(result.evolving_states).float(),
+        result.label_mode.float(),
+    ]
     if degeneracy_score((w, f)) < -0.85:
         raise ConvergenceError(
             "Decomposition is degenerate",
@@ -1312,33 +1320,29 @@ def run_CP_decomposition_repeated(
 
 
 def _nn_violations(
-    factors: list[torch.Tensor],
-    projections: list[torch.Tensor],
+    model: "PARAFAC2Model",
     nn_modes: tuple[int, ...] | None,
 ) -> dict[int, float]:
-    """Largest per-component non-negativity violation in the returned factors.
+    """Largest per-component non-negativity violation in the returned model.
 
     Scored **relative to each component's own scale**, because an absolute
     threshold misses the case that matters: a loading of -1e-07 is invisible
     against a total norm of order 1, yet it flips the sign of everything it
     multiplies.
-
-    Mode 1 is measured on `projections[i] @ factors[1]`, never on
-    `factors[1]` itself -- that is AO-ADMM's coordinate matrix, which is
-    legitimately negative even under a fully constrained fit.
     """
     if not nn_modes:
         return {}
 
+    by_mode = {
+        0: [model.subject_mode],
+        1: model.evolving_states,
+        2: [model.label_mode],
+    }
     violations: dict[int, float] = {}
     for mode in sorted(set(nn_modes)):
-        if mode == 1:
-            columns = [projection @ factors[1] for projection in projections]
-        else:
-            columns = [factors[mode]]
-
+        columns = by_mode[mode]
         worst = 0.0
-        for rank_index in range(factors[0].shape[1]):
+        for rank_index in range(model.subject_mode.shape[1]):
             values = torch.cat([c[:, rank_index].reshape(-1) for c in columns])
             scale = float(values.abs().max())
             if scale == 0.0:
@@ -1349,24 +1353,53 @@ def _nn_violations(
 
 
 def _warn_if_nn_modes_violated(
+    model: "PARAFAC2Model",
+    nn_modes: tuple[int, ...] | None,
     violations: dict[int, float],
     solver: PARAFAC2Solver,
-    threshold: float = 1e-3,
 ) -> None:
-    """Warn when a constraint the caller asked for does not hold on output."""
-    offenders = {mode: value for mode, value in violations.items() if value > threshold}
+    """Warn when a constrained mode still carries negative entries.
+
+    Triggered by the *presence* of negatives, not their size. Magnitude is
+    the wrong test here: AO-ADMM enforces hard constraints on its auxiliary
+    variables, so the returned primal sits within the feasibility gap of
+    non-negative -- a relative violation of ~1e-08. That is numerically
+    negligible and yet sign-decisive, because any negative entry flips every
+    curve it multiplies. A caller scaling one mode by another (a time course
+    by its subject loading, say) turns 1e-08 of residue into a
+    full-amplitude mirrored curve once the result is normalized.
+    """
+    if not nn_modes:
+        return
+
+    by_mode = {
+        0: [model.subject_mode],
+        1: model.evolving_states,
+        2: [model.label_mode],
+    }
+    offenders = []
+    for mode in sorted(set(nn_modes)):
+        negatives = sum(int((part < 0).sum()) for part in by_mode[mode])
+        if not negatives:
+            continue
+        smallest = min(float(part.min()) for part in by_mode[mode])
+        offenders.append(
+            f"mode {mode} ({negatives} entries, min {smallest:.2e}, "
+            f"{violations.get(mode, 0.0):.1e} relative)",
+        )
     if not offenders:
         return
-    detail = ", ".join(
-        f"mode {mode} ({value:.2e} relative)" for mode, value in offenders.items()
-    )
+
     warnings.warn(
-        f"PARAFAC2(solver={solver!r}): the returned factors violate the "
-        f"requested non-negativity on {detail}, beyond the {threshold:.0e} "
-        "relative threshold. A violation approaching 1.0 means that mode was "
-        "effectively unconstrained; a smaller one is feasibility-gap leakage, "
-        "which a larger PARAFAC2_max_iter or a tighter feasibility_tol (via "
-        "aoadmm_options) will reduce.",
+        f"PARAFAC2(solver={solver!r}): the returned factors carry negative "
+        f"entries in constrained {', '.join(offenders)}. These sit within "
+        "AO-ADMM's feasibility gap -- the hard constraint holds on its "
+        "auxiliary variables, not on the primal returned here -- so they are "
+        "numerically negligible but NOT sign-negligible: multiplying one mode "
+        "by another propagates the sign, and per-curve normalization then "
+        "restores it to full amplitude as a mirrored curve. Clip with "
+        "`factor.clamp(min=0)` before using a constrained mode as a "
+        "multiplier.",
         stacklevel=3,
     )
 
@@ -1414,16 +1447,9 @@ def _warn_if_accepted_at_iteration_limit(
     )
 
 
-PARAFAC2Result = tuple[
-    torch.Tensor,
-    list[torch.Tensor],
-    list[torch.Tensor],
-    torch.Tensor,
-]
+PARAFAC2Result = tuple[PARAFAC2Model, torch.Tensor]
 PARAFAC2ResultWithDiagnostics = tuple[
-    torch.Tensor,
-    list[torch.Tensor],
-    list[torch.Tensor],
+    PARAFAC2Model,
     torch.Tensor,
     PARAFAC2Diagnostics,
 ]
@@ -1448,6 +1474,8 @@ def run_PARAFAC2_decomposition_repeated(
     solver: PARAFAC2Solver = ...,
     aoadmm_options: dict[str, Any] | None = ...,
     aoadmm_loss_tolerance: float = ...,
+    return_projections: bool = ...,
+    negligible_rtol: float = ...,
     return_diagnostics: Literal[False] = ...,
 ) -> PARAFAC2Result:
     ...
@@ -1470,6 +1498,8 @@ def run_PARAFAC2_decomposition_repeated(
     solver: PARAFAC2Solver = ...,
     aoadmm_options: dict[str, Any] | None = ...,
     aoadmm_loss_tolerance: float = ...,
+    return_projections: bool = ...,
+    negligible_rtol: float = ...,
     *,
     return_diagnostics: Literal[True],
 ) -> PARAFAC2ResultWithDiagnostics:
@@ -1492,6 +1522,8 @@ def run_PARAFAC2_decomposition_repeated(
     solver: PARAFAC2Solver = "tensorly",
     aoadmm_options: dict[str, Any] | None = None,
     aoadmm_loss_tolerance: float = 1e-10,
+    return_projections: bool = False,
+    negligible_rtol: float = 1e-6,
     return_diagnostics: bool = False,
 ) -> PARAFAC2Result | PARAFAC2ResultWithDiagnostics:
     """Repeatedly fit a PARAFAC2 decomposition from random restarts.
@@ -1500,18 +1532,16 @@ def run_PARAFAC2_decomposition_repeated(
     `aoadmm_options`, `aoadmm_loss_tolerance` and the two-threshold
     convergence scheme; `_repeat_with_restarts` for `restart_procs`.
 
-    The return contract is identical for both solvers -- same arity, types,
-    shapes and float32 CPU tensors -- so calling code never branches on
-    `solver`. `return_diagnostics=True` appends the winning restart's
-    `PARAFAC2Diagnostics`; it is off by default so the 4-tuple contract
-    `gMRItensor.replicability` unpacks stays unchanged.
+    The return contract is identical for both solvers, so calling code never
+    branches on `solver`. `return_diagnostics=True` appends the winning
+    restart's `PARAFAC2Diagnostics`.
 
     Option names are kept in sync with `run_CP_decomposition_repeated` so one
     `**kwargs` dict routes to either. Not shared: `nn_modes` replaces CP's
     `non_negative` (it picks *which* modes are constrained); `solver`,
-    `aoadmm_options`, `aoadmm_loss_tolerance` and `return_diagnostics` are
-    PARAFAC2-only; and there is no `allow_nan_imputation`, since NaN input
-    always raises here.
+    `aoadmm_options`, `aoadmm_loss_tolerance`, `return_projections` and
+    `return_diagnostics` are PARAFAC2-only; and there is no
+    `allow_nan_imputation`, since NaN input always raises here.
 
     Emits a `UserWarning` rather than staying silent when the solver is
     struggling: once if the winning fit was accepted at the iteration limit,
@@ -1521,13 +1551,10 @@ def run_PARAFAC2_decomposition_repeated(
     Returns
     -------
     tuple
-        `(best_weights, best_factors, best_projections, best_error)`, plus
-        `best_diagnostics` when `return_diagnostics=True`.
-        `best_factors = [A, B, C]` (subject, shared evolving-mode basis,
-        region); `best_projections[i] @ best_factors[1]` reconstructs subject
-        `i`'s time pattern. `best_error` is the relative reconstruction
-        error, defined identically for both solvers and so comparable
-        between them.
+        `(model, error)`, plus `diagnostics` when `return_diagnostics=True`.
+        `model` is a `PARAFAC2Model` whose `evolving_states[i]` is subject
+        `i`'s own time course. `error` is the relative reconstruction error,
+        defined identically for both solvers and so comparable between them.
     """
     _maybe_register_memory_efficient_khatri_rao(use_memory_efficient_khatri_rao)
 
@@ -1541,20 +1568,27 @@ def run_PARAFAC2_decomposition_repeated(
         "solver": solver,
         "aoadmm_options": aoadmm_options,
         "aoadmm_loss_tolerance": aoadmm_loss_tolerance,
+        "return_projections": return_projections,
+        "negligible_rtol": negligible_rtol,
     }
 
     def to_cpu(result):
-        weights = result.weights.float().cpu()
-        factors = [f.float().cpu() for f in result.factors]
-        projections = [p.float().cpu() for p in result.projections]
-        return weights, factors, projections
+        kiers = None
+        if result.kiers is not None:
+            coordinate_matrix, projections = result.kiers
+            kiers = (
+                coordinate_matrix.float().cpu(),
+                [p.float().cpu() for p in projections],
+            )
+        return PARAFAC2Model(
+            weights=result.weights.float().cpu(),
+            subject_mode=result.subject_mode.float().cpu(),
+            evolving_states=[B.float().cpu() for B in result.evolving_states],
+            label_mode=result.label_mode.float().cpu(),
+            kiers=kiers,
+        )
 
-    (
-        (best_weights, best_factors, best_projections),
-        best_error,
-        best_diagnostics,
-        tally,
-    ) = _repeat_with_restarts(
+    (best_model, best_error, best_diagnostics, tally) = _repeat_with_restarts(
         "PARAFAC2",
         tensor_slices,
         kwargs,
@@ -1569,13 +1603,17 @@ def run_PARAFAC2_decomposition_repeated(
     # Measured on the CPU float32 factors the caller actually receives, not
     # on the solver's internals, so the check reflects what they will plot.
     violations = _nn_violations(
-        best_factors,
-        best_projections,
+        best_model,
         best_diagnostics.nn_modes if best_diagnostics else None,
     )
     if best_diagnostics is not None:
         best_diagnostics = replace(best_diagnostics, max_nn_violation=violations)
-        _warn_if_nn_modes_violated(violations, solver)
+        _warn_if_nn_modes_violated(
+            best_model,
+            best_diagnostics.nn_modes,
+            violations,
+            solver,
+        )
 
     _warn_if_accepted_at_iteration_limit(best_diagnostics)
     advisory = _build_restart_advisory(
@@ -1589,14 +1627,8 @@ def run_PARAFAC2_decomposition_repeated(
         warnings.warn(advisory, stacklevel=2)
 
     if return_diagnostics:
-        return (
-            best_weights,
-            best_factors,
-            best_projections,
-            best_error,
-            best_diagnostics,
-        )
-    return best_weights, best_factors, best_projections, best_error
+        return best_model, best_error, best_diagnostics
+    return best_model, best_error
 
 
 def setup_backend():
