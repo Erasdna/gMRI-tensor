@@ -1,12 +1,15 @@
 import nibabel as nib
 import numpy as np
 import pandas as pd
+import pyarrow.parquet as pq
 import pytest
 from gMRItensor.preprocessing import compute_roi_scaling
 from gMRItensor.preprocessing import compute_tracer_from_image
 from gMRItensor.preprocessing import compute_tracer_parallel
+from gMRItensor.preprocessing import iter_tracer_results
 from gMRItensor.preprocessing import prepare_tensor
 from gMRItensor.preprocessing import scale_tensor
+from gMRItensor.preprocessing import write_tracer_parquet
 from nibabel.orientations import axcodes2ornt
 from nibabel.orientations import io_orientation
 from nibabel.orientations import ornt_transform
@@ -383,8 +386,15 @@ def test_compute_tracer_from_image_per_voxel_matches_own_label_and_value(tmp_pat
         counts[label] = counts.get(label, 0) + 1
     np.testing.assert_array_equal(label_index, expected_label_index)
 
-    for i in range(len(labels)):
-        assert index_list[i].shape == (1, 3)
+    # Regression test: per-voxel coordinates used to be a list of one (1, 3)
+    # array per voxel (~6x the memory of a single array, pickled back from
+    # every worker); now one (n_voxels, 3) array, as scatter_to_volume takes.
+    assert isinstance(index_list, np.ndarray)
+    assert index_list.shape == (6, 3)
+    np.testing.assert_array_equal(
+        index_list,
+        np.argwhere(paths["segmentation_flat"].reshape(2, 2, 2) > 1e-6),
+    )
 
 
 def test_compute_tracer_parallel_returns_shared_index_list(tmp_path):
@@ -549,3 +559,159 @@ def test_prepare_tensor_per_voxel_style_labels_are_not_collapsed():
     np.testing.assert_array_equal(label_index, [0, 1])
     np.testing.assert_allclose(tensor[..., 0], 1.0)
     np.testing.assert_allclose(tensor[..., 1], 2.0)
+
+
+def _make_streaming_args_list(tmp_path, func, n_images=4):
+    """`args_list` over the two-ROI fixture, one distinct post-injection image
+    per entry (scaled by `t + 1`), so out-of-order or mis-tagged results
+    would show up as wrong values. Two subjects, alternating."""
+    paths = _make_two_roi_images(tmp_path)
+    args_list = []
+    for t in range(n_images):
+        post_injection_path = tmp_path / f"post_injection_{t}.nii"
+        nib.save(
+            nib.Nifti1Image(
+                paths["post_injection_flat"].reshape(2, 2, 2) * (t + 1),
+                np.eye(4),
+            ),
+            post_injection_path,
+        )
+        args_list.append(
+            {
+                "baseline_path": paths["baseline_path"],
+                "post_injection_path": post_injection_path,
+                "signal_type": "R1map",
+                "mask_path": paths["mask_path"],
+                "segmentation_path": paths["segmentation_path"],
+                "func": func,
+                "subject": f"s{t % 2}",
+                "time_point": t // 2,
+            },
+        )
+    return args_list
+
+
+def _direct_kwargs(args):
+    return {k: v for k, v in args.items() if k not in ("subject", "time_point")}
+
+
+@pytest.mark.parametrize("n_procs", [1, 2])
+@pytest.mark.parametrize("func", [np.nanmedian, None])
+def test_iter_tracer_results_yields_in_order_matching_direct_calls(
+    tmp_path,
+    n_procs,
+    func,
+):
+    # 5 images with n_procs=2 means a 4-wide in-flight window that has to be
+    # refilled, exercising the bounded-submission path.
+    args_list = _make_streaming_args_list(tmp_path, func, n_images=5)
+
+    results = list(iter_tracer_results(args_list, n_procs=n_procs))
+
+    assert len(results) == len(args_list)
+    for result, args in zip(results, args_list):
+        assert result.subject == args["subject"]
+        assert result.time_point == args["time_point"]
+        labels, values, label_index, index_list = compute_tracer_from_image(
+            **_direct_kwargs(args),
+        )
+        np.testing.assert_array_equal(result.labels, labels)
+        np.testing.assert_allclose(result.values, values)
+        np.testing.assert_array_equal(result.label_index, label_index)
+        if func is None:
+            np.testing.assert_array_equal(result.index_list, index_list)
+
+
+def test_iter_tracer_results_is_lazy(tmp_path):
+    # A missing file in the second entry must only fail once that entry is
+    # actually consumed -- proof that results are computed on demand.
+    args_list = _make_streaming_args_list(tmp_path, None, n_images=2)
+    args_list[1]["post_injection_path"] = tmp_path / "does_not_exist.nii"
+
+    results = iter_tracer_results(args_list, n_procs=1)
+    first = next(results)
+    assert first.subject == "s0"
+    with pytest.raises(FileNotFoundError):
+        next(results)
+
+
+def test_compute_tracer_parallel_per_voxel_returns_coordinate_array(tmp_path):
+    args_list = _make_streaming_args_list(tmp_path, None, n_images=2)
+
+    df, index_list = compute_tracer_parallel(args_list, n_procs=1)
+
+    assert isinstance(index_list, np.ndarray)
+    assert index_list.shape == (6, 3)
+    assert len(df) == 2 * 6
+
+
+@pytest.mark.parametrize("func", [np.nanmedian, None])
+def test_write_tracer_parquet_round_trips_to_same_tensor(tmp_path, func):
+    args_list = _make_streaming_args_list(tmp_path, func)
+    expected_df, expected_index_list = compute_tracer_parallel(args_list, n_procs=1)
+
+    tracer_path, coords_path = write_tracer_parquet(
+        args_list,
+        tmp_path / "tracer.parquet",
+        n_procs=1,
+    )
+
+    assert coords_path == tmp_path / "tracer.coords.parquet"
+    # One row group per image, so the file can later be read image by image.
+    assert pq.ParquetFile(tracer_path).num_row_groups == len(args_list)
+
+    df = pd.read_parquet(tracer_path)
+    columns = ["subject", "time_point", "labels", "label_index", "values"]
+    pd.testing.assert_frame_equal(
+        df[columns],
+        expected_df[columns],
+        check_dtype=False,  # labels are int64 on disk, float from np.rint
+    )
+
+    expected = prepare_tensor(expected_df)
+    got = prepare_tensor(df)
+    for got_part, expected_part in zip(got, expected):
+        np.testing.assert_array_equal(got_part, expected_part)
+
+    coords = pd.read_parquet(coords_path)
+    expected_coords = (
+        expected_index_list if func is None else np.concatenate(expected_index_list)
+    )
+    np.testing.assert_array_equal(coords[["i", "j", "k"]].to_numpy(), expected_coords)
+    # Each coordinate row keeps the (labels, label_index) key of its tensor
+    # column, so spatial modes can be mapped back onto voxels.
+    segmentation = nib.load(args_list[0]["segmentation_path"]).get_fdata()
+    np.testing.assert_array_equal(
+        coords["labels"],
+        segmentation[*expected_coords.T],
+    )
+
+
+def test_write_tracer_parquet_leaves_no_tmp_files(tmp_path):
+    args_list = _make_streaming_args_list(tmp_path, None, n_images=2)
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    write_tracer_parquet(args_list, out_dir / "tracer.parquet", n_procs=1)
+
+    assert sorted(p.name for p in out_dir.iterdir()) == [
+        "tracer.coords.parquet",
+        "tracer.parquet",
+    ]
+
+
+def test_write_tracer_parquet_cleans_up_on_failure(tmp_path):
+    args_list = _make_streaming_args_list(tmp_path, None, n_images=2)
+    args_list[1]["post_injection_path"] = tmp_path / "does_not_exist.nii"
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+
+    with pytest.raises(FileNotFoundError):
+        write_tracer_parquet(args_list, out_dir / "tracer.parquet", n_procs=1)
+
+    assert list(out_dir.iterdir()) == []
+
+
+def test_write_tracer_parquet_rejects_empty_args_list(tmp_path):
+    with pytest.raises(ValueError, match="empty"):
+        write_tracer_parquet([], tmp_path / "tracer.parquet")

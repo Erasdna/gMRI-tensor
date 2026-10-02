@@ -25,6 +25,7 @@ dependencies = [
     "nibabel>=5.4.2",
     "numexpr>=2.14.1",
     'numpy',
+    "pyarrow>=25.0.1",
     "scienceplots>=2.2.2",
     "scikit-learn>=1.7.2",
     "seaborn>=0.13.2",

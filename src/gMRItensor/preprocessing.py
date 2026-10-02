@@ -1,15 +1,23 @@
+from collections import deque
+from itertools import islice
 from multiprocessing import Pool
+from multiprocessing.pool import AsyncResult
 from pathlib import Path
+from typing import Any
 from typing import Callable
 from typing import cast
+from typing import Iterator
+from typing import NamedTuple
 
 import nibabel as nib
 import numexpr as ne
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from nibabel.nifti1 import Nifti1Image
 from scipy.ndimage import labeled_comprehension
-from tqdm.contrib import tenumerate
+from tqdm import tqdm
 
 
 def compute_tracer(baseline: np.ndarray, post_injection: np.ndarray, signal_type: str):
@@ -49,7 +57,7 @@ def compute_tracer_from_image(
     mask_path: Path,
     segmentation_path: Path,
     func: Callable | None = np.nanmedian,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray]]:
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray] | np.ndarray]:
     """Compute tracer signal per voxel or per ROI from aligned NIfTI images.
 
     All four images are reoriented to the closest canonical (RAS+)
@@ -67,7 +75,7 @@ def compute_tracer_from_image(
 
     Returns
     -------
-    tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray]]
+    tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray] | np.ndarray]
         `(labels, values, label_index, index_list)`, all length-matched:
 
         - `labels[i]`: the row's ROI id. Sorted unique ids when aggregating,
@@ -78,7 +86,9 @@ def compute_tracer_from_image(
           mode. Always 0 when aggregating. `prepare_tensor` pivots on the
           pair, which avoids requiring contiguous ROI ids or the same ROIs
           in every image.
-        - `index_list[i]`: `(n_i, ndim)` coordinates behind that row.
+        - `index_list[i]`: `(n_i, ndim)` coordinates behind that row when
+          aggregating. Per-voxel, a single `(n_voxels, ndim)` array whose
+          row `i` is that voxel's coordinate.
 
     Raises
     ------
@@ -125,8 +135,7 @@ def compute_tracer_from_image(
 
     if func is None:
         labels = np.rint(segmentation)
-        index_list = [coord[None, :] for coord in voxel_coords]
-        return labels, tracer, _within_group_rank(labels), index_list
+        return labels, tracer, _within_group_rank(labels), voxel_coords
 
     unique_labels = np.unique(segmentation)
     values = labeled_comprehension(
@@ -146,7 +155,20 @@ def compute_tracer_from_image(
     )
 
 
-def _compute_tracer_worker(args):
+class TracerResult(NamedTuple):
+    """One image's `compute_tracer_from_image` output plus its subject/time point."""
+
+    subject: Any
+    time_point: Any
+    labels: np.ndarray
+    values: np.ndarray
+    label_index: np.ndarray
+    index_list: list[np.ndarray] | np.ndarray
+
+
+def _compute_tracer_worker(
+    args: dict[str, Any],
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray] | np.ndarray]:
     return compute_tracer_from_image(
         args["baseline_path"],
         args["post_injection_path"],
@@ -157,42 +179,164 @@ def _compute_tracer_worker(args):
     )
 
 
-def compute_tracer_parallel(args_list, n_procs: int = 5):
-    """Run `compute_tracer_from_image` over `args_list`, sequentially or in parallel."""
-    results_dict = []
-    index_list: list[np.ndarray] | None = None
+def iter_tracer_results(
+    args_list: list[dict[str, Any]],
+    n_procs: int = 5,
+) -> Iterator[TracerResult]:
+    """Lazily yield one `TracerResult` per `args_list` entry, in order.
 
-    def collect(task_id, labels, values, label_index, this_index_list):
-        nonlocal index_list
-        if index_list is None:
-            index_list = this_index_list
-        tmp_dict = {
-            "labels": labels,
-            "label_index": label_index,
-            "values": values,
-            "subject": args_list[task_id]["subject"],
-            "time_point": args_list[task_id]["time_point"],
-        }
-        results_dict.append(pd.DataFrame(tmp_dict))
+    Each entry holds `compute_tracer_from_image` keyword arguments plus
+    `"subject"`/`"time_point"`. With `n_procs > 1` at most `2 * n_procs`
+    images are in flight, so memory stays bounded however slowly results are
+    consumed (`Pool.imap` would instead keep buffering finished results).
+    """
+
+    def tag(args: dict[str, Any], result: tuple) -> TracerResult:
+        return TracerResult(args["subject"], args["time_point"], *result)
 
     if n_procs == 1:
-        for i, args in tenumerate(
-            args_list,
-            desc="Computing tracer signal sequential",
-        ):
-            labels, values, label_index, this_index_list = _compute_tracer_worker(args)
-            collect(i, labels, values, label_index, this_index_list)
-    else:
-        ne.set_num_threads(1)
-        with Pool(n_procs) as pool:
-            for i, (labels, values, label_index, this_index_list) in tenumerate(
-                pool.imap(_compute_tracer_worker, args_list),
-                total=len(args_list),
-                desc="Computing tracer signal in parallel",
-            ):
-                collect(i, labels, values, label_index, this_index_list)
+        for args in tqdm(args_list, desc="Computing tracer signal sequential"):
+            yield tag(args, _compute_tracer_worker(args))
+        return
 
-    return pd.concat(results_dict, ignore_index=True), index_list
+    ne.set_num_threads(1)
+    remaining = iter(args_list)
+    with (
+        Pool(n_procs) as pool,
+        tqdm(
+            total=len(args_list),
+            desc="Computing tracer signal in parallel",
+        ) as progress,
+    ):
+        pending: deque[tuple[dict[str, Any], AsyncResult]] = deque()
+
+        def submit(args: dict[str, Any]) -> None:
+            pending.append((args, pool.apply_async(_compute_tracer_worker, (args,))))
+
+        for args in islice(remaining, 2 * n_procs):
+            submit(args)
+        while pending:
+            args, async_result = pending.popleft()
+            # Refill before yielding, so workers stay busy meanwhile.
+            next_args = next(remaining, None)
+            if next_args is not None:
+                submit(next_args)
+            result = async_result.get()
+            progress.update()
+            yield tag(args, result)
+
+
+def compute_tracer_parallel(
+    args_list: list[dict[str, Any]],
+    n_procs: int = 5,
+) -> tuple[pd.DataFrame, list[np.ndarray] | np.ndarray | None]:
+    """Run `compute_tracer_from_image` over `args_list`, sequentially or in parallel."""
+    frames = []
+    index_list: list[np.ndarray] | np.ndarray | None = None
+    for result in iter_tracer_results(args_list, n_procs):
+        if index_list is None:
+            index_list = result.index_list
+        frames.append(
+            pd.DataFrame(
+                {
+                    "labels": result.labels,
+                    "label_index": result.label_index,
+                    "values": result.values,
+                    "subject": result.subject,
+                    "time_point": result.time_point,
+                },
+            ),
+        )
+
+    return pd.concat(frames, ignore_index=True), index_list
+
+
+_TRACER_SCHEMA = pa.schema(
+    [
+        ("subject", pa.string()),
+        ("time_point", pa.int64()),
+        ("labels", pa.int64()),
+        ("label_index", pa.int64()),
+        ("values", pa.float64()),
+    ],
+)
+
+
+def _tracer_table(result: TracerResult) -> pa.Table:
+    n = len(result.values)
+    return pa.table(
+        {
+            "subject": pa.repeat(pa.scalar(str(result.subject)), n),
+            "time_point": pa.repeat(pa.scalar(result.time_point, pa.int64()), n),
+            "labels": np.asarray(result.labels).astype(np.int64),
+            "label_index": np.asarray(result.label_index).astype(np.int64),
+            "values": np.asarray(result.values, dtype=np.float64),
+        },
+        schema=_TRACER_SCHEMA,
+    )
+
+
+def _coords_table(result: TracerResult) -> pa.Table:
+    """Flatten `index_list` to one `(labels, label_index, i, j, k)` row per voxel."""
+    if isinstance(result.index_list, np.ndarray):
+        labels, label_index = result.labels, result.label_index
+        coords = result.index_list
+    else:
+        sizes = [len(c) for c in result.index_list]
+        labels = np.repeat(result.labels, sizes)
+        label_index = np.repeat(result.label_index, sizes)
+        # The empty seed keeps this valid when there are no ROIs at all.
+        coords = np.concatenate([np.empty((0, 3), dtype=np.int64), *result.index_list])
+    return pa.table(
+        {
+            "labels": np.asarray(labels).astype(np.int64),
+            "label_index": np.asarray(label_index).astype(np.int64),
+            "i": coords[:, 0],
+            "j": coords[:, 1],
+            "k": coords[:, 2],
+        },
+    )
+
+
+def write_tracer_parquet(
+    args_list: list[dict[str, Any]],
+    output_path: Path | str,
+    n_procs: int = 5,
+) -> tuple[Path, Path]:
+    """Stream `iter_tracer_results` to parquet, one row group per image.
+
+    Writes the long-format frame `prepare_tensor` consumes (read it back with
+    `pd.read_parquet`) while holding at most a few images in memory. Voxel
+    coordinates go to a `.coords.parquet` sidecar, one `(labels,
+    label_index, i, j, k)` row per voxel, taken from the first image -- like
+    `compute_tracer_parallel`'s `index_list`, so all images are assumed to
+    share one template. Files are only moved into place on success.
+
+    Returns `(tracer_path, coords_path)`.
+    """
+    if not args_list:
+        raise ValueError("args_list is empty; nothing to write")
+
+    tracer_path = Path(output_path)
+    coords_path = tracer_path.with_suffix(".coords.parquet")
+    tmp_tracer = tracer_path.with_name(tracer_path.name + ".tmp")
+    tmp_coords = coords_path.with_name(coords_path.name + ".tmp")
+
+    try:
+        with pq.ParquetWriter(tmp_tracer, _TRACER_SCHEMA) as writer:
+            for i, result in enumerate(iter_tracer_results(args_list, n_procs)):
+                if i == 0:
+                    pq.write_table(_coords_table(result), tmp_coords)
+                table = _tracer_table(result)
+                writer.write_table(table, row_group_size=max(table.num_rows, 1))
+    except BaseException:
+        tmp_tracer.unlink(missing_ok=True)
+        tmp_coords.unlink(missing_ok=True)
+        raise
+
+    tmp_tracer.replace(tracer_path)
+    tmp_coords.replace(coords_path)
+    return tracer_path, coords_path
 
 
 def compute_roi_scaling(
