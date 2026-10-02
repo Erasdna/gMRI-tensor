@@ -114,9 +114,6 @@ def compute_tracer_from_image(
         signal_type,
     )
     segmentation = segmentation_nifti.get_fdata()[mask > 0]
-    # Voxel (i, j, k) coordinates, aligned 1:1 with tracer/segmentation --
-    # boolean indexing (`[mask > 0]`) and np.argwhere traverse in the same
-    # (row-major) order.
     voxel_coords = np.argwhere(mask > 0)
 
     # Background/unlabeled voxels (segmentation id ~0) are never real ROIs
@@ -161,22 +158,7 @@ def _compute_tracer_worker(args):
 
 
 def compute_tracer_parallel(args_list, n_procs: int = 5):
-    """Run `compute_tracer_from_image` over `args_list`, sequentially or in parallel.
-
-    Each `args_list` entry is a dict of `compute_tracer_from_image` keyword
-    arguments plus `"subject"`/`"time_point"`. Returns `(df, index_list)`:
-    `df` is the long-format DataFrame (`subject`, `time_point`, `labels`,
-    `label_index`, `values`) that `prepare_tensor` consumes, and
-    `index_list` is the voxel-coordinate metadata from
-    `compute_tracer_from_image` (see its docstring), taken from the first
-    image processed.
-
-    Images need not agree on which ROIs are present; a subject missing an
-    ROI another has is normal for native-space segmentations and is dropped
-    by `prepare_tensor`. `index_list` is therefore only a faithful
-    coordinate map for every row when all images share a voxel grid (true
-    for the per-voxel case), which is neither assumed nor checked here.
-    """
+    """Run `compute_tracer_from_image` over `args_list`, sequentially or in parallel."""
     results_dict = []
     index_list: list[np.ndarray] | None = None
 
