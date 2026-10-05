@@ -550,6 +550,20 @@ def _suggest_max_iter(
     return int(math.ceil(suggested / magnitude) * magnitude)
 
 
+def _to_solver_slices(
+    slices: list[torch.Tensor],
+    device: torch.device,
+) -> list[torch.Tensor]:
+    """Move each slice to `device`, then cast it to float64 there.
+
+    Moving before casting keeps the float64 copy off the source device: for
+    CPU-resident voxel data fitted on the GPU, casting first would put a full
+    float64 copy -- twice the float32 input -- in host RAM. Done per slice, so
+    at most one float32 slice-sized temporary exists on `device` at a time.
+    """
+    return [s.to(device).double() for s in slices]
+
+
 def _compute_PARAFAC2_matcouply(
     tensor_slices: list[torch.Tensor] | torch.Tensor,
     rank: int,
@@ -564,6 +578,7 @@ def _compute_PARAFAC2_matcouply(
     aoadmm_loss_tolerance: float,
     return_projections: bool,
     negligible_rtol: float,
+    compute_device: torch.device | None,
 ) -> tuple[PARAFAC2Model, list[torch.Tensor], PARAFAC2Diagnostics]:
     """Fit PARAFAC2 with matcouply's AO-ADMM.
 
@@ -584,11 +599,11 @@ def _compute_PARAFAC2_matcouply(
         if isinstance(tensor_slices, list)
         else [tensor_slices[i] for i in range(tensor_slices.shape[0])]
     )
-    device = slices[0].device
+    device = compute_device if compute_device is not None else slices[0].device
 
     with _matcouply_numeric_context(device):
         cmf, admm_vars, diagnostics = parafac2_aoadmm(
-            [s.double() for s in slices],
+            _to_solver_slices(slices, device),
             rank=rank,
             init=init,
             n_iter_max=max_iter,
@@ -778,6 +793,7 @@ def compute_PARAFAC2_decomposition(
     aoadmm_loss_tolerance: float = 1e-10,
     return_projections: bool = False,
     negligible_rtol: float = 1e-6,
+    compute_device: torch.device | None = None,
 ) -> tuple[PARAFAC2Model, list[torch.Tensor], PARAFAC2Diagnostics]:
     """Compute a single PARAFAC2 decomposition attempt.
 
@@ -803,6 +819,12 @@ def compute_PARAFAC2_decomposition(
     matcouply; pass `None` for an unconstrained fit. Asking TensorLy for
     mode 1 raises, since it would otherwise only warn and leave the mode
     unconstrained.
+
+    `compute_device` is the device the fit runs on; None (default) uses the
+    input's own device. It lets CPU-resident slices be fitted on the GPU
+    without a host-side copy -- for matcouply, which needs float64, the cast
+    happens on `compute_device` (see `_to_solver_slices`).
+
     Returns
     -------
     tuple[Parafac2Tensor, list[torch.Tensor], PARAFAC2Diagnostics]
@@ -874,8 +896,15 @@ def compute_PARAFAC2_decomposition(
             aoadmm_loss_tolerance=aoadmm_loss_tolerance,
             return_projections=return_projections,
             negligible_rtol=negligible_rtol,
+            compute_device=compute_device,
         )
     else:
+        if compute_device is not None:
+            tensor_slices = (
+                [s.to(compute_device) for s in tensor_slices]
+                if isinstance(tensor_slices, list)
+                else tensor_slices.to(compute_device)
+            )
         result, errors, diagnostics = _compute_PARAFAC2_tensorly(
             tensor_slices,
             rank=rank,
@@ -1144,8 +1173,9 @@ def _repeat_with_restarts(
     init_repeats : int
         Number of random restarts to try.
     device : torch.device
-        Device the input lives on. Used for CUDA memory management and to
-        reject `restart_procs >= 2`.
+        Device the fit runs on (the input's, unless a `compute_device` moves
+        it). Used for CUDA memory management and to reject
+        `restart_procs >= 2`.
     verbose_level : int
         If > 0, prints each `ConvergenceError` encountered.
     progress_bar : bool
@@ -1177,10 +1207,10 @@ def _repeat_with_restarts(
     if restart_procs >= 2 and device.type == "cuda":
         raise ValueError(
             f"restart_procs={restart_procs} requests multiprocessing, but the "
-            "input is on CUDA. Running multiple worker processes against a "
+            "fit runs on CUDA. Running multiple worker processes against a "
             "CUDA context is unsafe/unreliable across GPU driver setups -- "
-            "pass restart_procs=1 to run sequentially on the GPU, or move "
-            "the input to CPU first to use multiple processes.",
+            "pass restart_procs=1 to run sequentially on the GPU, or fit on "
+            "CPU (input and compute_device) to use multiple processes.",
         )
     if restart_procs >= 2 and _in_worker_process():
         if verbose_level > 0:
@@ -1506,6 +1536,7 @@ def run_PARAFAC2_decomposition_repeated(
     aoadmm_loss_tolerance: float = ...,
     return_projections: bool = ...,
     negligible_rtol: float = ...,
+    compute_device: torch.device | None = ...,
     return_diagnostics: Literal[False] = ...,
 ) -> PARAFAC2Result:
     ...
@@ -1530,6 +1561,7 @@ def run_PARAFAC2_decomposition_repeated(
     aoadmm_loss_tolerance: float = ...,
     return_projections: bool = ...,
     negligible_rtol: float = ...,
+    compute_device: torch.device | None = ...,
     *,
     return_diagnostics: Literal[True],
 ) -> PARAFAC2ResultWithDiagnostics:
@@ -1554,6 +1586,7 @@ def run_PARAFAC2_decomposition_repeated(
     aoadmm_loss_tolerance: float = 1e-10,
     return_projections: bool = False,
     negligible_rtol: float = 1e-6,
+    compute_device: torch.device | None = None,
     return_diagnostics: bool = False,
 ) -> PARAFAC2Result | PARAFAC2ResultWithDiagnostics:
     """Repeatedly fit a PARAFAC2 decomposition from random restarts.
@@ -1572,6 +1605,11 @@ def run_PARAFAC2_decomposition_repeated(
     `aoadmm_options`, `aoadmm_loss_tolerance`, `return_projections` and
     `return_diagnostics` are PARAFAC2-only; and there is no
     `allow_nan_imputation`, since NaN input always raises here.
+
+    `compute_device` (see `compute_PARAFAC2_decomposition`) is separate from
+    `device`, which only describes where the input lives: keep a large input
+    on CPU and pass `compute_device=torch.device("cuda")` to fit it on the
+    GPU. Each restart then moves it there afresh, and frees it afterwards.
 
     Emits a `UserWarning` rather than staying silent when the solver is
     struggling: once if the winning fit was accepted at the iteration limit,
@@ -1600,6 +1638,7 @@ def run_PARAFAC2_decomposition_repeated(
         "aoadmm_loss_tolerance": aoadmm_loss_tolerance,
         "return_projections": return_projections,
         "negligible_rtol": negligible_rtol,
+        "compute_device": compute_device,
     }
 
     def to_cpu(result):
@@ -1624,7 +1663,8 @@ def run_PARAFAC2_decomposition_repeated(
         kwargs,
         to_cpu,
         init_repeats,
-        device,
+        # Where the fit runs is what the CUDA guard and cache clearing need.
+        compute_device if compute_device is not None else device,
         verbose_level,
         progress_bar,
         restart_procs=restart_procs,

@@ -17,6 +17,7 @@ from gMRItensor.decomposition import _init_restart_worker_backend
 from gMRItensor.decomposition import _nn_violations
 from gMRItensor.decomposition import _resolve_nn_modes
 from gMRItensor.decomposition import _suggest_max_iter
+from gMRItensor.decomposition import _to_solver_slices
 from gMRItensor.decomposition import _zero_negligible_loadings
 from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.plotting.evolving_mode import evolving_factors_to_numpy
@@ -630,6 +631,80 @@ def test_PARAFAC2_matcouply_gpu():
     assert model.subject_mode.shape == (3, 2)
     assert [b.shape for b in model.evolving_states] == [(4, 2), (5, 2), (6, 2)]
     assert torch.isfinite(error)
+
+
+# ---------------------------------------------------------------------------
+# compute_device: fit CPU-resident input elsewhere without a host-side copy
+# ---------------------------------------------------------------------------
+
+
+def test_to_solver_slices_casts_on_target_device():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    slices = [s.float() for s in make_parafac2_slices("cpu")]
+    originals = [s.clone() for s in slices]
+
+    converted = _to_solver_slices(slices, device)
+
+    for s, original, c in zip(slices, originals, converted):
+        assert c.dtype == torch.float64
+        assert c.device.type == device.type
+        # The caller's input is left as it was.
+        assert s.dtype == torch.float32
+        assert s.device.type == "cpu"
+        assert torch.equal(s, original)
+        torch.testing.assert_close(c.cpu(), original.double())
+
+
+@pytest.mark.parametrize("solver", SOLVERS)
+def test_PARAFAC2_compute_device_none_preserves_behaviour(solver):
+    setup_backend()
+    slices = make_parafac2_slices("cpu")
+    kwargs = dict(rank=2, PARAFAC2_max_iter=500, random_state=0, solver=solver)
+
+    default_model, default_errors, _ = compute_PARAFAC2_decomposition(slices, **kwargs)
+    explicit_model, explicit_errors, _ = compute_PARAFAC2_decomposition(
+        slices, compute_device=torch.device("cpu"), **kwargs
+    )
+
+    torch.testing.assert_close(default_model.subject_mode, explicit_model.subject_mode)
+    torch.testing.assert_close(default_model.label_mode, explicit_model.label_mode)
+    assert [float(e) for e in default_errors] == [float(e) for e in explicit_errors]
+
+
+def test_PARAFAC2_matcouply_cpu_input_cuda_compute():
+    if not torch.cuda.is_available():
+        pytest.skip("CUDA not available")
+    setup_backend()
+    slices = [s.float() for s in make_parafac2_slices("cpu")]
+
+    model, _, _ = compute_PARAFAC2_decomposition(
+        slices,
+        rank=2,
+        PARAFAC2_max_iter=500,
+        solver="matcouply",
+        compute_device=torch.device("cuda"),
+    )
+
+    assert model.label_mode.device.type == "cuda"
+    assert all(s.device.type == "cpu" and s.dtype == torch.float32 for s in slices)
+
+
+def test_restart_procs_rejected_on_cuda_compute_device():
+    # The guard runs before any work, so this needs no GPU.
+    setup_backend()
+    slices = make_parafac2_slices("cpu")
+
+    with pytest.raises(ValueError, match="CUDA"):
+        run_PARAFAC2_decomposition_repeated(
+            slices,
+            rank=2,
+            max_iter=10,
+            init_repeats=2,
+            progress_bar=False,
+            restart_procs=2,
+            solver="matcouply",
+            compute_device=torch.device("cuda"),
+        )
 
 
 # ---------------------------------------------------------------------------
