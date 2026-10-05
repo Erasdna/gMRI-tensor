@@ -1,12 +1,14 @@
 import nibabel as nib
 import numpy as np
 import pandas as pd
+import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
 from gMRItensor.preprocessing import compute_roi_scaling
 from gMRItensor.preprocessing import compute_tracer_from_image
 from gMRItensor.preprocessing import compute_tracer_parallel
 from gMRItensor.preprocessing import iter_tracer_results
+from gMRItensor.preprocessing import load_tensor_from_parquet
 from gMRItensor.preprocessing import prepare_tensor
 from gMRItensor.preprocessing import scale_tensor
 from gMRItensor.preprocessing import write_tracer_parquet
@@ -726,3 +728,117 @@ def test_write_tracer_parquet_cleans_up_on_failure(tmp_path):
 def test_write_tracer_parquet_rejects_empty_args_list(tmp_path):
     with pytest.raises(ValueError, match="empty"):
         write_tracer_parquet([], tmp_path / "tracer.parquet")
+
+
+def _assert_matches_prepare_tensor(got, df, model, **kwargs):
+    expected = prepare_tensor(df, require_regular=model == "cp", **kwargs)
+    for got_part, expected_part in zip(got, expected):
+        if isinstance(expected_part, list):
+            assert len(got_part) == len(expected_part)
+            for g, e in zip(got_part, expected_part):
+                np.testing.assert_allclose(g, e, rtol=1e-6)
+        elif expected_part.dtype.kind == "f":
+            np.testing.assert_allclose(got_part, expected_part, rtol=1e-6)
+        else:
+            np.testing.assert_array_equal(got_part, expected_part)
+
+
+def _write_long_df(df, path, row_group_size=None):
+    """Write `df` with the given row-group layout (None: one group)."""
+    table = pa.Table.from_pandas(df, preserve_index=False)
+    pq.write_table(table, path, row_group_size=row_group_size)
+    return path
+
+
+@pytest.mark.parametrize("model", ["cp", "parafac2"])
+@pytest.mark.parametrize("func", [np.nanmedian, None])
+def test_load_tensor_from_parquet_matches_prepare_tensor(tmp_path, model, func):
+    args_list = _make_streaming_args_list(tmp_path, func)
+    tracer_path, _ = write_tracer_parquet(
+        args_list,
+        tmp_path / "tracer.parquet",
+        n_procs=1,
+    )
+
+    got = load_tensor_from_parquet(tracer_path, model)
+
+    data = got[0]
+    assert all(
+        part.dtype == np.float32 for part in (data if model == "parafac2" else [data])
+    )
+    _assert_matches_prepare_tensor(got, pd.read_parquet(tracer_path), model)
+
+
+@pytest.mark.parametrize("model", ["cp", "parafac2"])
+@pytest.mark.parametrize("row_group_size", [None, 2, 5])
+def test_load_tensor_from_parquet_is_row_group_layout_independent(
+    tmp_path,
+    model,
+    row_group_size,
+):
+    # Regression test: images split across, or sharing, row groups must give
+    # the same tensor as one row group per image. Shuffled so chunks of one
+    # image arrive out of order and interleaved with other images.
+    df = make_long_df({"a": [0, 1, 2], "b": [0, 2], "c": [1]})
+    df = df.sample(frac=1, random_state=0).reset_index(drop=True)
+    path = _write_long_df(df, tmp_path / "tracer.parquet", row_group_size)
+
+    got = load_tensor_from_parquet(path, model, dtype=np.float64)
+
+    _assert_matches_prepare_tensor(got, df, model)
+
+
+@pytest.mark.parametrize("model", ["cp", "parafac2"])
+def test_load_tensor_from_parquet_missing_timepoints_and_labels(tmp_path, model):
+    df = make_long_df(
+        {"a": [0, 1, 2], "b": [0, 2]},
+        missing={("b", 2, 20)},
+    )
+    # Label 30 absent (not just NaN) from one observed image.
+    df = df[~((df["subject"] == "a") & (df["time_point"] == 1) & (df["labels"] == 30))]
+    path = _write_long_df(df, tmp_path / "tracer.parquet", row_group_size=3)
+
+    got = load_tensor_from_parquet(path, model)
+
+    np.testing.assert_array_equal(got[3], [10])
+    np.testing.assert_array_equal(got[4], [0])
+    if model == "cp":
+        assert got[0].shape == (2, 3, 1)
+        assert np.isnan(got[0][1, 1]).all()
+    else:
+        assert [s.shape for s in got[0]] == [(3, 1), (2, 1)]
+    _assert_matches_prepare_tensor(got, df, model)
+
+
+@pytest.mark.parametrize("model", ["cp", "parafac2"])
+def test_load_tensor_from_parquet_min_timepoints(tmp_path, model):
+    df = make_long_df({"a": [0, 1, 2], "b": [0]})
+    path = _write_long_df(df, tmp_path / "tracer.parquet", row_group_size=3)
+
+    got = load_tensor_from_parquet(path, model, min_timepoints=2)
+
+    np.testing.assert_array_equal(got[1], ["a"])
+    _assert_matches_prepare_tensor(got, df, model, min_timepoints=2)
+
+
+@pytest.mark.parametrize("model", ["cp", "parafac2"])
+def test_load_tensor_from_parquet_group_filtering(tmp_path, model):
+    df = make_long_df({"a": [0, 1], "b": [0, 1], "c": [0, 1]})
+    df["group"] = df["subject"].map({"a": "x", "b": "y", "c": "x"})
+    path = _write_long_df(df, tmp_path / "tracer.parquet", row_group_size=4)
+
+    got = load_tensor_from_parquet(path, model, group_filtering=("group", "x"))
+
+    np.testing.assert_array_equal(got[1], ["a", "c"])
+    _assert_matches_prepare_tensor(got, df, model, group_filtering=("group", "x"))
+
+
+def test_load_tensor_from_parquet_rejects_bad_arguments(tmp_path):
+    path = _write_long_df(make_long_df({"a": [0]}), tmp_path / "tracer.parquet")
+
+    with pytest.raises(ValueError, match="model"):
+        load_tensor_from_parquet(path, "tucker")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="not in the file"):
+        load_tensor_from_parquet(path, "cp", group_filtering=("group", "x"))
+    with pytest.raises(ValueError, match="No tracer rows"):
+        load_tensor_from_parquet(path, "cp", group_filtering=("subject", "zzz"))

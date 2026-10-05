@@ -7,13 +7,16 @@ from typing import Any
 from typing import Callable
 from typing import cast
 from typing import Iterator
+from typing import Literal
 from typing import NamedTuple
 
 import nibabel as nib
 import numexpr as ne
 import numpy as np
+import numpy.typing as npt
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 from nibabel.nifti1 import Nifti1Image
 from scipy.ndimage import labeled_comprehension
@@ -297,8 +300,9 @@ def write_tracer_parquet(
 ) -> tuple[Path, Path | None]:
     """Stream `iter_tracer_results` to parquet, one row group per image.
 
-    Writes the long-format frame `prepare_tensor` consumes (read it back with
-    `pd.read_parquet`) while holding at most a few images in memory. In
+    Writes the long-format frame `prepare_tensor` consumes while holding at
+    most a few images in memory. Read it back with `load_tensor_from_parquet`,
+    which builds the tensor without loading the whole frame. In
     per-voxel mode (`func=None`) voxel coordinates also go to a
     `.coords.parquet` sidecar, one `(labels, label_index, i, j, k)` row per
     voxel, taken from the first image -- so all images are assumed to share
@@ -515,3 +519,246 @@ def prepare_tensor(
         labels,
         label_index,
     )
+
+
+# `(labels, label_index)` packed into one int64, so a column is a scalar
+# whose sort order matches `_pivot_tracer_df`'s lexicographic column order
+# (both parts non-negative, `label_index < 2**32`).
+_KEY_SHIFT = 32
+_KEY_MASK = (1 << _KEY_SHIFT) - 1
+
+
+class _ImageChunk(NamedTuple):
+    """Rows of one (subject, time_point) image from a single row group."""
+
+    subject: str
+    time_point: int
+    keys: np.ndarray
+    values: np.ndarray
+
+
+def _iter_image_chunks(
+    parquet_file: pq.ParquetFile,
+    group_filtering: tuple[str, str] | None,
+) -> Iterator[_ImageChunk]:
+    """Yield each row group of a tracer parquet file split per image.
+
+    An image may span several row groups or share one with other images, so
+    callers must not assume one chunk per image.
+    """
+    columns = ["subject", "time_point", "labels", "label_index", "values"]
+    if group_filtering is not None:
+        if group_filtering[0] not in parquet_file.schema_arrow.names:
+            raise ValueError(
+                f"group_filtering column {group_filtering[0]!r} is not in the file",
+            )
+        if group_filtering[0] not in columns:
+            columns.append(group_filtering[0])
+
+    for i in range(parquet_file.num_row_groups):
+        table = parquet_file.read_row_group(i, columns=columns)
+        if group_filtering is not None:
+            column, value = group_filtering
+            table = table.filter(pc.equal(pc.cast(table[column], pa.string()), value))
+        if table.num_rows == 0:
+            continue
+        table = table.unify_dictionaries().combine_chunks()
+
+        subject_column = table["subject"].chunk(0)
+        if pa.types.is_dictionary(subject_column.type):
+            subject_codes = subject_column.indices.to_numpy(zero_copy_only=False)
+            subject_names = subject_column.dictionary.to_pylist()
+        else:
+            subject_names, subject_codes = np.unique(
+                subject_column.to_numpy(zero_copy_only=False),
+                return_inverse=True,
+            )
+        time_points = table["time_point"].to_numpy().astype(np.int64)
+        keys = (table["labels"].to_numpy().astype(np.int64) << _KEY_SHIFT) | table[
+            "label_index"
+        ].to_numpy().astype(np.int64)
+        values = table["values"].to_numpy()
+        del table
+
+        if (
+            subject_codes.min() == subject_codes.max()
+            and time_points.min() == time_points.max()
+        ):
+            yield _ImageChunk(
+                str(subject_names[subject_codes[0]]),
+                int(time_points[0]),
+                keys,
+                values,
+            )
+            continue
+
+        pairs, inverse = np.unique(
+            np.column_stack([subject_codes, time_points]),
+            axis=0,
+            return_inverse=True,
+        )
+        inverse = inverse.ravel()
+        for j, (code, time_point) in enumerate(pairs):
+            rows = inverse == j
+            yield _ImageChunk(
+                str(subject_names[code]),
+                int(time_point),
+                keys[rows],
+                values[rows],
+            )
+
+
+def _scan_tracer_parquet(
+    parquet_file: pq.ParquetFile,
+    group_filtering: tuple[str, str] | None,
+) -> tuple[np.ndarray, dict[str, set[int]]]:
+    """First pass of `load_tensor_from_parquet`.
+
+    Returns the sorted keys finite in every observed image -- the columns
+    `prepare_tensor`'s `dropna` keeps -- and each subject's observed time
+    points.
+    """
+    keys = np.empty(0, dtype=np.int64)
+    finite_count = np.empty(0, dtype=np.int64)
+    observed: dict[str, set[int]] = {}
+    # Images usually share one voxel template, so reuse the previous chunk's
+    # positions instead of re-sorting ~10M keys per image.
+    previous_keys: np.ndarray | None = None
+    previous_positions = np.empty(0, dtype=np.intp)
+
+    for chunk in _iter_image_chunks(parquet_file, group_filtering):
+        observed.setdefault(chunk.subject, set()).add(chunk.time_point)
+        finite_keys = chunk.keys[np.isfinite(chunk.values)]
+        if previous_keys is None or not np.array_equal(finite_keys, previous_keys):
+            merged = np.union1d(keys, finite_keys)
+            merged_count = np.zeros(len(merged), dtype=np.int64)
+            merged_count[np.searchsorted(merged, keys)] = finite_count
+            keys, finite_count = merged, merged_count
+            previous_keys = finite_keys
+            previous_positions = np.searchsorted(keys, finite_keys)
+        finite_count[previous_positions] += 1
+
+    if not observed:
+        raise ValueError("No tracer rows left to build a tensor from")
+
+    n_images = sum(len(time_points) for time_points in observed.values())
+    return keys[finite_count == n_images], observed
+
+
+def load_tensor_from_parquet(
+    path: Path | str,
+    model: Literal["cp", "parafac2"],
+    group_filtering: tuple[str, str] | None = None,
+    min_timepoints: int = 1,
+    dtype: npt.DTypeLike = np.float32,
+) -> tuple[
+    np.ndarray | list[np.ndarray],
+    np.ndarray,
+    np.ndarray | list[np.ndarray],
+    np.ndarray,
+    np.ndarray,
+]:
+    """Build `prepare_tensor`'s output directly from a `write_tracer_parquet` file.
+
+    Equivalent to `prepare_tensor(pd.read_parquet(path), ...)`, but streams
+    the file one row group at a time into a preallocated output, so the
+    long-format frame -- many times the tensor's size for per-voxel data --
+    is never held in memory. Two passes over the file: the first finds the
+    columns to keep and the observed (subject, time_point) images, the second
+    fills in values.
+
+    Parameters
+    ----------
+    path : Path | str
+        Long-format tracer parquet file, as written by `write_tracer_parquet`.
+        Any row-group layout works; `(subject, time_point, labels,
+        label_index)` is assumed unique, which that writer guarantees.
+    model : {"cp", "parafac2"}
+        `"cp"` returns the regular `(subjects, time_points, labels)` tensor
+        (`prepare_tensor(require_regular=True)`), `"parafac2"` the ragged
+        per-subject slices (`require_regular=False`).
+    group_filtering, min_timepoints
+        As in `prepare_tensor`.
+    dtype : npt.DTypeLike, optional
+        Output dtype. float32 by default, halving memory versus float64.
+
+    Returns
+    -------
+    Same tuples as `prepare_tensor` for the corresponding `require_regular`.
+    """
+    if model not in ("cp", "parafac2"):
+        raise ValueError(f"model must be 'cp' or 'parafac2', got {model!r}")
+
+    parquet_file = pq.ParquetFile(path, read_dictionary=["subject"])
+    valid_keys, observed = _scan_tracer_parquet(parquet_file, group_filtering)
+
+    subjects = []
+    timepoints_per_subject = []
+    dropped_subjects = []
+    for subject in sorted(observed):
+        time_points = np.array(sorted(observed[subject]), dtype=int)
+        if len(time_points) < min_timepoints:
+            dropped_subjects.append((subject, len(time_points)))
+            continue
+        subjects.append(subject)
+        timepoints_per_subject.append(time_points)
+
+    if dropped_subjects:
+        print(
+            f"load_tensor_from_parquet: dropped {len(dropped_subjects)} subject(s) "
+            f"with fewer than {min_timepoints} observed time points: "
+            f"{dropped_subjects}",
+        )
+
+    all_timepoints = np.array(
+        sorted({t for tps in timepoints_per_subject for t in tps}),
+        dtype=int,
+    )
+    subject_index = {subject: i for i, subject in enumerate(subjects)}
+    n_labels = len(valid_keys)
+
+    output: np.ndarray | list[np.ndarray]
+    if model == "cp":
+        tensor = np.full((len(subjects), len(all_timepoints), n_labels), np.nan, dtype)
+        timepoint_index = {t: i for i, t in enumerate(all_timepoints)}
+
+        def target_row(subject: str, time_point: int) -> np.ndarray:
+            return tensor[subject_index[subject], timepoint_index[time_point]]
+
+        output = tensor
+    else:
+        # Every kept key is finite in every observed image, so each row is
+        # filled completely by the second pass.
+        slices = [
+            np.empty((len(tps), n_labels), dtype) for tps in timepoints_per_subject
+        ]
+        row_index = [
+            {t: i for i, t in enumerate(tps)} for tps in timepoints_per_subject
+        ]
+
+        def target_row(subject: str, time_point: int) -> np.ndarray:
+            i = subject_index[subject]
+            return slices[i][row_index[i][time_point]]
+
+        output = slices
+
+    previous_keys: np.ndarray | None = None
+    positions = np.empty(0, dtype=np.intp)
+    kept = np.empty(0, dtype=bool)
+    for chunk in _iter_image_chunks(parquet_file, group_filtering):
+        if chunk.subject not in subject_index:
+            continue
+        if previous_keys is None or not np.array_equal(chunk.keys, previous_keys):
+            positions = np.searchsorted(valid_keys, chunk.keys)
+            kept = positions < n_labels
+            kept[kept] = valid_keys[positions[kept]] == chunk.keys[kept]
+            positions = positions[kept]
+            previous_keys = chunk.keys
+        target_row(chunk.subject, chunk.time_point)[positions] = chunk.values[kept]
+
+    labels = (valid_keys >> _KEY_SHIFT).astype(int)
+    label_index = (valid_keys & _KEY_MASK).astype(int)
+    subjects_arr = np.array(subjects).astype(str)
+    if model == "cp":
+        return output, subjects_arr, all_timepoints, labels, label_index
+    return output, subjects_arr, timepoints_per_subject, labels, label_index
