@@ -540,13 +540,17 @@ class _ImageChunk(NamedTuple):
 def _iter_image_chunks(
     parquet_file: pq.ParquetFile,
     group_filtering: tuple[str, str] | None,
+    with_keys: bool = True,
 ) -> Iterator[_ImageChunk]:
     """Yield each row group of a tracer parquet file split per image.
 
     An image may span several row groups or share one with other images, so
-    callers must not assume one chunk per image.
+    callers must not assume one chunk per image. With `with_keys=False` the
+    `labels`/`label_index` columns are not read and `keys` is empty.
     """
-    columns = ["subject", "time_point", "labels", "label_index", "values"]
+    columns = ["subject", "time_point", "values"]
+    if with_keys:
+        columns += ["labels", "label_index"]
     if group_filtering is not None:
         if group_filtering[0] not in parquet_file.schema_arrow.names:
             raise ValueError(
@@ -574,9 +578,12 @@ def _iter_image_chunks(
                 return_inverse=True,
             )
         time_points = table["time_point"].to_numpy().astype(np.int64)
-        keys = (table["labels"].to_numpy().astype(np.int64) << _KEY_SHIFT) | table[
-            "label_index"
-        ].to_numpy().astype(np.int64)
+        keys = (
+            (table["labels"].to_numpy().astype(np.int64) << _KEY_SHIFT)
+            | table["label_index"].to_numpy().astype(np.int64)
+            if with_keys
+            else np.empty(0, dtype=np.int64)
+        )
         values = table["values"].to_numpy()
         del table
 
@@ -603,31 +610,51 @@ def _iter_image_chunks(
             yield _ImageChunk(
                 str(subject_names[code]),
                 int(time_point),
-                keys[rows],
+                keys[rows] if with_keys else keys,
                 values[rows],
             )
+
+
+def _invalid_fraction_per_session(
+    parquet_file: pq.ParquetFile,
+    group_filtering: tuple[str, str] | None,
+) -> dict[tuple[str, int], float]:
+    """Non-finite fraction of each `(subject, time_point)` session's values.
+
+    With a shared template every session has the same rows, so this is the
+    fraction of invalid voxels (or ROIs).
+    """
+    n_rows: dict[tuple[str, int], int] = {}
+    n_invalid: dict[tuple[str, int], int] = {}
+    for chunk in _iter_image_chunks(parquet_file, group_filtering, with_keys=False):
+        session = (chunk.subject, chunk.time_point)
+        n_rows[session] = n_rows.get(session, 0) + len(chunk.values)
+        n_invalid[session] = n_invalid.get(session, 0) + int(
+            np.count_nonzero(~np.isfinite(chunk.values)),
+        )
+    return {session: n_invalid[session] / n_rows[session] for session in n_rows}
 
 
 def _scan_tracer_parquet(
     parquet_file: pq.ParquetFile,
     group_filtering: tuple[str, str] | None,
-) -> tuple[np.ndarray, dict[str, set[int]]]:
-    """First pass of `load_tensor_from_parquet`.
+    sessions: set[tuple[str, int]],
+) -> np.ndarray:
+    """Sorted keys finite in every one of `sessions`.
 
-    Returns the sorted keys finite in every observed image -- the columns
-    `prepare_tensor`'s `dropna` keeps -- and each subject's observed time
-    points.
+    The columns `prepare_tensor`'s `dropna` would keep if `sessions` were the
+    only observed rows; chunks of other sessions are ignored.
     """
     keys = np.empty(0, dtype=np.int64)
     finite_count = np.empty(0, dtype=np.int64)
-    observed: dict[str, set[int]] = {}
     # Images usually share one voxel template, so reuse the previous chunk's
     # positions instead of re-sorting ~10M keys per image.
     previous_keys: np.ndarray | None = None
     previous_positions = np.empty(0, dtype=np.intp)
 
     for chunk in _iter_image_chunks(parquet_file, group_filtering):
-        observed.setdefault(chunk.subject, set()).add(chunk.time_point)
+        if (chunk.subject, chunk.time_point) not in sessions:
+            continue
         finite_keys = chunk.keys[np.isfinite(chunk.values)]
         if previous_keys is None or not np.array_equal(finite_keys, previous_keys):
             merged = np.union1d(keys, finite_keys)
@@ -638,18 +665,15 @@ def _scan_tracer_parquet(
             previous_positions = np.searchsorted(keys, finite_keys)
         finite_count[previous_positions] += 1
 
-    if not observed:
-        raise ValueError("No tracer rows left to build a tensor from")
-
-    n_images = sum(len(time_points) for time_points in observed.values())
-    return keys[finite_count == n_images], observed
+    return keys[finite_count == len(sessions)]
 
 
 def load_tensor_from_parquet(
     path: Path | str,
     model: Literal["cp", "parafac2"],
     group_filtering: tuple[str, str] | None = None,
-    min_timepoints: int = 1,
+    min_timepoints: int | None = None,
+    max_invalid_fraction: float = 0.9,
     dtype: npt.DTypeLike = np.float32,
 ) -> tuple[
     np.ndarray | list[np.ndarray],
@@ -663,9 +687,16 @@ def load_tensor_from_parquet(
     Equivalent to `prepare_tensor(pd.read_parquet(path), ...)`, but streams
     the file one row group at a time into a preallocated output, so the
     long-format frame -- many times the tensor's size for per-voxel data --
-    is never held in memory. Two passes over the file: the first finds the
-    columns to keep and the observed (subject, time_point) images, the second
-    fills in values.
+    is never held in memory. Three passes over the file: session validity,
+    columns to keep, then values.
+
+    Sessions are judged before columns: a `(subject, time_point)` session
+    whose non-finite fraction exceeds `max_invalid_fraction` is treated as
+    unobserved, so one corrupt scan cannot veto every column. Subjects are
+    then kept by their number of valid sessions, and only the kept sessions
+    decide which columns are finite everywhere. With `max_invalid_fraction=1`
+    and `min_timepoints=1` this matches `prepare_tensor` (except that
+    dropped subjects no longer veto columns).
 
     Parameters
     ----------
@@ -677,8 +708,16 @@ def load_tensor_from_parquet(
         `"cp"` returns the regular `(subjects, time_points, labels)` tensor
         (`prepare_tensor(require_regular=True)`), `"parafac2"` the ragged
         per-subject slices (`require_regular=False`).
-    group_filtering, min_timepoints
+    group_filtering : tuple[str, str] | None, optional
         As in `prepare_tensor`.
+    min_timepoints : int | None, optional
+        Minimum valid sessions to keep a subject. None (default) requires a
+        valid session at every time point, so `"cp"` has no NaN rows and
+        `"parafac2"` only complete subjects. For `"cp"`, a lower value keeps
+        incomplete subjects with NaN rows, for
+        `run_CP_decomposition_repeated(allow_nan_imputation=True)`.
+    max_invalid_fraction : float, optional
+        Sessions with a larger non-finite fraction are dropped. Default 0.9.
     dtype : npt.DTypeLike, optional
         Output dtype. float32 by default, halving memory versus float64.
 
@@ -690,14 +729,37 @@ def load_tensor_from_parquet(
         raise ValueError(f"model must be 'cp' or 'parafac2', got {model!r}")
 
     parquet_file = pq.ParquetFile(path, read_dictionary=["subject"])
-    valid_keys, observed = _scan_tracer_parquet(parquet_file, group_filtering)
+    invalid_fraction = _invalid_fraction_per_session(parquet_file, group_filtering)
+    if not invalid_fraction:
+        raise ValueError("No tracer rows left to build a tensor from")
 
+    observed: dict[str, set[int]] = {}
+    invalid_sessions = []
+    for (subject, time_point), fraction in sorted(invalid_fraction.items()):
+        valid_time_points = observed.setdefault(subject, set())
+        if fraction > max_invalid_fraction:
+            invalid_sessions.append((subject, time_point, round(fraction, 3)))
+        else:
+            valid_time_points.add(time_point)
+
+    if invalid_sessions:
+        print(
+            f"load_tensor_from_parquet: dropped {len(invalid_sessions)} session(s) "
+            f"with more than {max_invalid_fraction:.0%} invalid values "
+            f"(subject, time_point, fraction): {invalid_sessions}",
+        )
+
+    required = (
+        len(set().union(*observed.values()))
+        if min_timepoints is None
+        else min_timepoints
+    )
     subjects = []
     timepoints_per_subject = []
     dropped_subjects = []
     for subject in sorted(observed):
         time_points = np.array(sorted(observed[subject]), dtype=int)
-        if len(time_points) < min_timepoints:
+        if len(time_points) < max(required, 1):
             dropped_subjects.append((subject, len(time_points)))
             continue
         subjects.append(subject)
@@ -706,8 +768,24 @@ def load_tensor_from_parquet(
     if dropped_subjects:
         print(
             f"load_tensor_from_parquet: dropped {len(dropped_subjects)} subject(s) "
-            f"with fewer than {min_timepoints} observed time points: "
-            f"{dropped_subjects}",
+            f"with fewer than {required} valid time points: {dropped_subjects}",
+        )
+    if not subjects:
+        raise ValueError(
+            f"No subject has {required} valid time points; lower min_timepoints "
+            "or raise max_invalid_fraction",
+        )
+
+    sessions = {
+        (subject, int(t))
+        for subject, time_points in zip(subjects, timepoints_per_subject)
+        for t in time_points
+    }
+    valid_keys = _scan_tracer_parquet(parquet_file, group_filtering, sessions)
+    if len(valid_keys) == 0:
+        raise ValueError(
+            "No column is finite in every kept session; lower "
+            "max_invalid_fraction to drop more sessions",
         )
 
     all_timepoints = np.array(
@@ -727,8 +805,8 @@ def load_tensor_from_parquet(
 
         output = tensor
     else:
-        # Every kept key is finite in every observed image, so each row is
-        # filled completely by the second pass.
+        # Every kept key is finite in every kept session, so each row is
+        # filled completely by the last pass.
         slices = [
             np.empty((len(tps), n_labels), dtype) for tps in timepoints_per_subject
         ]
@@ -746,7 +824,7 @@ def load_tensor_from_parquet(
     positions = np.empty(0, dtype=np.intp)
     kept = np.empty(0, dtype=bool)
     for chunk in _iter_image_chunks(parquet_file, group_filtering):
-        if chunk.subject not in subject_index:
+        if (chunk.subject, chunk.time_point) not in sessions:
             continue
         if previous_keys is None or not np.array_equal(chunk.keys, previous_keys):
             positions = np.searchsorted(valid_keys, chunk.keys)

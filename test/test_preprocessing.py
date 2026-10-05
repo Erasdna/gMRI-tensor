@@ -783,7 +783,7 @@ def test_load_tensor_from_parquet_is_row_group_layout_independent(
     df = df.sample(frac=1, random_state=0).reset_index(drop=True)
     path = _write_long_df(df, tmp_path / "tracer.parquet", row_group_size)
 
-    got = load_tensor_from_parquet(path, model, dtype=np.float64)
+    got = load_tensor_from_parquet(path, model, min_timepoints=1, dtype=np.float64)
 
     _assert_matches_prepare_tensor(got, df, model)
 
@@ -798,7 +798,7 @@ def test_load_tensor_from_parquet_missing_timepoints_and_labels(tmp_path, model)
     df = df[~((df["subject"] == "a") & (df["time_point"] == 1) & (df["labels"] == 30))]
     path = _write_long_df(df, tmp_path / "tracer.parquet", row_group_size=3)
 
-    got = load_tensor_from_parquet(path, model)
+    got = load_tensor_from_parquet(path, model, min_timepoints=1)
 
     np.testing.assert_array_equal(got[3], [10])
     np.testing.assert_array_equal(got[4], [0])
@@ -842,3 +842,84 @@ def test_load_tensor_from_parquet_rejects_bad_arguments(tmp_path):
         load_tensor_from_parquet(path, "cp", group_filtering=("group", "x"))
     with pytest.raises(ValueError, match="No tracer rows"):
         load_tensor_from_parquet(path, "cp", group_filtering=("subject", "zzz"))
+
+
+@pytest.mark.parametrize("model", ["cp", "parafac2"])
+def test_load_tensor_from_parquet_drops_all_nan_session(tmp_path, model):
+    # Regression test: one all-NaN session used to veto every column, giving
+    # a tensor with 0 labels.
+    labels = (10, 20, 30)
+    df = make_long_df(
+        {"a": [0, 1, 2], "b": [0, 1, 2], "c": [0, 1, 2]},
+        labels=labels,
+        missing={("b", 1, label) for label in labels},
+    )
+    path = _write_long_df(df, tmp_path / "tracer.parquet", row_group_size=3)
+
+    got = load_tensor_from_parquet(path, model)
+
+    # Default min_timepoints needs every time point, so "b" goes entirely.
+    np.testing.assert_array_equal(got[1], ["a", "c"])
+    np.testing.assert_array_equal(got[3], labels)
+    _assert_matches_prepare_tensor(got, df[df["subject"] != "b"], model)
+
+
+def test_load_tensor_from_parquet_cp_keeps_incomplete_subject_as_nan(tmp_path):
+    labels = (10, 20, 30)
+    df = make_long_df(
+        {"a": [0, 1, 2], "b": [0, 1, 2]},
+        labels=labels,
+        missing={("b", 1, label) for label in labels},
+    )
+    path = _write_long_df(df, tmp_path / "tracer.parquet")
+
+    tensor, subjects, _, got_labels, _ = load_tensor_from_parquet(
+        path,
+        "cp",
+        min_timepoints=1,
+    )
+
+    np.testing.assert_array_equal(subjects, ["a", "b"])
+    np.testing.assert_array_equal(got_labels, labels)
+    assert np.isnan(tensor[1, 1]).all()
+    assert np.isfinite(np.delete(tensor.reshape(-1, 3), 4, axis=0)).all()
+
+
+@pytest.mark.parametrize("row_group_size", [None, 7])
+def test_load_tensor_from_parquet_max_invalid_fraction(tmp_path, row_group_size):
+    # Session ("a", 0) is 95% NaN: invalid at the 0.9 default, valid (and so
+    # vetoing its NaN columns) at 1.0. Small row groups split sessions, so
+    # the fraction must be accumulated across chunks.
+    labels = tuple(range(1, 21))
+    df = make_long_df(
+        {"a": [0, 1], "b": [0, 1]},
+        labels=labels,
+        missing={("a", 0, label) for label in labels[:19]},
+    )
+    df = df.sample(frac=1, random_state=0).reset_index(drop=True)
+    path = _write_long_df(df, tmp_path / "tracer.parquet", row_group_size)
+
+    _, subjects, _, got_labels, _ = load_tensor_from_parquet(path, "parafac2")
+    np.testing.assert_array_equal(subjects, ["b"])
+    np.testing.assert_array_equal(got_labels, labels)
+
+    got = load_tensor_from_parquet(path, "parafac2", max_invalid_fraction=1.0)
+    np.testing.assert_array_equal(got[1], ["a", "b"])
+    np.testing.assert_array_equal(got[3], [20])
+    _assert_matches_prepare_tensor(got, df, "parafac2")
+
+
+def test_load_tensor_from_parquet_raises_without_surviving_data(tmp_path):
+    # Each session is half NaN, on disjoint labels: all sessions valid, but no
+    # column finite in all of them.
+    df = make_long_df(
+        {"a": [0, 1]},
+        labels=(10, 20),
+        missing={("a", 0, 10), ("a", 1, 20)},
+    )
+    path = _write_long_df(df, tmp_path / "tracer.parquet")
+    with pytest.raises(ValueError, match="No column"):
+        load_tensor_from_parquet(path, "cp")
+
+    with pytest.raises(ValueError, match="No subject"):
+        load_tensor_from_parquet(path, "cp", max_invalid_fraction=0.4)
