@@ -3,12 +3,17 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scienceplots  # noqa: F401
+from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
+from gMRItensor.plotting.evolving_mode import _compute_group_ribbon_stats
+from gMRItensor.plotting.evolving_mode import _plot_ribbon_column
+from gMRItensor.plotting.evolving_mode import _resolve_subject_groups
 from gMRItensor.plotting.spatial_mode import _percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import create_colorbar_with_offset
+from gMRItensor.plotting.utils import get_color_palette
 from gMRItensor.plotting.utils import scale_mode
 from gMRItensor.plotting.utils import scatter_to_volume
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
@@ -17,9 +22,49 @@ matplotlib.use("Agg")
 plt.style.use(["science", "no-latex"])
 
 
+def _plot_time_column_cp(
+    ax: matplotlib.axes.Axes,
+    scaled_time_mode: np.ndarray,
+    time_points: list,
+    component: int,
+) -> None:
+    """Draw one component of a shared (CP) time mode as a single line."""
+    ax.plot(
+        time_points,
+        scaled_time_mode[:, component],
+        color=f"C{component}",
+        marker="o",
+    )
+    ax.set_xticks(time_points)
+    ax.set_ylim(-0.1, 1.1 * np.max(scaled_time_mode))
+
+
+def _plot_time_column_evolving(
+    ax: matplotlib.axes.Axes,
+    ribbon_stats_component: pd.DataFrame,
+    categories: list[str],
+    color_by_group: dict[str, str],
+) -> None:
+    """Draw one component of a PARAFAC2 evolving mode as per-group ribbons.
+
+    Same mean +/- SEM ribbon as the left column of `plot_evolving_mode`,
+    with the same 5% y-padding as `_finalize_evolving_mode_axes`.
+    """
+    ymin, ymax = _plot_ribbon_column(
+        ax,
+        ribbon_stats_component,
+        categories,
+        color_by_group,
+    )
+    if np.isfinite(ymin) and np.isfinite(ymax):
+        span = ymax - ymin if ymax > ymin else 1.0
+        ax.set_ylim(ymin - 0.05 * span, ymax + 0.05 * span)
+    ax.set_xticks(sorted(ribbon_stats_component["timepoint"].unique()))
+
+
 def plot_mode_grid(
     spatial_mode: np.ndarray,
-    time_mode: np.ndarray,
+    time_mode: np.ndarray | list[np.ndarray],
     subject_mode: np.ndarray,
     index_list: np.ndarray,
     csf_index_mask: np.ndarray,
@@ -35,6 +80,17 @@ def plot_mode_grid(
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """Plot a component-per-row grid: time, subject boxplot, and spatial mode.
 
+    The time column accepts either decomposition's time mode:
+
+    - CP: `time_mode` is one shared `(n_timepoints, rank)` array and
+      `time_points` its timepoints; drawn as a single line per component.
+    - PARAFAC2: `time_mode` is a list of per-subject `(n_timepoints_i, rank)`
+      evolving factors (e.g. from `evolving_factors_to_numpy`) and
+      `time_points` the matching list of per-subject timepoint arrays, both
+      in `subjects` order. Drawn as a per-group mean +/- SEM ribbon, as in
+      the left column of `plot_evolving_mode`, with group colors matching
+      the subject boxplot.
+
     The Parenchyma/CSF columns use the same masking and percentile scaling
     as `plot_spatial_mode`. `share_colorbar_scaling` likewise mirrors that
     function's parameter: True pools both regions into one `vmin`/`vmax`
@@ -45,8 +101,30 @@ def plot_mode_grid(
     n_components = spatial_mode.shape[1]
 
     scaled_spatial_mode = scale_mode(spatial_mode)
-    scaled_time_mode = scale_mode(time_mode)
     scaled_subject_mode = scale_mode(subject_mode)
+
+    is_evolving = isinstance(time_mode, list)
+    if isinstance(time_mode, list):
+        if not (len(time_mode) == len(time_points) == len(subjects)):
+            raise ValueError(
+                "For a PARAFAC2 evolving mode, time_mode, time_points and "
+                f"subjects must have the same length, got {len(time_mode)}, "
+                f"{len(time_points)}, {len(subjects)}",
+            )
+        groups = _resolve_subject_groups(subjects, subject_info, group_variable)
+        categories = sorted(set(groups))
+        color_by_group = dict(zip(categories, get_color_palette(len(categories))))
+        # Per-subject scaling, as in `plot_evolving_mode`.
+        long_df = _build_long_evolving_dataframe(
+            [scale_mode(np.asarray(factor)) for factor in time_mode],
+            [np.asarray(timepoints) for timepoints in time_points],
+            subjects,
+            groups,
+            n_components,
+        )
+        ribbon_stats = _compute_group_ribbon_stats(long_df)
+    else:
+        scaled_time_mode = scale_mode(time_mode)
 
     combined_index_mask = parenchyma_index_mask | csf_index_mask
 
@@ -98,6 +176,7 @@ def plot_mode_grid(
         gridspec_kw={"width_ratios": width_ratios},
         figsize=figsize,
         layout="constrained",
+        squeeze=False,
     )
     fig.set_layout_engine(
         "constrained",
@@ -111,21 +190,30 @@ def plot_mode_grid(
         subject_info,
         group_variable,
     )
+    # Match boxplot colors to the ribbon's, in the boxplot's category order.
+    boxplot_colors = (
+        [color_by_group[c] for c in df[group_variable].unique()]
+        if is_evolving
+        else None
+    )
 
     for component in range(n_components):
 
         time_ax = axs[component, 0]
-        time_ax.plot(
-            time_points,
-            scaled_time_mode[:, component],
-            color=f"C{component}",
-            marker="o",
-        )
+        if is_evolving:
+            _plot_time_column_evolving(
+                time_ax,
+                ribbon_stats.loc[ribbon_stats["component"] == component],
+                categories,
+                color_by_group,
+            )
+            if component == 0:
+                time_ax.legend(frameon=True, framealpha=0.9)
+        else:
+            _plot_time_column_cp(time_ax, scaled_time_mode, time_points, component)
         time_ax.set_ylabel(f"Component {component+1}")
         if component == n_components - 1:
             time_ax.set_xlabel("Time after injection [h]")
-        time_ax.set_xticks(time_points)
-        time_ax.set_ylim(-0.1, 1.1 * np.max(scaled_time_mode))
 
         subject_ax = axs[component, 1]
 
@@ -135,6 +223,7 @@ def plot_mode_grid(
             x_column=group_variable,
             y_column=f"comp_{component}",
             legend=False,
+            colors=boxplot_colors,
         )
 
         subject_ax.set_ylabel("")
@@ -205,7 +294,7 @@ def plot_mode_grid(
             for ax_obj, title in zip(
                 axs[component],
                 [
-                    "Time mode",
+                    "Evolving mode" if is_evolving else "Time mode",
                     "Subject mode",
                     "Spatial mode (Parenchyma)",
                     "Spatial mode (CSF)",

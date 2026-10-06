@@ -905,6 +905,64 @@ def test_plot_mode_grid_share_colorbar_scaling():
     assert independent_parenchyma != pytest.approx(independent_csf)
 
 
+def make_mode_grid_parafac2_fixture(n_components=2, seed=0):
+    # Same grid inputs, but with a ragged per-subject PARAFAC2 evolving mode.
+    kwargs = make_mode_grid_fixture(n_components=n_components, seed=seed)
+    rng = np.random.default_rng(seed)
+    evolving_factors = []
+    timepoints_per_subject = []
+    for i in range(len(kwargs["subjects"])):
+        n_timepoints = 4 + (i % 3)
+        evolving_factors.append(rng.random((n_timepoints, n_components)))
+        timepoints_per_subject.append(np.arange(n_timepoints))
+    kwargs["time_mode"] = evolving_factors
+    kwargs["time_points"] = timepoints_per_subject
+    return kwargs
+
+
+def test_plot_mode_grid_parafac2_smoke():
+    fig, axs = plot_mode_grid(**make_mode_grid_parafac2_fixture())
+    assert axs.shape == (2, 4)
+    assert "Evolving mode" in axs[0, 0].get_title()
+    plt.close(fig)
+
+
+def test_plot_mode_grid_parafac2_ribbon_matches_boxplot_colors():
+    fig, axs = plot_mode_grid(**make_mode_grid_parafac2_fixture())
+
+    ribbon_lines = {line.get_label(): line for line in axs[0, 0].get_lines()}
+    assert set(ribbon_lines) == {"A", "B"}
+    assert axs[0, 0].get_legend() is not None
+    assert axs[1, 0].get_legend() is None
+
+    # Boxes sit at integer x-positions in `subject_info` group order (A, B).
+    boxes = sorted(
+        axs[0, 1].patches,
+        key=lambda patch: patch.get_path().vertices[:, 0].mean(),
+    )
+    for group, box in zip(["A", "B"], boxes):
+        assert matplotlib.colors.to_rgb(box.get_facecolor()) == pytest.approx(
+            matplotlib.colors.to_rgb(ribbon_lines[group].get_color()),
+        )
+    plt.close(fig)
+
+
+def test_plot_mode_grid_single_component():
+    # Regression test for the axes-squeeze hazard at n_components == 1, for
+    # both the CP and PARAFAC2 time-mode inputs.
+    for make_fixture in (make_mode_grid_fixture, make_mode_grid_parafac2_fixture):
+        fig, axs = plot_mode_grid(**make_fixture(n_components=1))
+        assert axs.shape == (1, 4)
+        plt.close(fig)
+
+
+def test_plot_mode_grid_parafac2_length_mismatch():
+    kwargs = make_mode_grid_parafac2_fixture()
+    kwargs["time_points"] = kwargs["time_points"][:-1]
+    with pytest.raises(ValueError, match="same length"):
+        plot_mode_grid(**kwargs)
+
+
 @pytest.mark.parametrize("solver", ["tensorly", "matcouply"])
 def test_evolving_factors_to_numpy_accepts_either_solver(solver):
     # The plotting path's half of the plug-and-play claim: whichever solver

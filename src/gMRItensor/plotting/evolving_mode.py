@@ -34,6 +34,27 @@ def evolving_factors_to_numpy(
     return [_to_numpy(factor) for factor in evolving_states]
 
 
+def _resolve_subject_groups(
+    subjects: list[str],
+    subject_info: pd.DataFrame,
+    group_variable: str,
+) -> list[str]:
+    """Look up each subject's `group_variable` value, in `subjects` order.
+
+    Raises `ValueError` if a required column or any subject is missing.
+    """
+    if "subjects" not in subject_info.columns:
+        raise ValueError("subject_info must contain a 'subjects' column")
+    if group_variable not in subject_info.columns:
+        raise ValueError(f"'{group_variable}' column missing from subject_info")
+
+    subject_to_group = subject_info.set_index("subjects")[group_variable]
+    missing = [s for s in subjects if s not in subject_to_group.index]
+    if missing:
+        raise ValueError(f"Subject(s) not found in subject_info: {missing}")
+    return [subject_to_group.loc[s] for s in subjects]
+
+
 def _build_long_evolving_dataframe(
     scaled_factors: list[np.ndarray],
     timepoints_per_subject: list[np.ndarray],
@@ -298,16 +319,7 @@ def plot_evolving_mode(
             f"same length, got {len(evolving_factors)}, "
             f"{len(timepoints_per_subject)}, {len(subjects)}",
         )
-    if "subjects" not in subject_info.columns:
-        raise ValueError("subject_info must contain a 'subjects' column")
-    if group_variable not in subject_info.columns:
-        raise ValueError(f"'{group_variable}' column missing from subject_info")
-
-    subject_to_group = subject_info.set_index("subjects")[group_variable]
-    missing = [s for s in subjects if s not in subject_to_group.index]
-    if missing:
-        raise ValueError(f"Subject(s) not found in subject_info: {missing}")
-    groups = [subject_to_group.loc[s] for s in subjects]
+    groups = _resolve_subject_groups(subjects, subject_info, group_variable)
 
     categories = sorted(set(groups))
     colors = get_color_palette(len(categories))
