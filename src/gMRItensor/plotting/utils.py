@@ -1,4 +1,7 @@
 """Shared utility functions for plotting."""
+from collections.abc import Sequence
+from pathlib import Path
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,6 +12,9 @@ plt.style.use(["science", "no-latex"])
 # Spatial modes are unit-norm scaled by `scale_mode`, so they have no
 # physical unit.
 SPATIAL_COLORBAR_LABEL = "Loading (a.u.)"
+
+# Journal figure widths in inches, for `page_width` arguments.
+JOURNAL_WIDTHS = {"single": 3.5, "onehalf": 5.5, "double": 7.0}
 
 
 def scale_mode(arr: np.ndarray, rtol: float = 1e-10) -> np.ndarray:
@@ -321,3 +327,37 @@ def apply_row_ylims(
         span = ymax - ymin if ymax > ymin else 1.0
         for ax in axs[row, :]:
             ax.set_ylim(ymin - 0.05 * span, ymax + 0.05 * span)
+
+
+def resolve_page_width(page_width: str | float) -> float:
+    """A `JOURNAL_WIDTHS` name or a width in inches, as inches."""
+    if isinstance(page_width, str):
+        if page_width not in JOURNAL_WIDTHS:
+            raise ValueError(
+                f"page_width must be one of {sorted(JOURNAL_WIDTHS)} or a number "
+                f"of inches, got {page_width!r}",
+            )
+        return JOURNAL_WIDTHS[page_width]
+    return float(page_width)
+
+
+def save_figure(
+    fig: matplotlib.figure.Figure,
+    path_stem: Path | str,
+    formats: Sequence[str] = ("pdf", "png"),
+    dpi: int = 300,
+) -> list[Path]:
+    """Save `fig` as `<path_stem>.<format>` per format, then close it.
+
+    Parent directories are created. Returns the written paths, in `formats`
+    order.
+    """
+    path_stem = Path(path_stem)
+    path_stem.parent.mkdir(parents=True, exist_ok=True)
+    paths = [path_stem.with_name(f"{path_stem.name}.{fmt}") for fmt in formats]
+    try:
+        for path in paths:
+            fig.savefig(path, dpi=dpi)
+    finally:
+        plt.close(fig)
+    return paths
