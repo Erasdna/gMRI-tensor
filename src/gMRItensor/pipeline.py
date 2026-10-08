@@ -17,12 +17,14 @@ from gMRItensor.config import ConfigError
 from gMRItensor.config import DecompositionConfig
 from gMRItensor.config import PlottingConfig
 from gMRItensor.config import PreprocessingConfig
+from gMRItensor.config import ReplicabilityConfig
 from gMRItensor.config import TensorConfig
 from gMRItensor.decomposition import run_CP_decomposition_repeated
 from gMRItensor.decomposition import run_PARAFAC2_decomposition_repeated
 from gMRItensor.decomposition import setup_backend
 from gMRItensor.group_statistics import compare_roi_groups
 from gMRItensor.group_statistics import load_roi_statistics
+from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import summarize_roi_statistics
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
@@ -34,6 +36,10 @@ from gMRItensor.preprocessing import load_tensor_from_parquet
 from gMRItensor.preprocessing import PreprocessedPaths
 from gMRItensor.preprocessing import scale_tensor
 from gMRItensor.preprocessing import write_preprocessed_data
+from gMRItensor.replicability import CrossValidationEngine
+from gMRItensor.replicability import evaluate_replicability_multiproc
+from gMRItensor.replicability import HalfHalfEngine
+from gMRItensor.replicability import ReplicabilityEngine
 from gMRItensor.roi_groups import resolve_roi_groups
 
 matplotlib.use("Agg")
@@ -400,3 +406,83 @@ def run_decomposition(config: DecompositionConfig) -> list[Path]:
     )
     copy_config(config.source, config.output_dir, "decomposition")
     return written
+
+
+def _stratification(
+    config: ReplicabilityConfig,
+    subjects: np.ndarray,
+) -> torch.Tensor | None:
+    """Integer codes of `stratify_by`, in tensor-subject order."""
+    if config.stratify_by is None or config.subject_info is None:
+        return None
+    subject_info = pd.read_csv(config.subject_info, dtype={"subjects": str})
+    groups = resolve_subject_groups(list(subjects), subject_info, config.stratify_by)
+    codes, _ = pd.factorize(pd.Series(groups))
+    return torch.as_tensor(codes)
+
+
+def _engine(config: ReplicabilityConfig) -> ReplicabilityEngine:
+    if config.engine == "cv":
+        return CrossValidationEngine(
+            splits=int(config.splits or 2),
+            repeats=config.repeats,
+            seed=config.seed,
+        )
+    return HalfHalfEngine(repeats=config.repeats, seed=config.seed)
+
+
+def run_replicability(config: ReplicabilityConfig) -> Path:
+    """`gmri replicability`: factor match scores per rank -> `replicability.csv`.
+
+    The (optionally scaled) tensor is split by the engine; each rank gets a
+    fresh engine with `seed`, so ranks see the same splits.
+    """
+    data = load_decomposition_input(config.input, config.method, config.tensor)
+    stratification = _stratification(config, data.subjects)
+    setup_backend()
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    fit = config.fit
+    fit_kwargs = {
+        "init_repeats": fit.restarts,
+        "max_iter": fit.max_iter,
+        "tolerance": fit.tolerance,
+        "progress_bar": False,
+        **fit.options,
+    }
+
+    rows = []
+    for rank in config.ranks:
+        scores = evaluate_replicability_multiproc(
+            _engine(config),
+            data.data,
+            rank,
+            method="CP" if config.method == "cp" else "PARAFAC2",
+            stratification=stratification,
+            n_procs=config.n_procs,
+            **fit_kwargs,
+        )
+        for score in scores:
+            if config.engine == "cv":
+                common, fold_i, fold_j, fms = score
+                rows.append(
+                    {
+                        "rank": rank,
+                        "fold_i": fold_i,
+                        "fold_j": fold_j,
+                        "n_common": len(common),
+                        "fms": float(fms),
+                    },
+                )
+            else:
+                split, fms = score
+                rows.append({"rank": rank, "split": split, "fms": float(fms)})
+
+    columns = (
+        ["rank", "fold_i", "fold_j", "n_common", "fms"]
+        if config.engine == "cv"
+        else ["rank", "split", "fms"]
+    )
+    path = config.output_dir / "replicability.csv"
+    pd.DataFrame(rows, columns=columns).to_csv(path, index=False)
+    copy_config(config.source, config.output_dir, "replicability")
+    return path

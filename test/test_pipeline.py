@@ -13,14 +13,17 @@ from gMRItensor.config import DecompositionConfig
 from gMRItensor.config import load_decomposition_config
 from gMRItensor.config import load_plotting_config
 from gMRItensor.config import load_preprocessing_config
+from gMRItensor.config import load_replicability_config
 from gMRItensor.config import PlottingConfig
 from gMRItensor.config import PreprocessingConfig
+from gMRItensor.config import ReplicabilityConfig
 from gMRItensor.model_io import load_decomposition
 from gMRItensor.pipeline import grid_pages
 from gMRItensor.pipeline import read_manifest
 from gMRItensor.pipeline import run_decomposition
 from gMRItensor.pipeline import run_plotting
 from gMRItensor.pipeline import run_preprocessing
+from gMRItensor.pipeline import run_replicability
 
 
 def write_yaml(path: Path, data: dict[str, Any]) -> Path:
@@ -280,3 +283,55 @@ def test_run_decomposition_cp_wiring(
 def test_run_decomposition_before_preprocessing(synthetic_study: Any) -> None:
     with pytest.raises(FileNotFoundError, match="gmri preprocess"):
         run_decomposition(decomposition_config(synthetic_study))
+
+
+def replicability_config(study: Any, **overrides: Any) -> ReplicabilityConfig:
+    data = {
+        "input": "results/data/tracer.parquet",
+        "subject_info": "subjects.csv",
+        "output_dir": "results/replicability/test",
+        "method": "parafac2",
+        "ranks": [1],
+        "fit": {"restarts": 2, "max_iter": 50},
+        "engine": "halfhalf",
+        "repeats": 2,
+        "stratify_by": "diagnosis",
+        **overrides,
+    }
+    return load_replicability_config(
+        write_yaml(study.root / "replicability.yaml", data),
+    )
+
+
+def test_run_replicability_halfhalf(synthetic_study: Any) -> None:
+    run_preprocessing(preprocessing_config(synthetic_study))
+
+    path = run_replicability(replicability_config(synthetic_study))
+
+    out = synthetic_study.root / "results" / "replicability" / "test"
+    assert path == out / "replicability.csv"
+    scores = pd.read_csv(path)
+    assert list(scores.columns) == ["rank", "split", "fms"]
+    assert list(scores["split"]) == [0, 1]
+    assert scores["fms"].between(0, 1).all()
+    assert (out / "replicability.yaml").exists()
+
+
+def test_run_replicability_cv_columns(synthetic_study: Any) -> None:
+    run_preprocessing(preprocessing_config(synthetic_study))
+    config = replicability_config(synthetic_study, engine="cv", splits=3, repeats=1)
+
+    scores = pd.read_csv(run_replicability(config))
+
+    assert list(scores.columns) == ["rank", "fold_i", "fold_j", "n_common", "fms"]
+    assert len(scores) == 3  # fold pairs within the one repeat
+    assert (scores["n_common"] > 0).all()
+
+
+def test_run_replicability_missing_subject_info_row(synthetic_study: Any) -> None:
+    run_preprocessing(preprocessing_config(synthetic_study))
+    subject_info = pd.read_csv(synthetic_study.subject_info)
+    subject_info.iloc[1:].to_csv(synthetic_study.subject_info, index=False)
+
+    with pytest.raises(ValueError, match="sub-00"):
+        run_replicability(replicability_config(synthetic_study))
