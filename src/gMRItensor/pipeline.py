@@ -4,16 +4,28 @@
 previous stage wrote, so each can be run (and rerun) on its own.
 """
 import shutil
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 
+import matplotlib
 import numpy as np
 import pandas as pd
 from gMRItensor.config import ConfigError
+from gMRItensor.config import PlottingConfig
 from gMRItensor.config import PreprocessingConfig
+from gMRItensor.group_statistics import compare_roi_groups
+from gMRItensor.group_statistics import load_roi_statistics
+from gMRItensor.group_statistics import summarize_roi_statistics
+from gMRItensor.plotting.roi_evolution import figure_path
+from gMRItensor.plotting.roi_evolution import plot_roi_evolution_panels
+from gMRItensor.plotting.roi_evolution import plot_roi_evolution_rows
+from gMRItensor.plotting.utils import save_figure
 from gMRItensor.preprocessing import PreprocessedPaths
 from gMRItensor.preprocessing import write_preprocessed_data
 from gMRItensor.roi_groups import resolve_roi_groups
+
+matplotlib.use("Agg")
 
 MANIFEST_COLUMNS = (
     "subject",
@@ -105,3 +117,149 @@ def run_preprocessing(config: PreprocessingConfig) -> PreprocessedPaths:
     )
     copy_config(config.source, config.output_dir, "preprocessing")
     return paths
+
+
+def _require(path: Path, stage: str) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"{path} not found; run `gmri {stage}` first")
+
+
+def grid_pages(
+    rois: Sequence[str],
+    layout: str,
+    n_rows: int,
+    n_cols: int,
+) -> list[tuple[str, ...]]:
+    """Split a grid's ROIs into pages: `n_rows` per rows page, `n_rows * n_cols`
+    per panels page."""
+    per_page = n_rows if layout == "rows" else n_rows * n_cols
+    pages = []
+    for start in range(0, len(rois), per_page):
+        end = start + per_page
+        pages.append(tuple(rois[start:end]))
+    return pages
+
+
+def _draw(
+    layout: str,
+    rois: Sequence[str],
+    statistic: str,
+    tables: tuple[pd.DataFrame, pd.DataFrame],
+    stats: pd.DataFrame,
+    page_width: str | float,
+    n_rows: int = 1,
+    n_cols: int = 1,
+    sharey: bool = False,
+) -> matplotlib.figure.Figure:
+    summary, significance = tables
+    if layout == "rows":
+        fig, _ = plot_roi_evolution_rows(
+            summary,
+            stats,
+            significance,
+            rois,
+            statistic,
+            page_width=page_width,
+        )
+    else:
+        fig, _ = plot_roi_evolution_panels(
+            summary,
+            significance,
+            rois,
+            statistic,
+            n_rows,
+            n_cols,
+            page_width=page_width,
+            sharey=sharey,
+        )
+    return fig
+
+
+def run_plotting(config: PlottingConfig) -> list[Path]:
+    """`gmri plot`: ROI statistics -> group tables -> figures.
+
+    Summary and significance tables are written to `<output_dir>/roi_analysis/`
+    for every statistic a figure or grid uses, then figures are drawn from
+    those saved tables. Every configured ROI is checked against the file
+    before anything is written. Returns the written figure paths.
+    """
+    _require(config.roi_statistics, "preprocess")
+    subject_info = pd.read_csv(config.subject_info, dtype={"subjects": str})
+    used = {roi for figure in config.figures for roi in figure.rois}
+    used |= {roi for grid in config.grids for roi in grid.rois}
+    rois = sorted(used)
+    stats = load_roi_statistics(
+        config.roi_statistics,
+        subject_info,
+        config.group_variable,
+        rois=rois,
+    )
+
+    tables_dir = config.output_dir / "roi_analysis"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    tables = {}
+    for statistic in config.statistics:
+        summary_path = tables_dir / f"summary__{statistic}.parquet"
+        significance_path = tables_dir / f"significance__{statistic}.csv"
+        summarize_roi_statistics(stats, statistic).to_parquet(summary_path, index=False)
+        compare_roi_groups(
+            stats,
+            statistic,
+            min_group_n=config.min_group_n,
+            alpha=config.alpha,
+        ).to_csv(significance_path, index=False)
+        tables[statistic] = (
+            pd.read_parquet(summary_path),
+            pd.read_csv(significance_path),
+        )
+
+    written: list[Path] = []
+
+    def save(fig: matplotlib.figure.Figure, stem: Path) -> None:
+        written.extend(save_figure(fig, stem, config.formats, config.dpi))
+
+    for figure in config.figures:
+        for statistic in figure.statistics:
+            for roi in figure.rois:
+                fig = _draw(
+                    figure.layout,
+                    [roi],
+                    statistic,
+                    tables[statistic],
+                    stats,
+                    figure.page_width,
+                )
+                save(
+                    fig,
+                    figure_path(config.output_dir, None, roi, statistic, figure.layout),
+                )
+
+    for grid in config.grids:
+        pages = grid_pages(grid.rois, grid.layout, grid.n_rows, grid.n_cols)
+        for statistic in grid.statistics:
+            for page_number, page in enumerate(pages, start=1):
+                fig = _draw(
+                    grid.layout,
+                    page,
+                    statistic,
+                    tables[statistic],
+                    stats,
+                    grid.page_width,
+                    grid.n_rows,
+                    grid.n_cols,
+                    grid.sharey,
+                )
+                save(
+                    fig,
+                    figure_path(
+                        config.output_dir,
+                        grid.name,
+                        None,
+                        statistic,
+                        grid.layout,
+                        page=page_number if len(pages) > 1 else None,
+                    ),
+                )
+
+    copy_config(config.source, config.output_dir, "plotting")
+    return written
