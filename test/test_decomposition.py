@@ -454,7 +454,7 @@ def test_PARAFAC2_matcouply_restores_torch_defaults():
 
 def test_PARAFAC2_matcouply_restart_procs_parallel_succeeds():
     # Proves the float64/device setup reaches spawned workers: it travels
-    # with the fit via _restart_worker rather than being installed by the
+    # with the fit via _fit_one rather than being installed by the
     # pool initializer.
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     device = setup_backend()

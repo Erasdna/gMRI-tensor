@@ -1,18 +1,25 @@
 from abc import ABC
 from abc import abstractmethod
-from multiprocessing import get_context
+from collections.abc import Hashable
+from collections.abc import Mapping
 from typing import Any
 from typing import Literal
 
 import numpy as np
-import tensorly as tl
 import torch
-from gMRItensor import run_CP_decomposition_repeated
-from gMRItensor import run_PARAFAC2_decomposition_repeated
+from numpy.typing import ArrayLike
 from sklearn.model_selection import RepeatedStratifiedKFold
 from sklearn.model_selection import StratifiedShuffleSplit
 from tlviz.factor_tools import factor_match_score
-from tqdm import tqdm
+
+from .decomposition import _resolve_options
+from .decomposition import PARAFAC2Model
+from .jobs import collect
+from .jobs import CPModel
+from .jobs import GroupSummary
+from .jobs import InMemoryStore
+from .jobs import plan_replicability
+from .jobs import run_tasks
 
 
 #: One fit's factors. For PARAFAC2 the middle entry is a ragged list of
@@ -34,11 +41,19 @@ def _comparable_modes(factors: Factors) -> list[torch.Tensor]:
     return [subject_mode, label_mode]
 
 
-def _factor_to_cpu(factor: Any) -> Any:
-    """Move one factor to CPU, ragged evolving-state lists included."""
-    if isinstance(factor, torch.Tensor):
-        return factor.cpu()
-    return [f.cpu() for f in factor]
+def _weights_and_factors(
+    model: PARAFAC2Model | CPModel | None,
+) -> tuple[torch.Tensor, Factors]:
+    """A fit as `(weights, factors)`; PARAFAC2's mode 1 is the ragged list."""
+    if isinstance(model, PARAFAC2Model):
+        return model.weights, [
+            model.subject_mode,
+            model.evolving_states,
+            model.label_mode,
+        ]
+    assert model is not None
+    weights, factors = model
+    return weights, list(factors)
 
 
 def _align_pair(
@@ -95,22 +110,26 @@ class ReplicabilityEngine(ABC):
         self,
         seed: int = 0,
     ) -> None:
-        """Initialize the replicability engine."""
+        """Initialize the replicability engine.
+
+        The splits depend on `seed` alone, through the scikit-learn
+        splitter's own `random_state` -- no global RNG is touched -- so every
+        job of a distributed run regenerates identical splits.
+        """
         self.seed = seed
-        torch.manual_seed(self.seed)
-        np.random.seed(seed)
 
     @abstractmethod
     def generate_tasks(
         self,
         n_tot: int,
-        stratification: torch.Tensor | None = None,
-    ):
+        stratification: ArrayLike | None = None,
+    ) -> Any:
         """Generate list of tasks for computing CP decompositions.
 
         Args:
             n_tot: Total number of samples
-            stratification: Optional stratification labels for splitting
+            stratification: Optional stratification labels for splitting;
+                any labels numpy accepts (strings included), or a tensor.
 
         Returns:
             List of (task_id, indices) tuples
@@ -121,27 +140,28 @@ class ReplicabilityEngine(ABC):
         scikit-learn's splitters, which need numpy-convertible CPU data, so
         they are always kept on CPU -- including a `stratification` passed in
         on another device. The decomposed tensors' device is handled
-        separately, in `evaluate_replicability_multiproc`.
+        separately, in `jobs.run_tasks`.
         """
-        inds = torch.arange(n_tot)
+        inds = np.arange(n_tot)
         if stratification is None:
-            stratification = torch.ones(n_tot)
+            labels = np.ones(n_tot)
+        elif isinstance(stratification, torch.Tensor):
+            labels = stratification.cpu().numpy()
         else:
-            stratification = stratification.cpu()
-
-        return inds, stratification
+            labels = np.asarray(stratification)
+        return inds, labels
 
     @abstractmethod
     def compute_fms(
         self,
-        decomposition_results: dict[Any, tuple[list[int], Any, list[torch.Tensor]]],
-    ):
-        """Compute pairwise FMS scores from each task's factors.
+        summaries: Mapping[Hashable, GroupSummary],
+    ) -> Any:
+        """Compute pairwise FMS scores from each group's best fit.
 
-        `decomposition_results` maps task_id to (indices, weights, factors).
-        The returned tuple format depends on the engine.
+        `summaries` is `jobs.collect`'s output. A comparison involving a
+        group with no successful fit scores NaN. The returned tuple format
+        depends on the engine.
         """
-        pass
 
 
 class HalfHalfEngine(ReplicabilityEngine):
@@ -164,7 +184,7 @@ class HalfHalfEngine(ReplicabilityEngine):
     def generate_tasks(
         self,
         n_tot: int,
-        stratification: torch.Tensor | None = None,
+        stratification: ArrayLike | None = None,
     ) -> list[tuple[tuple[int, int], list[int]]]:
         """Generate ((split_index, half_index), indices) tasks."""
         inds, stratification = super().generate_tasks(n_tot, stratification)
@@ -180,10 +200,7 @@ class HalfHalfEngine(ReplicabilityEngine):
 
     def compute_fms(
         self,
-        decomposition_results: dict[
-            tuple[int, int],
-            tuple[list[int], Any, list[torch.Tensor]],
-        ],
+        summaries: Mapping[Hashable, GroupSummary],
     ) -> list[tuple[int, float]]:
         """Compute FMS between paired halves, as (split_index, fms) tuples.
 
@@ -195,10 +212,15 @@ class HalfHalfEngine(ReplicabilityEngine):
         measures component geometry rather than shape and scores a perfect
         1.0 for two fits with completely unrelated time courses.
         """
-        fms_results = []
+        fms_results: list[tuple[int, float]] = []
         for s in range(self.repeats):
-            _, weights_0, factors_0 = decomposition_results[(s, 0)]
-            _, weights_1, factors_1 = decomposition_results[(s, 1)]
+            best_0 = summaries[(s, 0)].best
+            best_1 = summaries[(s, 1)].best
+            if best_0 is None or best_1 is None:
+                fms_results.append((s, float("nan")))
+                continue
+            weights_0, factors_0 = _weights_and_factors(best_0.model)
+            weights_1, factors_1 = _weights_and_factors(best_1.model)
 
             score = factor_match_score(
                 (weights_0, _comparable_modes(factors_0)),
@@ -234,7 +256,7 @@ class CrossValidationEngine(ReplicabilityEngine):
     def generate_tasks(
         self,
         n_tot: int,
-        stratification: torch.Tensor | None = None,
+        stratification: ArrayLike | None = None,
     ) -> list[tuple[int, list[int]]]:
         """Generate (fold_index, train_indices) tasks."""
         inds, stratification = super().generate_tasks(n_tot, stratification)
@@ -247,24 +269,29 @@ class CrossValidationEngine(ReplicabilityEngine):
 
     def compute_fms(
         self,
-        decomposition_results: dict[int, tuple[list[int], Any, list[torch.Tensor]]],
+        summaries: Mapping[Hashable, GroupSummary],
     ) -> list[tuple[np.ndarray, int, int, float]]:
         """Compute pairwise FMS between folds within each repeat.
 
         Returns (common_subjects, fold_i, fold_j, fms_score) tuples.
         """
-        fms_results = []
+        fms_results: list[tuple[np.ndarray, int, int, float]] = []
         for repeat in range(self.repeats):
             for split in range(self.splits):
                 i = repeat * self.splits + split
-                ids_i, weights_i, fac_i = decomposition_results[i]
+                ids_i, best_i = summaries[i].indices, summaries[i].best
                 fold_limit = (repeat + 1) * self.splits
                 for j in range(i + 1, fold_limit):
-                    ids_j, weights_j, fac_j = decomposition_results[j]
+                    ids_j, best_j = summaries[j].indices, summaries[j].best
 
                     common_subjects = np.intersect1d(ids_i, ids_j)
                     if len(common_subjects) == 0:
                         continue
+                    if best_i is None or best_j is None:
+                        fms_results.append((common_subjects, i, j, float("nan")))
+                        continue
+                    weights_i, fac_i = _weights_and_factors(best_i.model)
+                    weights_j, fac_j = _weights_and_factors(best_j.model)
 
                     id_map_i = {sub_id: idx for idx, sub_id in enumerate(ids_i)}
                     id_map_j = {sub_id: idx for idx, sub_id in enumerate(ids_j)}
@@ -285,96 +312,19 @@ class CrossValidationEngine(ReplicabilityEngine):
         return fms_results
 
 
-def _n_samples(tensor: torch.Tensor | list[torch.Tensor]) -> int:
-    """Number of samples (subjects) along mode 0.
-
-    Works for both a regular tensor and a ragged list of per-subject slices.
-    """
-    return len(tensor)
-
-
-def _get_device(tensor: torch.Tensor | list[torch.Tensor]) -> torch.device:
-    """Device the input lives on.
-
-    Works for both a regular tensor and a ragged list of per-subject slices
-    (which have no `.device` of their own -- the first slice's device is used).
-    """
-    return tensor.device if isinstance(tensor, torch.Tensor) else tensor[0].device
-
-
-def _init_worker_backend() -> None:
-    """Pool initializer: set up TensorLy's backend in each worker process.
-
-    A "spawn"ed worker is a fresh process that never ran `setup_backend`, so
-    without this TensorLy falls back to numpy and cannot interpret the torch
-    tensors handed to it.
-    """
-    tl.set_backend("pytorch")
-
-
-def _decomposition_worker(
-    task_args: tuple[
-        Any,
-        list[int],
-        torch.Tensor | list[torch.Tensor],
-        int,
-        Literal["CP", "PARAFAC2"],
-        dict[str, Any],
-    ],
-) -> tuple[Any, list[int], Any, list[torch.Tensor]]:
-    """Worker function for parallel CP/PARAFAC2 decomposition.
-
-    Args:
-        task_args: (task_id, indices, full_tensor, rank, method, kwargs)
-
-    Returns:
-        (task_id, indices, weights, factors), tensors on CPU. For PARAFAC2
-        `factors` is `[subject_mode, evolving_states, label_mode]`, whose
-        middle entry is a ragged per-subject list -- see `_align_pair` and
-        `_comparable_modes` for how the engines handle that.
-    """
-    task_id, indices, full_tensor, rank, method, kwargs = task_args
-
-    try:
-        if method == "CP":
-            assert isinstance(full_tensor, torch.Tensor)
-            sub_tensor = full_tensor[indices]
-            weights, factors, _ = run_CP_decomposition_repeated(
-                sub_tensor, rank=rank, device=full_tensor.device, **kwargs
-            )
-        elif method == "PARAFAC2":
-            sub_slices = [full_tensor[i] for i in indices]
-            model, _ = run_PARAFAC2_decomposition_repeated(
-                sub_slices, rank=rank, device=_get_device(sub_slices), **kwargs
-            )
-            weights = model.weights
-            factors = [
-                model.subject_mode,
-                model.evolving_states,
-                model.label_mode,
-            ]
-        else:
-            raise ValueError(f"Unknown decomposition method: {method!r}")
-
-        # Move results to CPU to avoid device memory issues in multiprocessing
-        factors = [_factor_to_cpu(f) for f in factors]
-        weights = weights.cpu() if isinstance(weights, torch.Tensor) else weights
-
-        return task_id, indices, weights, factors
-    except Exception as e:
-        raise RuntimeError(f"Decomposition failed for task {task_id}: {e}") from e
-
-
 def evaluate_replicability_multiproc(
     replicability_engine: ReplicabilityEngine,
     tensor: torch.Tensor | list[torch.Tensor],
     rank: int,
     method: Literal["CP", "PARAFAC2"] = "CP",
-    stratification: torch.Tensor | None = None,
+    stratification: ArrayLike | None = None,
     n_procs: int = 1,
     **CP_kwargs: Any,
 ) -> list[tuple[Any, ...]]:
     """Evaluate replicability using repeated CP or PARAFAC2 decompositions.
+
+    The centralised form of `plan_replicability -> run_tasks -> collect ->
+    compute_fms`; a distributed run of the same steps gives identical scores.
 
     Args:
         replicability_engine: Engine defining the replicability strategy
@@ -384,67 +334,35 @@ def evaluate_replicability_multiproc(
         rank: Number of components for the decomposition
         method: "CP" or "PARAFAC2"
         stratification: Optional stratification labels for splitting
-        n_procs: Number of parallel processes. Must be 1 on CUDA.
-        **CP_kwargs: Forwarded to run_CP_decomposition_repeated /
-            run_PARAFAC2_decomposition_repeated. This is how PARAFAC2-only
-            options reach the solver -- `solver="matcouply"`, `nn_modes`,
-            `aoadmm_options`, `aoadmm_loss_tolerance` -- which is why this
-            module needs no solver-specific code. They `TypeError` with
-            `method="CP"`. Do not pass `return_diagnostics`: the worker
-            unpacks a fixed 4-tuple.
+        n_procs: Number of parallel processes, spread over every
+            (group, seed) fit. Must be 1 on CUDA.
+        **CP_kwargs: run_CP_decomposition_repeated /
+            run_PARAFAC2_decomposition_repeated options, with their defaults.
+            `init_repeats` is the number of restarts per group. This is how
+            PARAFAC2-only options reach the solver -- `solver="matcouply"`,
+            `nn_modes`, `aoadmm_options`, `aoadmm_loss_tolerance` -- which is
+            why this module needs no solver-specific code. They `TypeError`
+            with `method="CP"`. `restart_procs` is ignored.
 
     Returns:
-        List of FMS score tuples (format depends on engine type)
+        List of FMS score tuples (format depends on engine type). A split or
+        fold pair whose group had no converged restart scores NaN, with a
+        warning, rather than aborting the whole evaluation.
 
     Raises:
-        ValueError: If `n_procs >= 2` and `tensor` is on CUDA. Worker
+        ValueError: If `n_procs >= 2` and the fit runs on CUDA. Worker
             processes against a CUDA context from an already-initialized
             parent are unreliable across driver setups, so this is rejected
             rather than silently falling back to one process.
     """
-    is_cuda = _get_device(tensor).type == "cuda"
-    if is_cuda and n_procs >= 2:
-        # Checked before any work starts, to fail fast on misconfiguration.
-        raise ValueError(
-            f"n_procs={n_procs} requests multiprocessing, but `tensor` is on "
-            "CUDA. Running multiple worker processes against a CUDA context "
-            "is unsafe/unreliable across GPU driver setups -- pass "
-            "n_procs=1 to run sequentially on the GPU, or move `tensor` to "
-            "CPU first to use multiple processes.",
-        )
-
-    tasks = replicability_engine.generate_tasks(
-        _n_samples(tensor),
+    n_restarts = _resolve_options(method, CP_kwargs)["init_repeats"]
+    plan = plan_replicability(
+        replicability_engine,
+        len(tensor),
+        n_restarts,
         stratification,
     )
-
-    task_args = [
-        (task_id, indices, tensor, rank, method, CP_kwargs)
-        for task_id, indices in tasks
-    ]
-
-    results_dict: dict[Any, tuple[list[int], Any, list[torch.Tensor]]] = {}
-
-    # Use sequential processing for CUDA (multiprocessing doesn't work well with
-    # CUDA -- see the ValueError above) or when n_procs < 2
-    if n_procs < 2 or is_cuda:
-        for task in tqdm(
-            task_args,
-            desc="Computing decompositions (sequential)",
-        ):
-            task_id, indices, weights, factors = _decomposition_worker(task)
-            results_dict[task_id] = (indices, weights, factors)
-    else:
-        # "spawn" rather than the platform-default "fork"
-        with get_context("spawn").Pool(
-            n_procs,
-            initializer=_init_worker_backend,
-        ) as pool:
-            for task_id, indices, weights, factors in tqdm(
-                pool.imap_unordered(_decomposition_worker, task_args),
-                total=len(task_args),
-                desc=f"Computing decompositions (parallel, {n_procs} procs)",
-            ):
-                results_dict[task_id] = (indices, weights, factors)
-
-    return replicability_engine.compute_fms(results_dict)
+    store = InMemoryStore()
+    run_tasks(plan, tensor, rank, method, store, n_procs=n_procs, **CP_kwargs)
+    summaries = collect(plan, store, warn=True, method=method, **CP_kwargs)
+    return replicability_engine.compute_fms(summaries)
