@@ -3,10 +3,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scienceplots  # noqa: F401
+from gMRItensor.group_statistics import resolve_subject_groups
+from gMRItensor.group_statistics import summarize_groups_over_time
 from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
-from gMRItensor.plotting.evolving_mode import _compute_group_ribbon_stats
-from gMRItensor.plotting.evolving_mode import _plot_ribbon_column
-from gMRItensor.plotting.evolving_mode import _resolve_subject_groups
 from gMRItensor.plotting.spatial_mode import _percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
@@ -14,6 +13,7 @@ from gMRItensor.plotting.subject_mode import make_subject_boxplot
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import create_colorbar_with_offset
 from gMRItensor.plotting.utils import get_color_palette
+from gMRItensor.plotting.utils import plot_group_ribbons
 from gMRItensor.plotting.utils import scale_mode
 from gMRItensor.plotting.utils import scatter_to_volume
 from gMRItensor.plotting.utils import SPATIAL_COLORBAR_LABEL
@@ -49,9 +49,9 @@ def _plot_time_column_evolving(
     """Draw one component of a PARAFAC2 evolving mode as per-group ribbons.
 
     Same mean +/- SEM ribbon as the left column of `plot_evolving_mode`,
-    with the same 5% y-padding as `_finalize_evolving_mode_axes`.
+    with the same 5% y-padding as `apply_row_ylims`.
     """
-    ymin, ymax = _plot_ribbon_column(
+    ymin, ymax = plot_group_ribbons(
         ax,
         ribbon_stats_component,
         categories,
@@ -112,7 +112,7 @@ def plot_mode_grid(
                 f"subjects must have the same length, got {len(time_mode)}, "
                 f"{len(time_points)}, {len(subjects)}",
             )
-        groups = _resolve_subject_groups(subjects, subject_info, group_variable)
+        groups = resolve_subject_groups(subjects, subject_info, group_variable)
         categories = sorted(set(groups))
         color_by_group = dict(zip(categories, get_color_palette(len(categories))))
         # Per-subject scaling, as in `plot_evolving_mode`.
@@ -123,7 +123,7 @@ def plot_mode_grid(
             groups,
             n_components,
         )
-        ribbon_stats = _compute_group_ribbon_stats(long_df)
+        ribbon_stats = summarize_groups_over_time(long_df, facet="component")
     else:
         scaled_time_mode = scale_mode(time_mode)
 

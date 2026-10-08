@@ -5,9 +5,9 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
+from gMRItensor.group_statistics import compare_groups_over_time
+from gMRItensor.group_statistics import summarize_groups_over_time
 from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
-from gMRItensor.plotting.evolving_mode import _compute_group_ribbon_stats
-from gMRItensor.plotting.evolving_mode import _test_group_differences_over_time
 from gMRItensor.plotting.evolving_mode import evolving_factors_to_numpy
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.mode_grid import plot_mode_grid
@@ -431,7 +431,7 @@ def test_build_long_evolving_dataframe_and_ribbon_stats():
     groups = ["A", "A", "B"]
 
     long_df = _build_long_evolving_dataframe(factors, timepoints, subjects, groups, 1)
-    stats = _compute_group_ribbon_stats(long_df)
+    stats = summarize_groups_over_time(long_df, facet="component")
 
     row_a0 = stats[(stats["group"] == "A") & (stats["timepoint"] == 0)].iloc[0]
     assert row_a0["mean"] == pytest.approx(2.0)
@@ -462,7 +462,7 @@ def test_test_group_differences_detects_shifted_timepoints():
         groups,
         1,
     )
-    significance = _test_group_differences_over_time(long_df, ["A", "B"])
+    significance = compare_groups_over_time(long_df, ["A", "B"], facet="component")
 
     shifted = significance[significance["timepoint"].isin([3, 4, 5])]
     unshifted = significance[significance["timepoint"].isin([0, 1, 2])]
@@ -488,7 +488,7 @@ def test_test_group_differences_min_group_n_guard():
         groups,
         1,
     )
-    significance = _test_group_differences_over_time(long_df, ["A", "B"])
+    significance = compare_groups_over_time(long_df, ["A", "B"], facet="component")
     assert significance.empty
 
 
@@ -502,7 +502,7 @@ def test_test_group_differences_single_group_short_circuits():
         groups,
         evolving_factors[0].shape[1],
     )
-    significance = _test_group_differences_over_time(long_df, ["A"])
+    significance = compare_groups_over_time(long_df, ["A"], facet="component")
     assert significance.empty
 
 
@@ -522,7 +522,7 @@ def test_test_group_differences_more_than_two_groups():
         groups,
         1,
     )
-    significance = _test_group_differences_over_time(long_df, ["A", "B", "C"])
+    significance = compare_groups_over_time(long_df, ["A", "B", "C"], facet="component")
     assert list(significance.columns) == ["component", "timepoint", "p_value", "p_adj"]
 
 
