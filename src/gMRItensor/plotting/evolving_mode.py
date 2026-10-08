@@ -5,12 +5,15 @@ import numpy as np
 import pandas as pd
 import scienceplots  # noqa: F401
 import torch
+from gMRItensor.group_statistics import compare_groups_over_time
+from gMRItensor.group_statistics import resolve_subject_groups
+from gMRItensor.group_statistics import summarize_groups_over_time
+from gMRItensor.plotting.utils import apply_row_ylims
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import get_color_palette
+from gMRItensor.plotting.utils import plot_group_ribbons
+from gMRItensor.plotting.utils import plot_subject_curves
 from gMRItensor.plotting.utils import scale_mode
-from scipy.stats import kruskal
-from scipy.stats import mannwhitneyu
-from statsmodels.stats.multitest import multipletests
 
 plt.style.use(["science", "no-latex"])
 matplotlib.use("Agg")
@@ -32,27 +35,6 @@ def evolving_factors_to_numpy(
     torch to the numpy the rest of this module works in.
     """
     return [_to_numpy(factor) for factor in evolving_states]
-
-
-def _resolve_subject_groups(
-    subjects: list[str],
-    subject_info: pd.DataFrame,
-    group_variable: str,
-) -> list[str]:
-    """Look up each subject's `group_variable` value, in `subjects` order.
-
-    Raises `ValueError` if a required column or any subject is missing.
-    """
-    if "subjects" not in subject_info.columns:
-        raise ValueError("subject_info must contain a 'subjects' column")
-    if group_variable not in subject_info.columns:
-        raise ValueError(f"'{group_variable}' column missing from subject_info")
-
-    subject_to_group = subject_info.set_index("subjects")[group_variable]
-    missing = [s for s in subjects if s not in subject_to_group.index]
-    if missing:
-        raise ValueError(f"Subject(s) not found in subject_info: {missing}")
-    return [subject_to_group.loc[s] for s in subjects]
 
 
 def _build_long_evolving_dataframe(
@@ -91,157 +73,6 @@ def _build_long_evolving_dataframe(
     )
     long_df["component"] = long_df["component"].astype(int)
     return long_df
-
-
-def _compute_group_ribbon_stats(long_df: pd.DataFrame) -> pd.DataFrame:
-    """Aggregate `_build_long_evolving_dataframe` output into ribbon stats.
-
-    Returns columns `component`, `group`, `timepoint`, `mean`, `sem`, `n`.
-    `sem` is filled from NaN to 0.0 at `n == 1`, so the ribbon does not gap
-    at single-subject timepoints.
-    """
-    stats = (
-        long_df.groupby(["component", "group", "timepoint"])["value"]
-        .agg(mean="mean", sem="sem", n="count")
-        .reset_index()
-    )
-    stats["sem"] = stats["sem"].fillna(0.0)
-    return stats
-
-
-def _test_group_differences_over_time(
-    long_df: pd.DataFrame,
-    categories: list[str],
-    min_group_n: int = 2,
-) -> pd.DataFrame:
-    """Test for a group difference at each timepoint, per component.
-
-    A timepoint is tested only if every group in `categories` has at least
-    `min_group_n` subjects at that exact timepoint value -- the smallest `n`
-    at which these rank-based tests are non-degenerate. Two groups use a
-    two-sided Mann-Whitney U (as `subject_mode.make_subject_boxplot` does);
-    more use Kruskal-Wallis; fewer are not tested at all.
-
-    P-values are Benjamini-Hochberg FDR corrected *per component*, so each
-    component's timepoints form one hypothesis family rather than the whole
-    figure.
-
-    Returns columns `component`, `timepoint`, `p_value`, `p_adj`, empty if
-    nothing was testable.
-    """
-    columns = ["component", "timepoint", "p_value", "p_adj"]
-    if len(categories) < 2:
-        return pd.DataFrame(columns=columns)
-
-    records = []
-    for component, component_df in long_df.groupby("component"):
-        component_records = []
-        for timepoint, timepoint_df in component_df.groupby("timepoint"):
-            group_values = [
-                timepoint_df.loc[
-                    timepoint_df["group"] == category,
-                    "value",
-                ].to_numpy()
-                for category in categories
-            ]
-            if any(len(values) < min_group_n for values in group_values):
-                continue
-            if len(categories) == 2:
-                _, p_value = mannwhitneyu(
-                    group_values[0],
-                    group_values[1],
-                    alternative="two-sided",
-                )
-            else:
-                _, p_value = kruskal(*group_values)
-            component_records.append(
-                {"component": component, "timepoint": timepoint, "p_value": p_value},
-            )
-
-        if component_records:
-            _, p_adj, _, _ = multipletests(
-                [record["p_value"] for record in component_records],
-                method="fdr_bh",
-            )
-            for record, adjusted in zip(component_records, p_adj):
-                record["p_adj"] = adjusted
-            records.extend(component_records)
-
-    if not records:
-        return pd.DataFrame(columns=columns)
-    return pd.DataFrame.from_records(records)[columns]
-
-
-def _plot_ribbon_column(
-    ax: matplotlib.axes.Axes,
-    ribbon_stats: pd.DataFrame,
-    categories: list[str],
-    color_by_group: dict[str, str],
-) -> tuple[float, float]:
-    """Draw a mean +/- SEM ribbon per group, for one component.
-
-    `ribbon_stats` is `_compute_group_ribbon_stats` output pre-filtered to
-    that component. Returns the `(ymin, ymax)` actually drawn, for row-wise
-    y-limit finalization.
-    """
-    ymin, ymax = np.inf, -np.inf
-    for category in categories:
-        group_stats = ribbon_stats.loc[
-            ribbon_stats["group"] == category,
-        ].sort_values("timepoint")
-        if group_stats.empty:
-            continue
-        timepoints = group_stats["timepoint"].to_numpy()
-        mean = group_stats["mean"].to_numpy()
-        sem = group_stats["sem"].to_numpy()
-        color = color_by_group[category]
-        ax.plot(timepoints, mean, color=color, marker="o", markersize=3, label=category)
-        ax.fill_between(timepoints, mean - sem, mean + sem, color=color, alpha=0.25)
-        ymin = min(ymin, np.min(mean - sem))
-        ymax = max(ymax, np.max(mean + sem))
-
-    return ymin, ymax
-
-
-def _plot_group_subject_column(
-    ax: matplotlib.axes.Axes,
-    factors: list[np.ndarray],
-    timepoints_per_subject: list[np.ndarray],
-    component: int,
-    color: str,
-) -> tuple[float, float]:
-    """Draw one group's individual subject curves for one component.
-
-    `factors` are the scaled evolving-mode factors for this group's subjects
-    only. Returns the `(ymin, ymax)` actually drawn, for row-wise y-limit
-    finalization.
-    """
-    ymin, ymax = np.inf, -np.inf
-    for factor, timepoints in zip(factors, timepoints_per_subject):
-        values = factor[:, component]
-        ax.plot(timepoints, values, color=color, alpha=0.6, marker="o", markersize=3)
-        ymin = min(ymin, np.min(values))
-        ymax = max(ymax, np.max(values))
-    return ymin, ymax
-
-
-def _finalize_evolving_mode_axes(
-    axs: np.ndarray,
-    row_ylims: list[tuple[float, float]],
-) -> None:
-    """Apply a shared, padded y-limit across each row's axes.
-
-    Same two-pass pattern as `subject_mode._finalize_boxplot_axes`: draw
-    first so the data range is known, then equalize each row so the ribbon
-    and per-group columns stay visually comparable. `row_ylims` holds one
-    `(ymin, ymax)` per component.
-    """
-    for component, (ymin, ymax) in enumerate(row_ylims):
-        if not (np.isfinite(ymin) and np.isfinite(ymax)):
-            continue
-        span = ymax - ymin if ymax > ymin else 1.0
-        for ax in axs[component, :]:
-            ax.set_ylim(ymin - 0.05 * span, ymax + 0.05 * span)
 
 
 def plot_evolving_mode(
@@ -319,7 +150,7 @@ def plot_evolving_mode(
             f"same length, got {len(evolving_factors)}, "
             f"{len(timepoints_per_subject)}, {len(subjects)}",
         )
-    groups = _resolve_subject_groups(subjects, subject_info, group_variable)
+    groups = resolve_subject_groups(subjects, subject_info, group_variable)
 
     categories = sorted(set(groups))
     colors = get_color_palette(len(categories))
@@ -335,10 +166,11 @@ def plot_evolving_mode(
         groups,
         n_components,
     )
-    ribbon_stats = _compute_group_ribbon_stats(long_df)
-    significance = _test_group_differences_over_time(
+    ribbon_stats = summarize_groups_over_time(long_df, facet="component")
+    significance = compare_groups_over_time(
         long_df,
         categories,
+        facet="component",
         min_group_n=min_group_n,
     )
     significance["significant"] = significance["p_adj"] < significance_alpha
@@ -368,7 +200,7 @@ def plot_evolving_mode(
         ribbon_stats_component = ribbon_stats.loc[
             ribbon_stats["component"] == component,
         ]
-        row_min, row_max = _plot_ribbon_column(
+        row_min, row_max = plot_group_ribbons(
             axs[component, 0],
             ribbon_stats_component,
             categories,
@@ -376,12 +208,12 @@ def plot_evolving_mode(
         )
 
         for col, category in enumerate(categories, start=1):
-            indices = group_indices[category]
-            g_min, g_max = _plot_group_subject_column(
+            g_min, g_max = plot_subject_curves(
                 axs[component, col],
-                [scaled_factors[i] for i in indices],
-                [timepoints_per_subject[i] for i in indices],
-                component,
+                [
+                    (timepoints_per_subject[i], scaled_factors[i][:, component])
+                    for i in group_indices[category]
+                ],
                 color_by_group[category],
             )
             row_min, row_max = min(row_min, g_min), max(row_max, g_max)
@@ -403,7 +235,7 @@ def plot_evolving_mode(
             for ax in axs[component, :]:
                 ax.set_xlabel("Time after injection [h]")
 
-    _finalize_evolving_mode_axes(axs, row_ylims)
+    apply_row_ylims(axs, row_ylims)
     fig.align_titles()
 
     return fig, axs, significance

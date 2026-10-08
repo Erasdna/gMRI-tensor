@@ -1,6 +1,8 @@
 """Shared utility functions for plotting."""
+import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 plt.style.use(["science", "no-latex"])
 
@@ -251,3 +253,71 @@ def create_colorbar_with_offset(
     offset_text_bbox_ax = offset_text_bbox.transformed(ax.transAxes.inverted())
 
     return offset_text_bbox_ax.width / 2.0
+
+
+def plot_group_ribbons(
+    ax: matplotlib.axes.Axes,
+    summary: pd.DataFrame,
+    categories: list[str],
+    color_by_group: dict[str, str],
+) -> tuple[float, float]:
+    """Draw a mean +/- SEM ribbon per group, for one facet.
+
+    `summary` is `group_statistics.summarize_groups_over_time` output
+    pre-filtered to that facet. Returns the `(ymin, ymax)` actually drawn,
+    for row-wise y-limit finalization.
+    """
+    ymin, ymax = np.inf, -np.inf
+    for category in categories:
+        group_stats = summary.loc[summary["group"] == category].sort_values(
+            "timepoint",
+        )
+        if group_stats.empty:
+            continue
+        timepoints = group_stats["timepoint"].to_numpy()
+        mean = group_stats["mean"].to_numpy()
+        sem = group_stats["sem"].to_numpy()
+        color = color_by_group[category]
+        ax.plot(timepoints, mean, color=color, marker="o", markersize=3, label=category)
+        ax.fill_between(timepoints, mean - sem, mean + sem, color=color, alpha=0.25)
+        ymin = min(ymin, np.min(mean - sem))
+        ymax = max(ymax, np.max(mean + sem))
+
+    return ymin, ymax
+
+
+def plot_subject_curves(
+    ax: matplotlib.axes.Axes,
+    curves: list[tuple[np.ndarray, np.ndarray]],
+    color: str,
+) -> tuple[float, float]:
+    """Draw one `(timepoints, values)` curve per subject, all in `color`.
+
+    Returns the `(ymin, ymax)` actually drawn, for row-wise y-limit
+    finalization.
+    """
+    ymin, ymax = np.inf, -np.inf
+    for timepoints, values in curves:
+        ax.plot(timepoints, values, color=color, alpha=0.6, marker="o", markersize=3)
+        ymin = min(ymin, np.min(values))
+        ymax = max(ymax, np.max(values))
+    return ymin, ymax
+
+
+def apply_row_ylims(
+    axs: np.ndarray,
+    row_ylims: list[tuple[float, float]],
+) -> None:
+    """Apply a shared, padded y-limit across each row's axes.
+
+    Same two-pass pattern as `subject_mode._finalize_boxplot_axes`: draw
+    first so the data range is known, then equalize each row so the ribbon
+    and per-group columns stay visually comparable. `row_ylims` holds one
+    `(ymin, ymax)` per row; non-finite rows are left untouched.
+    """
+    for row, (ymin, ymax) in enumerate(row_ylims):
+        if not (np.isfinite(ymin) and np.isfinite(ymax)):
+            continue
+        span = ymax - ymin if ymax > ymin else 1.0
+        for ax in axs[row, :]:
+            ax.set_ylim(ymin - 0.05 * span, ymax + 0.05 * span)
