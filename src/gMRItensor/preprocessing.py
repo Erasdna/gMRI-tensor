@@ -1,4 +1,5 @@
 from collections import deque
+from contextlib import contextmanager
 from itertools import islice
 from multiprocessing import Pool
 from multiprocessing.pool import AsyncResult
@@ -53,6 +54,96 @@ def _within_group_rank(values: np.ndarray) -> np.ndarray:
     return pd.Series(values).groupby(values).cumcount().to_numpy()
 
 
+def _load_labeled_tracer_voxels(
+    baseline_path: Path,
+    post_injection_path: Path,
+    signal_type: str,
+    mask_path: Path,
+    segmentation_path: Path,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, float]:
+    """Load the four aligned images and keep the labeled voxels inside the mask.
+
+    The single image-reading step shared by every per-image output, so each
+    image is read once however many products are derived from it. See
+    `compute_tracer_from_image` for the canonicalization and filtering rules.
+
+    Returns `(tracer, segmentation, voxel_coords, voxel_volume_mm3)`: one
+    entry (or `(ndim,)` coordinate row) per labeled voxel, with
+    `segmentation` the raw (unrounded) ids, plus the volume of one voxel
+    from the affine.
+    """
+    baseline_nifti = cast(
+        Nifti1Image,
+        nib.as_closest_canonical(nib.load(baseline_path)),
+    )
+    post_injection_nifti = cast(
+        Nifti1Image,
+        nib.as_closest_canonical(nib.load(post_injection_path)),
+    )
+    mask_nifti = cast(Nifti1Image, nib.as_closest_canonical(nib.load(mask_path)))
+
+    if not np.allclose(baseline_nifti.affine, post_injection_nifti.affine):
+        raise ValueError("Baseline and post-injection images are not aligned")
+    if not np.allclose(baseline_nifti.affine, mask_nifti.affine):
+        raise ValueError("Baseline and mask images are not aligned")
+
+    segmentation_nifti = cast(
+        Nifti1Image,
+        nib.as_closest_canonical(nib.load(segmentation_path)),
+    )
+    if not np.allclose(baseline_nifti.affine, segmentation_nifti.affine):
+        raise ValueError("Baseline and segmentation images are not aligned")
+
+    mask = mask_nifti.get_fdata()
+    tracer = compute_tracer(
+        baseline_nifti.get_fdata()[mask > 0],
+        post_injection_nifti.get_fdata()[mask > 0],
+        signal_type,
+    )
+    segmentation = segmentation_nifti.get_fdata()[mask > 0]
+    voxel_coords = np.argwhere(mask > 0)
+
+    # Background/unlabeled voxels (segmentation id ~0) are never real ROIs
+    # -- excluded up front, for every downstream product.
+    labeled_voxels = segmentation > 1e-6
+    voxel_volume_mm3 = float(abs(np.linalg.det(baseline_nifti.affine[:3, :3])))
+    return (
+        tracer[labeled_voxels],
+        segmentation[labeled_voxels],
+        voxel_coords[labeled_voxels],
+        voxel_volume_mm3,
+    )
+
+
+def _tracer_rows(
+    tracer: np.ndarray,
+    segmentation: np.ndarray,
+    voxel_coords: np.ndarray,
+    func: Callable | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray] | np.ndarray]:
+    """Turn `_load_labeled_tracer_voxels` output into `compute_tracer_from_image` rows."""
+    if func is None:
+        labels = np.rint(segmentation)
+        return labels, tracer, _within_group_rank(labels), voxel_coords
+
+    unique_labels = np.unique(segmentation)
+    values = labeled_comprehension(
+        tracer,
+        segmentation,
+        unique_labels,
+        func,
+        default=np.nan,
+        out_dtype=float,
+    )
+    index_list = [voxel_coords[segmentation == label] for label in unique_labels]
+    return (
+        np.rint(unique_labels),
+        values,
+        _within_group_rank(unique_labels),
+        index_list,
+    )
+
+
 def compute_tracer_from_image(
     baseline_path: Path,
     post_injection_path: Path,
@@ -98,64 +189,14 @@ def compute_tracer_from_image(
     ValueError
         If the images are not on the same affine grid.
     """
-    baseline_nifti = cast(
-        Nifti1Image,
-        nib.as_closest_canonical(nib.load(baseline_path)),
-    )
-    post_injection_nifti = cast(
-        Nifti1Image,
-        nib.as_closest_canonical(nib.load(post_injection_path)),
-    )
-    mask_nifti = cast(Nifti1Image, nib.as_closest_canonical(nib.load(mask_path)))
-
-    if not np.allclose(baseline_nifti.affine, post_injection_nifti.affine):
-        raise ValueError("Baseline and post-injection images are not aligned")
-    if not np.allclose(baseline_nifti.affine, mask_nifti.affine):
-        raise ValueError("Baseline and mask images are not aligned")
-
-    segmentation_nifti = cast(
-        Nifti1Image,
-        nib.as_closest_canonical(nib.load(segmentation_path)),
-    )
-    if not np.allclose(baseline_nifti.affine, segmentation_nifti.affine):
-        raise ValueError("Baseline and segmentation images are not aligned")
-
-    mask = mask_nifti.get_fdata()
-    tracer = compute_tracer(
-        baseline_nifti.get_fdata()[mask > 0],
-        post_injection_nifti.get_fdata()[mask > 0],
+    tracer, segmentation, voxel_coords, _ = _load_labeled_tracer_voxels(
+        baseline_path,
+        post_injection_path,
         signal_type,
+        mask_path,
+        segmentation_path,
     )
-    segmentation = segmentation_nifti.get_fdata()[mask > 0]
-    voxel_coords = np.argwhere(mask > 0)
-
-    # Background/unlabeled voxels (segmentation id ~0) are never real ROIs
-    # -- excluded up front, shared by both branches below.
-    labeled_voxels = segmentation > 1e-6
-    segmentation = segmentation[labeled_voxels]
-    tracer = tracer[labeled_voxels]
-    voxel_coords = voxel_coords[labeled_voxels]
-
-    if func is None:
-        labels = np.rint(segmentation)
-        return labels, tracer, _within_group_rank(labels), voxel_coords
-
-    unique_labels = np.unique(segmentation)
-    values = labeled_comprehension(
-        tracer,
-        segmentation,
-        unique_labels,
-        func,
-        default=np.nan,
-        out_dtype=float,
-    )
-    index_list = [voxel_coords[segmentation == label] for label in unique_labels]
-    return (
-        np.rint(unique_labels),
-        values,
-        _within_group_rank(unique_labels),
-        index_list,
-    )
+    return _tracer_rows(tracer, segmentation, voxel_coords, func)
 
 
 class TracerResult(NamedTuple):
@@ -182,39 +223,33 @@ def _compute_tracer_worker(
     )
 
 
-def iter_tracer_results(
+def _iter_parallel(
     args_list: list[dict[str, Any]],
-    n_procs: int = 5,
-) -> Iterator[TracerResult]:
-    """Lazily yield one `TracerResult` per `args_list` entry, in order.
+    worker: Callable[[dict[str, Any]], Any],
+    n_procs: int,
+    desc: str,
+) -> Iterator[tuple[dict[str, Any], Any]]:
+    """Lazily yield `(args, worker(args))` per `args_list` entry, in order.
 
-    Each entry holds `compute_tracer_from_image` keyword arguments plus
-    `"subject"`/`"time_point"`. With `n_procs > 1` at most `2 * n_procs`
-    images are in flight, so memory stays bounded however slowly results are
-    consumed (`Pool.imap` would instead keep buffering finished results).
+    With `n_procs > 1` at most `2 * n_procs` entries are in flight, so memory
+    stays bounded however slowly results are consumed (`Pool.imap` would
+    instead keep buffering finished results). `worker` must be picklable.
     """
-
-    def tag(args: dict[str, Any], result: tuple) -> TracerResult:
-        return TracerResult(args["subject"], args["time_point"], *result)
-
     if n_procs == 1:
-        for args in tqdm(args_list, desc="Computing tracer signal sequential"):
-            yield tag(args, _compute_tracer_worker(args))
+        for args in tqdm(args_list, desc=f"{desc} sequential"):
+            yield args, worker(args)
         return
 
     ne.set_num_threads(1)
     remaining = iter(args_list)
     with (
         Pool(n_procs) as pool,
-        tqdm(
-            total=len(args_list),
-            desc="Computing tracer signal in parallel",
-        ) as progress,
+        tqdm(total=len(args_list), desc=f"{desc} in parallel") as progress,
     ):
         pending: deque[tuple[dict[str, Any], AsyncResult]] = deque()
 
         def submit(args: dict[str, Any]) -> None:
-            pending.append((args, pool.apply_async(_compute_tracer_worker, (args,))))
+            pending.append((args, pool.apply_async(worker, (args,))))
 
         for args in islice(remaining, 2 * n_procs):
             submit(args)
@@ -226,7 +261,25 @@ def iter_tracer_results(
                 submit(next_args)
             result = async_result.get()
             progress.update()
-            yield tag(args, result)
+            yield args, result
+
+
+def iter_tracer_results(
+    args_list: list[dict[str, Any]],
+    n_procs: int = 5,
+) -> Iterator[TracerResult]:
+    """Lazily yield one `TracerResult` per `args_list` entry, in order.
+
+    Each entry holds `compute_tracer_from_image` keyword arguments plus
+    `"subject"`/`"time_point"`. Memory stays bounded as in `_iter_parallel`.
+    """
+    for args, result in _iter_parallel(
+        args_list,
+        _compute_tracer_worker,
+        n_procs,
+        desc="Computing tracer signal",
+    ):
+        yield TracerResult(args["subject"], args["time_point"], *result)
 
 
 def compute_tracer_parallel(
@@ -293,6 +346,27 @@ def _coords_table(result: TracerResult) -> pa.Table:
     )
 
 
+@contextmanager
+def _atomic_outputs(*paths: Path) -> Iterator[tuple[Path, ...]]:
+    """Yield a `.tmp` sibling per path, moved into place only on success.
+
+    Tmp files never written (e.g. an optional sidecar) are simply skipped on
+    success; on any exception every tmp file is removed and nothing is moved,
+    so a failed run leaves no partial outputs behind.
+    """
+    tmp_paths = tuple(path.with_name(path.name + ".tmp") for path in paths)
+    try:
+        yield tmp_paths
+    except BaseException:
+        for tmp_path in tmp_paths:
+            tmp_path.unlink(missing_ok=True)
+        raise
+
+    for tmp_path, path in zip(tmp_paths, paths):
+        if tmp_path.exists():
+            tmp_path.replace(path)
+
+
 def write_tracer_parquet(
     args_list: list[dict[str, Any]],
     output_path: Path | str,
@@ -318,26 +392,16 @@ def write_tracer_parquet(
     per_voxel = args_list[0]["func"] is None
     tracer_path = Path(output_path)
     coords_path = tracer_path.with_suffix(".coords.parquet")
-    tmp_tracer = tracer_path.with_name(tracer_path.name + ".tmp")
-    tmp_coords = coords_path.with_name(coords_path.name + ".tmp")
 
-    try:
+    with _atomic_outputs(tracer_path, coords_path) as (tmp_tracer, tmp_coords):
         with pq.ParquetWriter(tmp_tracer, _TRACER_SCHEMA) as writer:
             for i, result in enumerate(iter_tracer_results(args_list, n_procs)):
                 if i == 0 and per_voxel:
                     pq.write_table(_coords_table(result), tmp_coords)
                 table = _tracer_table(result)
                 writer.write_table(table, row_group_size=max(table.num_rows, 1))
-    except BaseException:
-        tmp_tracer.unlink(missing_ok=True)
-        tmp_coords.unlink(missing_ok=True)
-        raise
 
-    tmp_tracer.replace(tracer_path)
-    if not per_voxel:
-        return tracer_path, None
-    tmp_coords.replace(coords_path)
-    return tracer_path, coords_path
+    return tracer_path, coords_path if per_voxel else None
 
 
 def compute_roi_scaling(

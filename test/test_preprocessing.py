@@ -1,9 +1,14 @@
+from operator import itemgetter
+
 import nibabel as nib
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from gMRItensor.preprocessing import _atomic_outputs
+from gMRItensor.preprocessing import _iter_parallel
+from gMRItensor.preprocessing import _load_labeled_tracer_voxels
 from gMRItensor.preprocessing import compute_roi_scaling
 from gMRItensor.preprocessing import compute_tracer_from_image
 from gMRItensor.preprocessing import compute_tracer_parallel
@@ -923,3 +928,74 @@ def test_load_tensor_from_parquet_raises_without_surviving_data(tmp_path):
 
     with pytest.raises(ValueError, match="No subject"):
         load_tensor_from_parquet(path, "cp", max_invalid_fraction=0.4)
+
+
+def test_load_labeled_tracer_voxels_matches_per_voxel_tracer_and_voxel_volume(
+    tmp_path,
+):
+    # The shared loader must give exactly what per-voxel
+    # compute_tracer_from_image returns, plus the voxel volume from the
+    # affine (2 x 3 x 4 mm voxels -> 24 mm^3), which ROI totals need.
+    affine = np.diag([2.0, 3.0, 4.0, 1.0])
+    paths = _make_two_roi_images(tmp_path)
+    for key in ("baseline_path", "post_injection_path", "mask_path"):
+        data = nib.load(paths[key]).get_fdata()
+        nib.save(nib.Nifti1Image(data, affine), paths[key])
+    nib.save(
+        nib.Nifti1Image(paths["segmentation_flat"].reshape(2, 2, 2), affine),
+        paths["segmentation_path"],
+    )
+    image_kwargs = {
+        "baseline_path": paths["baseline_path"],
+        "post_injection_path": paths["post_injection_path"],
+        "signal_type": "R1map",
+        "mask_path": paths["mask_path"],
+        "segmentation_path": paths["segmentation_path"],
+    }
+
+    tracer, segmentation, voxel_coords, voxel_volume_mm3 = _load_labeled_tracer_voxels(
+        **image_kwargs,
+    )
+    labels, values, _, index_list = compute_tracer_from_image(
+        **image_kwargs,
+        func=None,
+    )
+
+    np.testing.assert_allclose(tracer, values)
+    np.testing.assert_array_equal(np.rint(segmentation), labels)
+    np.testing.assert_array_equal(voxel_coords, index_list)
+    assert voxel_volume_mm3 == pytest.approx(24.0)
+
+
+@pytest.mark.parametrize("n_procs", [1, 2])
+def test_iter_parallel_yields_worker_results_in_order(n_procs):
+    # 7 entries with n_procs=2 exceeds the 4-wide in-flight window, so the
+    # refill path runs. itemgetter is picklable, unlike a test-local lambda.
+    args_list = [{"x": i} for i in range(7)]
+
+    results = list(_iter_parallel(args_list, itemgetter("x"), n_procs, desc="test"))
+
+    assert results == [(args, args["x"]) for args in args_list]
+
+
+def test_atomic_outputs_moves_written_files_into_place(tmp_path):
+    first, second = tmp_path / "a.parquet", tmp_path / "b.parquet"
+
+    with _atomic_outputs(first, second) as (tmp_first, tmp_second):
+        tmp_first.write_text("a")
+        # tmp_second deliberately never written (e.g. no coords sidecar).
+
+    assert first.read_text() == "a"
+    assert not second.exists()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["a.parquet"]
+
+
+def test_atomic_outputs_removes_tmp_files_on_failure(tmp_path):
+    first = tmp_path / "a.parquet"
+
+    with pytest.raises(RuntimeError):
+        with _atomic_outputs(first) as (tmp_first,):
+            tmp_first.write_text("partial")
+            raise RuntimeError("boom")
+
+    assert list(tmp_path.iterdir()) == []
