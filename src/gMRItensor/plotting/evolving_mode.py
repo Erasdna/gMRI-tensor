@@ -401,7 +401,7 @@ def plot_evolving_mode(
             axs[component, 0].legend(frameon=True, framealpha=0.9)
         if component == n_components - 1:
             for ax in axs[component, :]:
-                ax.set_xlabel("Time after injection")
+                ax.set_xlabel("Time after injection [h]")
 
     _finalize_evolving_mode_axes(axs, row_ylims)
     fig.align_titles()

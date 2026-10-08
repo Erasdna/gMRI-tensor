@@ -6,6 +6,7 @@ from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import create_colorbar_with_offset
 from gMRItensor.plotting.utils import scale_mode
 from gMRItensor.plotting.utils import scatter_to_volume
+from gMRItensor.plotting.utils import SPATIAL_COLORBAR_LABEL
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 matplotlib.use("Agg")
@@ -92,11 +93,6 @@ def plot_brain(
     )
 
     ax[-1].set_axis_off()
-
-    # Measure the exponent text, then shift the real colorbar clear of it.
-    temp_cax = inset_axes(ax[-1], width="100%", height="70%", loc="center right")
-    # text_width_offset = create_colorbar_with_offset(fig, ax[-1], im, temp_cax, label)
-    temp_cax.remove()
 
     cax = inset_axes(
         ax[-1],
@@ -242,7 +238,7 @@ def plot_spatial_mode(
                 slices,
                 vmin=vmin,
                 vmax=vmax,
-                label="",
+                label=SPATIAL_COLORBAR_LABEL,
                 mask=voxel_mask,
             )
             big_ax[component][0].set_ylabel(f"Component {component+1}")

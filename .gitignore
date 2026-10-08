@@ -135,3 +135,4 @@ build/
 *.py[cod]
 *$py.class
 CLAUDE.md
+.claude/

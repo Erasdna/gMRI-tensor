@@ -1037,3 +1037,122 @@ def test_scale_mode_uniformly_small_array():
     scaled = scale_mode(arr)
     for column in range(arr.shape[1]):
         assert np.linalg.norm(scaled[:, column]) == pytest.approx(1.0)
+
+
+# --- dataviz audit: labels ---
+
+
+def test_plot_evolving_mode_time_axis_label():
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
+    fig, axs, _ = plot_evolving_mode(
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+        group_variable="group",
+    )
+    for ax in axs[-1, :]:
+        assert ax.get_xlabel() == "Time after injection [h]"
+    plt.close(fig)
+
+
+def test_plot_mode_grid_subject_xlabel_uses_group_variable():
+    kwargs = make_mode_grid_fixture()
+    kwargs["subject_info"] = kwargs["subject_info"].rename(columns={"group": "cohort"})
+    kwargs["group_variable"] = "cohort"
+    fig, axs = plot_mode_grid(**kwargs)
+    assert axs[-1, 1].get_xlabel() == "cohort"
+    plt.close(fig)
+
+
+def test_plot_mode_grid_colorbars_are_labeled():
+    fig, axs = plot_mode_grid(**make_mode_grid_fixture())
+    for ax in axs[:, 2:].ravel():
+        assert ax.collections[-1].colorbar.ax.get_ylabel() == "Loading (a.u.)"
+    plt.close(fig)
+
+
+def test_plot_spatial_mode_colorbars_are_labeled():
+    voxel_mode, index_list, region_masks, background = make_roi_mode_fixture()
+    for fig, axs, _ in plot_spatial_mode(
+        voxel_mode,
+        index_list,
+        region_masks,
+        background,
+        slices=[2, 2, 2],
+    ):
+        for row in axs:
+            colorbar = row[2].collections[-1].colorbar
+            assert colorbar.ax.get_ylabel() == "Loading (a.u.)"
+        plt.close(fig)
+
+
+# --- dataviz audit: fit lines ---
+
+
+def test_make_variable_correlation_fit_spans_own_group_range():
+    # Groups on disjoint x-ranges: each fit line must stay on its own data
+    # rather than being extrapolated across the other group's range.
+    df = pd.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0],
+            "y": [0.0, 1.0, 2.1, 2.9, 5.0, 5.5, 6.1, 6.4],
+            "group": ["A"] * 4 + ["B"] * 4,
+        },
+    )
+    fig, ax = plt.subplots()
+    make_variable_correlation(ax, df, x_column="x", y_column="y", category="group")
+    fit_lines = [line for line in ax.get_lines() if len(line.get_xdata()) > 1]
+    spans = sorted((min(ln.get_xdata()), max(ln.get_xdata())) for ln in fit_lines)
+    assert spans == [pytest.approx((0.0, 3.0)), pytest.approx((10.0, 13.0))]
+    plt.close(fig)
+
+
+def test_make_variable_correlation_awkward_names():
+    # query() used to break on a quote in a group name or a space in the
+    # category column name.
+    df = pd.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0, 0.5, 1.5, 2.5],
+            "y": [0.0, 1.1, 1.9, 0.4, 1.6, 2.4],
+            "patient group": ["O'Brien"] * 3 + ["Control"] * 3,
+        },
+    )
+    fig, ax = plt.subplots()
+    make_variable_correlation(
+        ax,
+        df,
+        x_column="x",
+        y_column="y",
+        category="patient group",
+    )
+    assert len(ax.get_legend().get_texts()) == 2
+    plt.close(fig)
+
+
+# --- dataviz audit: layout / side effects ---
+
+
+def test_plot_mode_grid_does_not_consume_global_rng():
+    kwargs = make_mode_grid_fixture()
+    np.random.seed(123)
+    state_before = np.random.get_state()[1].copy()
+    fig, _ = plot_mode_grid(**kwargs)
+    plt.close(fig)
+    assert np.array_equal(np.random.get_state()[1], state_before)
+
+
+def test_plot_subject_mode_keeps_compressed_layout():
+    subject_info, subjects = make_subject_info()
+    subject_mode = np.random.default_rng(3).normal(size=(len(subjects), 2))
+    fig, _ = plot_subject_mode(
+        subject_mode,
+        subjects,
+        subject_info,
+        group_variable="group",
+        plotting_variables=["age"],
+    )
+    engine = fig.get_layout_engine()
+    assert isinstance(engine, matplotlib.layout_engine.ConstrainedLayoutEngine)
+    assert engine._compress
+    plt.close(fig)

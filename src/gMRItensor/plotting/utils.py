@@ -4,6 +4,10 @@ import numpy as np
 
 plt.style.use(["science", "no-latex"])
 
+# Spatial modes are unit-norm scaled by `scale_mode`, so they have no
+# physical unit.
+SPATIAL_COLORBAR_LABEL = "Loading (a.u.)"
+
 
 def scale_mode(arr: np.ndarray, rtol: float = 1e-10) -> np.ndarray:
     """Scale a mode's columns to unit L2 norm; zero out negligible columns.

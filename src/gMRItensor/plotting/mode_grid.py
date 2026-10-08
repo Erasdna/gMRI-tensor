@@ -16,6 +16,7 @@ from gMRItensor.plotting.utils import create_colorbar_with_offset
 from gMRItensor.plotting.utils import get_color_palette
 from gMRItensor.plotting.utils import scale_mode
 from gMRItensor.plotting.utils import scatter_to_volume
+from gMRItensor.plotting.utils import SPATIAL_COLORBAR_LABEL
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 matplotlib.use("Agg")
@@ -134,7 +135,9 @@ def plot_mode_grid(
 
     # Throwaway figure, only to measure the colorbar's width.
     temp_fig, temp_ax = plt.subplots(1, 1, figsize=(5, 5))
-    temp_data = np.random.rand(10, 10)
+    # Deterministic dummy data: drawing from np.random here would consume
+    # the caller's global RNG state.
+    temp_data = np.linspace(0.0, 1.0, 100).reshape(10, 10)
     temp_im = temp_ax.imshow(temp_data)
     temp_cax = inset_axes(
         temp_ax,
@@ -228,7 +231,7 @@ def plot_mode_grid(
 
         subject_ax.set_ylabel("")
         if component == n_components - 1:
-            subject_ax.set_xlabel("Patient group")
+            subject_ax.set_xlabel(group_variable)
         else:
             subject_ax.set_xlabel("")
 
@@ -286,7 +289,13 @@ def plot_mode_grid(
                 bbox_transform=ax.transAxes,
                 borderpad=0,
             )
-            create_colorbar_with_offset(fig, ax, im, cax_divider, None)
+            create_colorbar_with_offset(
+                fig,
+                ax,
+                im,
+                cax_divider,
+                SPATIAL_COLORBAR_LABEL,
+            )
             ax.set_xticks([])
             ax.set_yticks([])
 

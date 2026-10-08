@@ -122,10 +122,6 @@ def make_variable_correlation(
     The legend carries each category's R2 and p-value.
     """
 
-    def fit_values(xs, ys, cat=""):
-        fit = linregress(xs, ys)
-        return fit
-
     if colors is None:
         n_categories = df[category].nunique()
         colors = get_color_palette(n_categories)
@@ -145,13 +141,14 @@ def make_variable_correlation(
         alpha=1,
     )
     for k, cat in enumerate(df[category].unique()):
-        cat_df = df.query(f"{category}=='{cat}'")
+        cat_df = df.loc[df[category] == cat]
         xs = cat_df[x_column]
         ys = cat_df[y_column]
 
-        fit = fit_values(xs, ys, cat)
+        fit = linregress(xs, ys)
 
-        x_range = np.linspace(np.min(df[x_column]), np.max(df[x_column]))
+        # Each group's own x-range: no extrapolation onto other groups' data.
+        x_range = np.linspace(np.min(xs), np.max(xs))
         (line,) = ax.plot(
             x_range,
             fit.slope * x_range + fit.intercept,
@@ -160,8 +157,6 @@ def make_variable_correlation(
         line_plots.append(line)
         pvalue_list.append(fit.pvalue)
         legends.append(rf"$R^2={fit.rvalue**2:.2f}$, $p={fit.pvalue:.1g} $")
-
-    fit = fit_values(df[x_column], df[y_column], "all")
 
     if legend:
         leg = ax.legend(
@@ -318,7 +313,6 @@ def plot_subject_mode(
         layout="compressed",
         squeeze=False,
     )
-    fig.tight_layout()
 
     # First pass: draw, collecting the limits each row needs.
     ylims_list = []
