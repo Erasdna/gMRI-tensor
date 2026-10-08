@@ -3,6 +3,9 @@
 Shared by the decomposition's evolving mode (faceted by component) and the
 ROI-level tracer analysis (faceted by ROI).
 """
+from collections.abc import Sequence
+from pathlib import Path
+
 import pandas as pd
 from scipy.stats import kruskal
 from scipy.stats import mannwhitneyu
@@ -112,3 +115,77 @@ def compare_groups_over_time(
     if not records:
         return pd.DataFrame(columns=columns)
     return pd.DataFrame.from_records(records)[columns]
+
+
+def load_roi_statistics(
+    path: Path | str,
+    subject_info: pd.DataFrame,
+    group_variable: str,
+    rois: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Read a `write_preprocessed_data` ROI statistics file for group analysis.
+
+    Returns the long frame (one row per subject, time point and ROI) with
+    `time_point` renamed to `timepoint` and each subject's `group_variable`
+    value attached as `group`, optionally restricted to `rois`. Raises
+    `ValueError` for a requested ROI missing from the file or a subject
+    missing from `subject_info`.
+    """
+    stats = pd.read_parquet(path)
+    if rois is not None:
+        missing = sorted(set(rois) - set(stats["roi"]))
+        if missing:
+            raise ValueError(f"ROI(s) not in {path}: {missing}")
+        stats = stats[stats["roi"].isin(rois)]
+
+    subjects = sorted(stats["subject"].unique())
+    groups = resolve_subject_groups(subjects, subject_info, group_variable)
+    stats = stats.rename(columns={"time_point": "timepoint"})
+    stats["group"] = stats["subject"].map(dict(zip(subjects, groups)))
+    return stats.reset_index(drop=True)
+
+
+def _observed(stats_df: pd.DataFrame, statistic: str) -> pd.DataFrame:
+    """Rows of `stats_df` with a value for `statistic` (e.g. no NaN median)."""
+    if statistic not in stats_df.columns:
+        raise ValueError(f"Statistic '{statistic}' is not a column of the frame")
+    return stats_df.dropna(subset=[statistic])
+
+
+def summarize_roi_statistics(stats_df: pd.DataFrame, statistic: str) -> pd.DataFrame:
+    """Per-ROI, per-group mean +/- SEM of `statistic` at each time point.
+
+    `stats_df` is `load_roi_statistics` output. Missing values are dropped
+    first, so `n` counts the subjects that contribute. Returns columns
+    `roi`, `group`, `timepoint`, `mean`, `sem`, `n` (ribbon plot input).
+    """
+    return summarize_groups_over_time(
+        _observed(stats_df, statistic),
+        facet="roi",
+        value=statistic,
+    )
+
+
+def compare_roi_groups(
+    stats_df: pd.DataFrame,
+    statistic: str,
+    min_group_n: int = 2,
+    alpha: float = 0.05,
+) -> pd.DataFrame:
+    """Test for a group difference in `statistic` at each time point, per ROI.
+
+    `stats_df` is `load_roi_statistics` output; every group in it is
+    compared, after dropping missing values. Tests and the per-ROI BH-FDR
+    family are as in `compare_groups_over_time`. Returns columns `roi`,
+    `timepoint`, `p_value`, `p_adj`, `significant` (`p_adj < alpha`).
+    """
+    observed = _observed(stats_df, statistic)
+    significance = compare_groups_over_time(
+        observed,
+        sorted(stats_df["group"].unique()),
+        facet="roi",
+        value=statistic,
+        min_group_n=min_group_n,
+    )
+    significance["significant"] = significance["p_adj"] < alpha
+    return significance
