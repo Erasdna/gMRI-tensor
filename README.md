@@ -15,6 +15,7 @@ uv sync
 - `gMRItensor.preprocessing` — compute tracer signal (T1map/R1map/T1w) from baseline and post-injection images, extract per-region/voxel values via masks and segmentations, and pivot results into a tensor ready for decomposition (`prepare_tensor`).
 - `gMRItensor.decomposition` — CP and PARAFAC2 decomposition (`compute_CP_decomposition`, `compute_PARAFAC2_decomposition`), with multi-restart runners (`run_CP_decomposition_repeated`, `run_PARAFAC2_decomposition_repeated`) and a `setup_backend` helper for configuring TensorLy's PyTorch backend.
 - `gMRItensor.replicability` — split-half and cross-validation engines (`HalfHalfEngine`, `CrossValidationEngine`) for assessing decomposition replicability, plus `evaluate_replicability_multiproc` for running them in parallel.
+- `gMRItensor.jobs` — scatter/gather restarts (`plan_restarts`, `plan_replicability`, `job_slice`, `run_tasks`, `collect`, `DirectoryStore`) for spreading one fit or replicability analysis over many jobs, e.g. a SLURM array, with the same results as the centralised path.
 - `gMRItensor.roi_groups` — FreeSurfer label presets (ventricles, grey/white matter, limbic system, CSF counterparts at `id + 10000`, …) and `resolve_roi_groups` for combining presets with custom regions.
 - `gMRItensor.group_statistics` — group summaries (mean ± SEM) and per-time-point group comparisons (Mann-Whitney / Kruskal-Wallis, BH-FDR per facet) over time, shared by the evolving mode and the ROI analysis.
 - `gMRItensor.plotting` — visualization of decomposition modes (subject-mode boxplots and correlations, spatial-mode brain overlays, mode grids, evolving-mode trajectories) and ROI tracer evolution (`plot_roi_evolution_rows`, `plot_roi_evolution_panels`).
@@ -114,6 +115,24 @@ scores = evaluate_replicability_multiproc(
 - The result is a list of factor match scores between fits, one per comparison. The tuple layout depends on the engine.
 - `stratification` keeps group proportions equal across splits.
 - Keyword arguments beyond the engine's own (here `init_repeats`) are forwarded to the decomposition runner.
+
+### Distributed restarts
+
+`gMRItensor.jobs` splits the same work into `(group, seed)` tasks, so restarts can run as separate jobs (e.g. a SLURM array) that share a `ResultStore`:
+
+```python
+from gMRItensor.jobs import DirectoryStore, collect, job_slice, plan_replicability, run_tasks
+
+plan = plan_replicability(HalfHalfEngine(repeats=20, seed=0), len(slices), n_restarts=10)
+store = DirectoryStore("results/rank3")
+run_tasks(job_slice(plan, job_index, tasks_per_job=4), slices, 3, "PARAFAC2", store)
+# ...once every job has finished:
+fms = HalfHalfEngine(repeats=20, seed=0).compute_fms(collect(plan, store))
+```
+
+- `plan_restarts(n_samples, n_restarts)` plans a plain fit. `plan_replicability` plans one group per split or fold of the engine.
+- Every job regenerates the same plan, and `job_slice` gives each job its share. Tasks already in the store are skipped, so a re-queued job resumes.
+- `collect` picks each group's best restart in seed order. The results are the same as `run_*_decomposition_repeated` and `evaluate_replicability_multiproc`.
 
 ### Plotting decomposition modes
 

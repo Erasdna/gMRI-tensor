@@ -1,4 +1,5 @@
 import gc
+import inspect
 import math
 import os
 import sys
@@ -937,37 +938,143 @@ def compute_PARAFAC2_decomposition(
     return result, errors, diagnostics
 
 
-def _restart_worker(
+def _cp_to_cpu(decomp: Any) -> tuple[torch.Tensor, list[torch.Tensor]]:
+    """CP `(weights, factors)` as CPU float32."""
+    weights, factors = decomp
+    return weights.float().cpu(), [f.float().cpu() for f in factors]
+
+
+def _parafac2_to_cpu(result: "PARAFAC2Model") -> "PARAFAC2Model":
+    """A `PARAFAC2Model` as CPU float32, `kiers` included."""
+    kiers = None
+    if result.kiers is not None:
+        coordinate_matrix, projections = result.kiers
+        kiers = (
+            coordinate_matrix.float().cpu(),
+            [p.float().cpu() for p in projections],
+        )
+    return PARAFAC2Model(
+        weights=result.weights.float().cpu(),
+        subject_mode=result.subject_mode.float().cpu(),
+        evolving_states=[B.float().cpu() for B in result.evolving_states],
+        label_mode=result.label_mode.float().cpu(),
+        kiers=kiers,
+    )
+
+
+#: `run_*_repeated` options that steer the restart loop rather than one fit,
+#: and so never reach `compute_*_decomposition`.
+_RESTART_ONLY_OPTIONS: frozenset[str] = frozenset(
+    {
+        "init_repeats",
+        "restart_procs",
+        "progress_bar",
+        "device",
+        "return_diagnostics",
+        "use_memory_efficient_khatri_rao",
+    },
+)
+
+
+def _resolve_options(
+    method: Literal["CP", "PARAFAC2"],
+    options: dict[str, Any],
+) -> dict[str, Any]:
+    """Every `run_*_repeated` option, `options` filled in with its defaults.
+
+    Bound against the public signature, so the defaults have one source and
+    an unknown option raises `TypeError` exactly as calling it would.
+    """
+    if method not in ("CP", "PARAFAC2"):
+        raise ValueError(f"Unknown decomposition method: {method!r}")
+    function: Callable[..., Any] = run_CP_decomposition_repeated
+    if method == "PARAFAC2":
+        function = run_PARAFAC2_decomposition_repeated
+    bound = inspect.signature(function).bind_partial(**options)
+    bound.apply_defaults()
+    return dict(bound.arguments)
+
+
+def _compute_kwargs(
+    method: Literal["CP", "PARAFAC2"],
+    rank: int,
+    resolved: dict[str, Any],
+) -> dict[str, Any]:
+    """Map resolved `run_*_repeated` options to `compute_*` arguments."""
+    if method == "CP":
+        return {
+            "rank": rank,
+            "CP_max_iter": resolved["max_iter"],
+            "CP_verbose_level": resolved["verbose_level"],
+            "CP_tolerance": resolved["tolerance"],
+            "normalize_factors": resolved["normalize"],
+            "allow_nan_imputation": resolved["allow_nan_imputation"],
+            "non_negative": resolved["non_negative"],
+        }
+    return {
+        "rank": rank,
+        "PARAFAC2_max_iter": resolved["max_iter"],
+        "PARAFAC2_verbose_level": resolved["verbose_level"],
+        "PARAFAC2_tolerance": resolved["tolerance"],
+        "normalize_factors": resolved["normalize"],
+        "nn_modes": resolved["nn_modes"],
+        "solver": resolved["solver"],
+        "aoadmm_options": resolved["aoadmm_options"],
+        "aoadmm_loss_tolerance": resolved["aoadmm_loss_tolerance"],
+        "return_projections": resolved["return_projections"],
+        "negligible_rtol": resolved["negligible_rtol"],
+        "compute_device": resolved["compute_device"],
+    }
+
+
+def _fit_one(
     args: tuple[Literal["CP", "PARAFAC2"], int, Any, dict[str, Any]],
-) -> tuple[Any, Any, PARAFAC2Diagnostics | None, ConvergenceError | None]:
-    """Pool worker: run a single random-restart attempt.
+) -> tuple[Any, float | None, PARAFAC2Diagnostics | None, ConvergenceError | None]:
+    """Run a single random-restart attempt, returning failure as a value.
 
-    Only used by `_repeat_with_restarts`'s parallel (`restart_procs >= 2`)
-    path; the sequential path calls the compute functions in-process, so it
-    also works on GPU and reuses the `torch.compile` cache across restarts.
+    The one place a seed is fitted: both paths of `_repeat_with_restarts`
+    and `jobs.fit_task` go through it, so they cannot drift apart.
 
-    Returns `(decomp, errors, diagnostics, None)` on success and
+    Returns `(decomp, error, diagnostics, None)` on success, `decomp` already
+    CPU float32 and `error` the final relative reconstruction error, and
     `(None, None, None, exc)` on `ConvergenceError` rather than raising, so
-    one failed restart does not kill the whole `Pool.imap_unordered`. The
-    exception is returned so the parallel path can tally failure reasons like
-    the sequential one; failure and diagnostics get separate slots so neither
-    is read as the other. `diagnostics` is None for CP.
+    one failed restart does not kill a whole `Pool.imap_unordered`. For
+    PARAFAC2 `diagnostics.max_nn_violation` is measured on the returned CPU
+    factors -- what the caller will plot -- and `diagnostics` is None for CP.
     """
     method, random_state, payload, kwargs = args
     try:
         if method == "CP":
             decomp, errors = compute_CP_decomposition(
-                payload, random_state=random_state, **kwargs
+                payload,
+                random_state=random_state,
+                **kwargs,
             )
-            return decomp, errors, None, None
-        decomp, errors, diagnostics = compute_PARAFAC2_decomposition(
+            return _cp_to_cpu(decomp), float(errors[-1]), None, None
+        result, errors, diagnostics = compute_PARAFAC2_decomposition(
             payload,
             random_state=random_state,
             **kwargs,
         )
-        return decomp, errors, diagnostics, None
     except ConvergenceError as error:
         return None, None, None, error
+
+    model = _parafac2_to_cpu(result)
+    diagnostics = replace(
+        diagnostics,
+        max_nn_violation=_nn_violations(model, diagnostics.nn_modes),
+    )
+    return model, float(errors[-1]), diagnostics, None
+
+
+def _release_cuda_cache(device: torch.device) -> None:
+    """Clear PyTorch's CUDA cache when VRAM is running tight."""
+    if device.type != "cuda":
+        return
+    mem_reserved = torch.cuda.memory_reserved(device)
+    total_mem = torch.cuda.get_device_properties(device).total_memory
+    if mem_reserved / total_mem > 0.85:
+        torch.cuda.empty_cache()
 
 
 def _init_restart_worker_backend(num_threads: int) -> None:
@@ -1059,6 +1166,38 @@ class RestartTally:
         return summary
 
 
+class _BestOfRestarts:
+    """Keep the lowest-error restart and tally the rest.
+
+    The one selection rule, shared by `_repeat_with_restarts` and
+    `jobs.collect` so in-process and gathered results pick the same winner.
+    Strictly lower wins, so on a tie the first restart offered is kept --
+    which makes the choice deterministic when restarts are offered in seed
+    order.
+    """
+
+    def __init__(self, attempted: int) -> None:
+        self.tally = RestartTally(attempted=attempted)
+        self.best_error = math.inf
+        self.best: Any = None
+        self.best_diagnostics: PARAFAC2Diagnostics | None = None
+
+    def offer(
+        self,
+        error: float,
+        item: Any,
+        diagnostics: PARAFAC2Diagnostics | None,
+    ) -> None:
+        self.tally.record_success(diagnostics)
+        if error < self.best_error:
+            self.best_error = error
+            self.best = item
+            self.best_diagnostics = diagnostics
+
+    def fail(self, error: ConvergenceError | None) -> None:
+        self.tally.record_failure(error)
+
+
 def _build_restart_advisory(
     tally: RestartTally,
     solver: PARAFAC2Solver,
@@ -1148,7 +1287,6 @@ def _repeat_with_restarts(
     method: Literal["CP", "PARAFAC2"],
     payload: Any,
     kwargs: dict[str, Any],
-    to_cpu: Callable[[Any], Any],
     init_repeats: int,
     device: torch.device,
     verbose_level: int,
@@ -1168,8 +1306,6 @@ def _repeat_with_restarts(
         The `tensor`/`tensor_slices` argument for that function.
     kwargs : dict[str, Any]
         Its remaining arguments; `random_state` is filled in per restart.
-    to_cpu : Callable[[Any], Any]
-        Moves the winning `decomp` to CPU/float precision.
     init_repeats : int
         Number of random restarts to try.
     device : torch.device
@@ -1193,7 +1329,7 @@ def _repeat_with_restarts(
     -------
     tuple[Any, torch.Tensor, Any, RestartTally]
         `(best_decomp, best_error, best_extra, tally)`, `best_decomp` already
-        on CPU. `best_extra` is the winning restart's `PARAFAC2Diagnostics`,
+        CPU float32 (see `_fit_one`). `best_extra` is the winning restart's `PARAFAC2Diagnostics`,
         or None for CP.
 
     Raises
@@ -1222,51 +1358,24 @@ def _repeat_with_restarts(
             )
         restart_procs = 1
 
-    best_error: torch.Tensor | float = torch.inf
-    best_decomp: Any = None
-    best_extra: Any = None
-    tally = RestartTally(attempted=init_repeats)
+    reducer = _BestOfRestarts(attempted=init_repeats)
+    task_args = [(method, i, payload, kwargs) for i in range(init_repeats)]
+
+    def record(outcome: tuple[Any, Any, Any, Any]) -> None:
+        decomp, error, extra, failure = outcome
+        if decomp is None:
+            reducer.fail(failure)
+            if verbose_level > 0:
+                print(failure)
+            return
+        reducer.offer(error, decomp, extra)
 
     if restart_procs < 2:
-        for i in tqdm(range(init_repeats), disable=not progress_bar):
-            try:
-                if method == "CP":
-                    decomp, errors = compute_CP_decomposition(
-                        payload,
-                        random_state=i,
-                        **kwargs,
-                    )
-                    extra = None
-                else:
-                    decomp, errors, extra = compute_PARAFAC2_decomposition(
-                        payload,
-                        random_state=i,
-                        **kwargs,
-                    )
-            except ConvergenceError as e:
-                tally.record_failure(e)
-                if verbose_level > 0:
-                    print(e)
-                continue
-
-            tally.record_success(extra)
-            if errors[-1] < best_error:
-                best_error = errors[-1]
-                # Move the best result to CPU immediately to free up GPU VRAM
-                best_decomp = to_cpu(decomp)
-                best_extra = extra
-
-            del decomp, errors
-
-            # Clear the cache when VRAM is running tight.
-            if device.type == "cuda":
-                mem_reserved = torch.cuda.memory_reserved(device)
-                total_mem = torch.cuda.get_device_properties(device).total_memory
-                if mem_reserved / total_mem > 0.85:
-                    torch.cuda.empty_cache()
+        for args in tqdm(task_args, disable=not progress_bar):
+            record(_fit_one(args))
+            _release_cuda_cache(device)
             sys.stdout.flush()
     else:
-        task_args = [(method, i, payload, kwargs) for i in range(init_repeats)]
         # Split the parent's thread budget rather than letting each worker
         # default to its own pool -- see _init_restart_worker_backend.
         threads_per_proc = max(1, torch.get_num_threads() // restart_procs)
@@ -1275,38 +1384,29 @@ def _repeat_with_restarts(
             initializer=_init_restart_worker_backend,
             initargs=(threads_per_proc,),
         ) as pool:
-            for decomp, errors, extra, failure in tqdm(
-                pool.imap_unordered(_restart_worker, task_args),
+            for outcome in tqdm(
+                pool.imap_unordered(_fit_one, task_args),
                 total=init_repeats,
                 disable=not progress_bar,
             ):
-                if decomp is None:
-                    tally.record_failure(failure)
-                    if verbose_level > 0:
-                        print(failure)
-                    continue
-                tally.record_success(extra)
-                if errors[-1] < best_error:
-                    best_error = errors[-1]
-                    best_decomp = to_cpu(decomp)
-                    best_extra = extra
-                del decomp, errors
+                record(outcome)
 
     gc.collect()
     # Release PyTorch's cached memory back to the OS/GPU.
     if device.type == "cuda":
         torch.cuda.empty_cache()
 
-    if best_decomp is None:
+    tally = reducer.tally
+    if reducer.best is None:
         # Chain the last failure: its message carries the numbers saying what
         # to change (iteration counts, feasibility gaps, suggested max_iter).
         raise ConvergenceError(
             f"No decomposition converged within {init_repeats} repeats"
             f"{tally.failure_summary()}",
         ) from tally.last_failure
-    assert isinstance(best_error, torch.Tensor)  # guaranteed once best_decomp is set
 
-    return best_decomp, best_error.float().cpu(), best_extra, tally
+    best_error = torch.tensor(reducer.best_error, dtype=torch.float32)
+    return reducer.best, best_error, reducer.best_diagnostics, tally
 
 
 def _maybe_register_memory_efficient_khatri_rao(enabled: bool) -> None:
@@ -1350,25 +1450,23 @@ def run_CP_decomposition_repeated(
     """
     _maybe_register_memory_efficient_khatri_rao(use_memory_efficient_khatri_rao)
 
-    kwargs = {
-        "rank": rank,
-        "CP_max_iter": max_iter,
-        "CP_verbose_level": verbose_level,
-        "CP_tolerance": tolerance,
-        "normalize_factors": normalize,
-        "allow_nan_imputation": allow_nan_imputation,
-        "non_negative": non_negative,
-    }
-
-    def to_cpu(decomp):
-        weights, factors = decomp
-        return weights.float().cpu(), [f.float().cpu() for f in factors]
+    kwargs = _compute_kwargs(
+        "CP",
+        rank,
+        {
+            "max_iter": max_iter,
+            "verbose_level": verbose_level,
+            "tolerance": tolerance,
+            "normalize": normalize,
+            "allow_nan_imputation": allow_nan_imputation,
+            "non_negative": non_negative,
+        },
+    )
 
     (best_weights, best_factors), best_error, _, _ = _repeat_with_restarts(
         "CP",
         tensor,
         kwargs,
-        to_cpu,
         init_repeats,
         device,
         verbose_level,
@@ -1417,6 +1515,7 @@ def _warn_if_nn_modes_violated(
     nn_modes: tuple[int, ...] | None,
     violations: dict[int, float],
     solver: PARAFAC2Solver,
+    stacklevel: int = 3,
 ) -> None:
     """Warn when a constrained mode still carries negative entries.
 
@@ -1460,12 +1559,13 @@ def _warn_if_nn_modes_violated(
         "restores it to full amplitude as a mirrored curve. Clip with "
         "`factor.clamp(min=0)` before using a constrained mode as a "
         "multiplier.",
-        stacklevel=3,
+        stacklevel=stacklevel,
     )
 
 
 def _warn_if_accepted_at_iteration_limit(
     diagnostics: PARAFAC2Diagnostics | None,
+    stacklevel: int = 3,
 ) -> None:
     """Explain an accepted fit whose own solver reports it didn't converge.
 
@@ -1503,8 +1603,46 @@ def _warn_if_accepted_at_iteration_limit(
         f"AO-ADMM's own penalized-objective criterion was not met{loss_text}. "
         "The penalized objective is not comparable to TensorLy's criterion; "
         "acceptance is based on the reconstruction error, which is.",
-        stacklevel=3,
+        stacklevel=stacklevel,
     )
+
+
+def _warn_parafac2_outcome(
+    model: "PARAFAC2Model | None",
+    diagnostics: PARAFAC2Diagnostics | None,
+    tally: RestartTally,
+    solver: PARAFAC2Solver,
+    max_iter: int,
+    tolerance: float,
+    aoadmm_loss_tolerance: float,
+    stacklevel: int = 3,
+) -> None:
+    """Emit every PARAFAC2 warning about one best-of-restarts outcome.
+
+    Shared by `run_PARAFAC2_decomposition_repeated` and `jobs.collect`, so a
+    gathered fit is reported exactly like an in-process one. `stacklevel`
+    points at the caller of whichever of those two called this.
+    `max_nn_violation` is read from `diagnostics`, where `_fit_one` measured
+    it on the CPU float32 factors the caller actually receives.
+    """
+    if model is not None and diagnostics is not None:
+        _warn_if_nn_modes_violated(
+            model,
+            diagnostics.nn_modes,
+            diagnostics.max_nn_violation or {},
+            solver,
+            stacklevel=stacklevel + 1,
+        )
+        _warn_if_accepted_at_iteration_limit(diagnostics, stacklevel=stacklevel + 1)
+    advisory = _build_restart_advisory(
+        tally,
+        solver,
+        max_iter,
+        tolerance,
+        aoadmm_loss_tolerance,
+    )
+    if advisory is not None:
+        warnings.warn(advisory, stacklevel=stacklevel)
 
 
 PARAFAC2Result = tuple[PARAFAC2Model, torch.Tensor]
@@ -1626,42 +1764,28 @@ def run_PARAFAC2_decomposition_repeated(
     """
     _maybe_register_memory_efficient_khatri_rao(use_memory_efficient_khatri_rao)
 
-    kwargs = {
-        "rank": rank,
-        "PARAFAC2_max_iter": max_iter,
-        "PARAFAC2_verbose_level": verbose_level,
-        "PARAFAC2_tolerance": tolerance,
-        "normalize_factors": normalize,
-        "nn_modes": nn_modes,
-        "solver": solver,
-        "aoadmm_options": aoadmm_options,
-        "aoadmm_loss_tolerance": aoadmm_loss_tolerance,
-        "return_projections": return_projections,
-        "negligible_rtol": negligible_rtol,
-        "compute_device": compute_device,
-    }
-
-    def to_cpu(result):
-        kiers = None
-        if result.kiers is not None:
-            coordinate_matrix, projections = result.kiers
-            kiers = (
-                coordinate_matrix.float().cpu(),
-                [p.float().cpu() for p in projections],
-            )
-        return PARAFAC2Model(
-            weights=result.weights.float().cpu(),
-            subject_mode=result.subject_mode.float().cpu(),
-            evolving_states=[B.float().cpu() for B in result.evolving_states],
-            label_mode=result.label_mode.float().cpu(),
-            kiers=kiers,
-        )
+    kwargs = _compute_kwargs(
+        "PARAFAC2",
+        rank,
+        {
+            "max_iter": max_iter,
+            "verbose_level": verbose_level,
+            "tolerance": tolerance,
+            "normalize": normalize,
+            "nn_modes": nn_modes,
+            "solver": solver,
+            "aoadmm_options": aoadmm_options,
+            "aoadmm_loss_tolerance": aoadmm_loss_tolerance,
+            "return_projections": return_projections,
+            "negligible_rtol": negligible_rtol,
+            "compute_device": compute_device,
+        },
+    )
 
     (best_model, best_error, best_diagnostics, tally) = _repeat_with_restarts(
         "PARAFAC2",
         tensor_slices,
         kwargs,
-        to_cpu,
         init_repeats,
         # Where the fit runs is what the CUDA guard and cache clearing need.
         compute_device if compute_device is not None else device,
@@ -1670,31 +1794,15 @@ def run_PARAFAC2_decomposition_repeated(
         restart_procs=restart_procs,
     )
 
-    # Measured on the CPU float32 factors the caller actually receives, not
-    # on the solver's internals, so the check reflects what they will plot.
-    violations = _nn_violations(
+    _warn_parafac2_outcome(
         best_model,
-        best_diagnostics.nn_modes if best_diagnostics else None,
-    )
-    if best_diagnostics is not None:
-        best_diagnostics = replace(best_diagnostics, max_nn_violation=violations)
-        _warn_if_nn_modes_violated(
-            best_model,
-            best_diagnostics.nn_modes,
-            violations,
-            solver,
-        )
-
-    _warn_if_accepted_at_iteration_limit(best_diagnostics)
-    advisory = _build_restart_advisory(
+        best_diagnostics,
         tally,
         solver,
         max_iter,
         tolerance,
         aoadmm_loss_tolerance,
     )
-    if advisory is not None:
-        warnings.warn(advisory, stacklevel=2)
 
     if return_diagnostics:
         return best_model, best_error, best_diagnostics
