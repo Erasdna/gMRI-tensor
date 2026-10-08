@@ -23,6 +23,24 @@ uv sync
 
 The steps below follow the pipeline order. Each step reads the output of the previous one from disk, so it can run as a separate job.
 
+### Command line
+
+Each stage runs on its own from one YAML config, which names its inputs and outputs (paths are relative to the config file):
+
+```bash
+gmri preprocess    examples/preprocessing.yaml   # images -> results/data/{tracer,roi_statistics}.parquet
+gmri plot          examples/plotting.yaml        # ROI statistics -> results/roi_analysis/ tables + results/figures/roi/
+gmri decompose     examples/decomposition.yaml   # tracer table -> rank_<r>.h5 + fits.csv
+gmri replicability examples/replicability.yaml   # tracer table -> replicability.csv (factor match scores)
+```
+
+- **Configs:** the commented `examples/*.yaml` list every option. Unknown keys are errors, and every error names the file and field.
+- **Provenance:** each stage copies its config next to its outputs.
+- **Manifest:** the preprocessing manifest is a CSV with one row per scan: `subject, time_point, baseline_path, post_injection_path, mask_path, segmentation_path`.
+- **`fit.options`:** passed verbatim to the decomposition runner, e.g. `solver: matcouply` or `non_negative: false`.
+
+The sections below show the same steps through the Python API.
+
 ### Preprocessing
 
 Each `args_list` entry describes one scan: the baseline, post-injection, mask and segmentation NIfTI paths on one grid, the `signal_type`, an aggregation `func`, and the `subject` and `time_point` it belongs to.

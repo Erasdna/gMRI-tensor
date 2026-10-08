@@ -39,6 +39,9 @@ dependencies = [
 ]
 
 
+[project.scripts]
+gmri = "gMRItensor.cli:main"
+
 [project.optional-dependencies]
 test = [
    "flake8", # Formatting: https://flake8.pycqa.org/en/latest/user/error-codes.html
