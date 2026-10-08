@@ -82,6 +82,14 @@ def test_read_manifest_builds_args_list(synthetic_study: Any) -> None:
         (lambda df: pd.concat([df, df.iloc[[0]]]), "duplicate"),
         (lambda df: df.assign(time_point=df["time_point"] + 0.5), "time_point"),
         (lambda df: df.drop(columns="mask_path"), "mask_path"),
+        (lambda df: df.assign(mask_path=[""] + list(df["mask_path"][1:])), "mask_path"),
+        (lambda df: df.assign(subject=[""] + list(df["subject"][1:])), "subject"),
+        (
+            lambda df: df.assign(
+                time_point=[float("inf")] + list(df["time_point"][1:]),
+            ),
+            "time_point",
+        ),
     ],
 )
 def test_read_manifest_rejects_bad_rows(
@@ -335,3 +343,26 @@ def test_run_replicability_missing_subject_info_row(synthetic_study: Any) -> Non
 
     with pytest.raises(ValueError, match="sub-00"):
         run_replicability(replicability_config(synthetic_study))
+
+
+def test_run_plotting_keeps_numeric_label_rois_as_strings(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Label ROIs are named str(id); read back from CSV they must not turn
+    # into ints, or no significance marker ever matches its ROI.
+    run_preprocessing(preprocessing_config(synthetic_study))
+    seen = []
+    original = pipeline.plot_roi_evolution_rows
+
+    def spy(summary: Any, stats: Any, significance: Any, *args: Any, **kw: Any) -> Any:
+        seen.append((summary, significance))
+        return original(summary, stats, significance, *args, **kw)
+
+    monkeypatch.setattr(pipeline, "plot_roi_evolution_rows", spy)
+    figures = [{"rois": ["4"], "statistics": ["median"], "layout": "rows"}]
+    run_plotting(plotting_config(synthetic_study, figures=figures, grids=[]))
+
+    ((summary, significance),) = seen
+    assert set(summary["roi"]) == {"4"}
+    assert set(significance["roi"]) == {"4"}

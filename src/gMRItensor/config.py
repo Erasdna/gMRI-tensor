@@ -474,7 +474,8 @@ def load_replicability_config(path: Path | str) -> ReplicabilityConfig:
         engine=reader.choice("engine", ("halfhalf", "cv")),
         repeats=reader.integer("repeats"),
         subject_info=reader.path("subject_info", None, must_exist=True),
-        splits=reader.integer("splits", None, minimum=2),
+        # 2 folds have disjoint training sets: nothing to compare.
+        splits=reader.integer("splits", None, minimum=3),
         stratify_by=reader.string("stratify_by", None),
         n_procs=reader.integer("n_procs", 1),
         seed=reader.integer("seed", 0, minimum=0),

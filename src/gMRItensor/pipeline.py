@@ -77,8 +77,20 @@ def read_manifest(config: PreprocessingConfig) -> list[dict[str, Any]]:
     if missing_columns:
         raise ConfigError(f"{config.manifest}: missing column(s) {missing_columns}")
 
+    values = manifest[list(MANIFEST_COLUMNS)]
+    blank = values.isna() | values.astype(str).apply(lambda c: c.str.strip() == "")
+    if blank.to_numpy().any():
+        cells = [
+            (int(row), column)
+            for column in MANIFEST_COLUMNS
+            for row in manifest.index[blank[column]]
+        ]
+        raise ConfigError(
+            f"{config.manifest}: empty value(s) at (row, column): {cells[:5]}",
+        )
+
     time_points = pd.to_numeric(manifest["time_point"], errors="coerce")
-    bad = manifest[time_points.isna() | (time_points != time_points.round())]
+    bad = manifest[~np.isfinite(time_points) | (time_points != time_points.round())]
     if not bad.empty:
         raise ConfigError(
             f"{config.manifest}: time_point must be an integer, rows "
@@ -227,7 +239,8 @@ def run_plotting(config: PlottingConfig) -> list[Path]:
         ).to_csv(significance_path, index=False)
         tables[statistic] = (
             pd.read_parquet(summary_path),
-            pd.read_csv(significance_path),
+            # Label ROIs are named str(id): keep them strings, not ints.
+            pd.read_csv(significance_path, dtype={"roi": str}),
         )
 
     written: list[Path] = []

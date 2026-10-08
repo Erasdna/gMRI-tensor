@@ -254,3 +254,11 @@ def test_relaxivity_default_and_explicit_null(tmp_path: Path) -> None:
 
     assert load_preprocessing_config(default).relaxivity == 3.2
     assert load_preprocessing_config(disabled).relaxivity is None
+
+
+def test_cv_needs_three_splits(tmp_path: Path) -> None:
+    # Two folds have disjoint training sets, so no pair could be compared.
+    path = _write_config(tmp_path, "r", _replicability(engine="cv", splits=2))
+
+    with pytest.raises(ConfigError, match="splits"):
+        load_replicability_config(path)
