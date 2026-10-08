@@ -431,6 +431,15 @@ def tracer_to_concentration(
     return delta_r1_per_s / relaxivity
 
 
+# Statistic columns of `compute_roi_statistics`, for group analysis/plots.
+ROI_STATISTIC_COLUMNS = (
+    "median",
+    "mean",
+    "median_concentration",
+    "mean_concentration",
+    "total_amount",
+)
+
 _ROI_STATISTICS_DTYPES = {
     "roi": str,
     "roi_type": str,

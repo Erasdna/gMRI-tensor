@@ -1,0 +1,23 @@
+# gmri plot examples/plotting.yaml
+roi_statistics: results/data/roi_statistics.parquet
+subject_info: subjects.csv          # `subjects` column + group_variable
+group_variable: diagnosis
+output_dir: results                 # writes results/roi_analysis/ and results/figures/roi/
+min_group_n: 2
+alpha: 0.05
+figures:                            # one figure per ROI x statistic
+  - rois: [ventricles, white_matter]
+    statistics: [median_concentration]
+    layout: rows                    # rows | panels
+    page_width: single              # single | onehalf | double | inches
+grids:                              # several ROIs per figure, paginated
+  - name: overview
+    rois: [ventricles, white_matter, cortical_grey_matter, limbic_system]
+    statistics: [median_concentration, total_amount]
+    layout: panels
+    n_rows: 2
+    n_cols: 2
+    page_width: double
+    sharey: false
+formats: [pdf, png]
+dpi: 300

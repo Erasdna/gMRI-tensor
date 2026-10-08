@@ -1,0 +1,21 @@
+# gmri replicability examples/replicability.yaml
+input: results/data/tracer.parquet
+subject_info: subjects.csv   # only needed with stratify_by
+output_dir: results/replicability/parafac2_halfhalf
+method: parafac2
+ranks: [2, 3, 4]
+tensor:
+  scale: true
+  min_timepoints: null
+  max_invalid_fraction: 0.9
+fit:
+  restarts: 20
+  max_iter: 2000
+  tolerance: 1e-5
+  options: {}
+engine: halfhalf             # halfhalf | cv
+repeats: 20
+splits: 5                    # cv only
+stratify_by: diagnosis       # optional subject_info column
+n_procs: 4
+seed: 0

@@ -1,0 +1,16 @@
+# gmri decompose examples/decomposition.yaml
+input: results/data/tracer.parquet
+output_dir: results/decompositions/parafac2_roi
+method: parafac2             # cp | parafac2
+ranks: [2, 3, 4]
+tensor:
+  scale: true                # per-label scaling over subjects and time points
+  min_timepoints: null       # null -> every time point required
+  max_invalid_fraction: 0.9
+fit:
+  restarts: 50
+  max_iter: 2000
+  tolerance: 1e-5
+  restart_procs: 1
+  options:                   # forwarded to run_PARAFAC2_decomposition_repeated
+    solver: tensorly
