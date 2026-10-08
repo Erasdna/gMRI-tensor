@@ -1,17 +1,24 @@
 from pathlib import Path
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytest
+import torch
 import yaml
+from gMRItensor import pipeline
 from gMRItensor import preprocessing
 from gMRItensor.config import ConfigError
+from gMRItensor.config import DecompositionConfig
+from gMRItensor.config import load_decomposition_config
 from gMRItensor.config import load_plotting_config
 from gMRItensor.config import load_preprocessing_config
 from gMRItensor.config import PlottingConfig
 from gMRItensor.config import PreprocessingConfig
+from gMRItensor.model_io import load_decomposition
 from gMRItensor.pipeline import grid_pages
 from gMRItensor.pipeline import read_manifest
+from gMRItensor.pipeline import run_decomposition
 from gMRItensor.pipeline import run_plotting
 from gMRItensor.pipeline import run_preprocessing
 
@@ -195,3 +202,81 @@ def test_run_plotting_unknown_roi_writes_nothing(synthetic_study: Any) -> None:
 def test_run_plotting_before_preprocessing(synthetic_study: Any) -> None:
     with pytest.raises(FileNotFoundError, match="gmri preprocess"):
         run_plotting(plotting_config(synthetic_study))
+
+
+def decomposition_config(study: Any, **overrides: Any) -> DecompositionConfig:
+    data = {
+        "input": "results/data/tracer.parquet",
+        "output_dir": "results/decompositions/test",
+        "method": "parafac2",
+        "ranks": [1, 2],
+        "fit": {"restarts": 2, "max_iter": 50},
+        **overrides,
+    }
+    return load_decomposition_config(
+        write_yaml(study.root / "decomposition.yaml", data),
+    )
+
+
+def test_run_decomposition_parafac2(synthetic_study: Any) -> None:
+    run_preprocessing(preprocessing_config(synthetic_study))
+    config = decomposition_config(synthetic_study)
+
+    written = run_decomposition(config)
+
+    out = synthetic_study.root / "results" / "decompositions" / "test"
+    assert written == [out / "rank_1.h5", out / "rank_2.h5"]
+    fits = pd.read_csv(out / "fits.csv")
+    assert list(fits["rank"]) == [1, 2]
+    assert fits["error"].between(0, 1).all()
+    saved = load_decomposition(out / "rank_2.h5")
+    assert saved.method == "parafac2"
+    assert saved.evolving_states is not None
+    assert len(saved.evolving_states) == 6
+    assert saved.evolving_states[0].shape == (3, 2)
+    assert saved.label_mode.shape == (5, 2)
+    assert saved.subject_mode.shape == (6, 2)
+    assert saved.scale_std is not None and saved.scale_std.shape == (5,)
+    assert list(saved.subjects) == [f"sub-{s:02d}" for s in range(6)]
+    assert (out / "decomposition.yaml").exists()
+
+
+def test_run_decomposition_cp_wiring(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Stub the CP fit: the real one triggers torch.compile, which is slow.
+    calls = []
+
+    def fake_cp(tensor: torch.Tensor, rank: int, **kwargs: Any) -> tuple:
+        calls.append((tuple(tensor.shape), rank, kwargs))
+        factors = [torch.rand(n, rank) for n in tensor.shape]
+        return torch.ones(rank), factors, torch.tensor(0.25)
+
+    monkeypatch.setattr(pipeline, "run_CP_decomposition_repeated", fake_cp)
+    run_preprocessing(preprocessing_config(synthetic_study))
+    config = decomposition_config(
+        synthetic_study,
+        method="cp",
+        ranks=[3],
+        tensor={"scale": False},
+        fit={"restarts": 4, "max_iter": 10, "options": {"non_negative": False}},
+    )
+
+    run_decomposition(config)
+
+    ((shape, rank, kwargs),) = calls
+    assert shape == (6, 3, 5) and rank == 3
+    assert kwargs["init_repeats"] == 4 and kwargs["max_iter"] == 10
+    assert kwargs["non_negative"] is False
+    out = synthetic_study.root / "results" / "decompositions" / "test"
+    saved = load_decomposition(out / "rank_3.h5")
+    assert saved.time_mode is not None and saved.time_mode.shape == (3, 3)
+    np.testing.assert_array_equal(saved.timepoints, [0, 6, 24])
+    assert saved.error == pytest.approx(0.25)
+    assert saved.scale_mean is None
+
+
+def test_run_decomposition_before_preprocessing(synthetic_study: Any) -> None:
+    with pytest.raises(FileNotFoundError, match="gmri preprocess"):
+        run_decomposition(decomposition_config(synthetic_study))

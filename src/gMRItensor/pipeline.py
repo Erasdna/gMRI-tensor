@@ -7,21 +7,32 @@ import shutil
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
+from typing import NamedTuple
 
 import matplotlib
 import numpy as np
 import pandas as pd
+import torch
 from gMRItensor.config import ConfigError
+from gMRItensor.config import DecompositionConfig
 from gMRItensor.config import PlottingConfig
 from gMRItensor.config import PreprocessingConfig
+from gMRItensor.config import TensorConfig
+from gMRItensor.decomposition import run_CP_decomposition_repeated
+from gMRItensor.decomposition import run_PARAFAC2_decomposition_repeated
+from gMRItensor.decomposition import setup_backend
 from gMRItensor.group_statistics import compare_roi_groups
 from gMRItensor.group_statistics import load_roi_statistics
 from gMRItensor.group_statistics import summarize_roi_statistics
+from gMRItensor.model_io import save_decomposition
+from gMRItensor.model_io import SavedDecomposition
 from gMRItensor.plotting.roi_evolution import figure_path
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_panels
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_rows
 from gMRItensor.plotting.utils import save_figure
+from gMRItensor.preprocessing import load_tensor_from_parquet
 from gMRItensor.preprocessing import PreprocessedPaths
+from gMRItensor.preprocessing import scale_tensor
 from gMRItensor.preprocessing import write_preprocessed_data
 from gMRItensor.roi_groups import resolve_roi_groups
 
@@ -262,4 +273,130 @@ def run_plotting(config: PlottingConfig) -> list[Path]:
                 )
 
     copy_config(config.source, config.output_dir, "plotting")
+    return written
+
+
+class DecompositionInput(NamedTuple):
+    """`load_tensor_from_parquet` output as torch, plus the scaling applied."""
+
+    data: torch.Tensor | list[torch.Tensor]
+    subjects: np.ndarray
+    timepoints: np.ndarray | list[np.ndarray]
+    labels: np.ndarray
+    label_index: np.ndarray
+    scale_mean: np.ndarray | None
+    scale_std: np.ndarray | None
+
+
+def load_decomposition_input(
+    path: Path,
+    method: str,
+    tensor: TensorConfig,
+) -> DecompositionInput:
+    """Load the tracer parquet as a CP tensor or PARAFAC2 slices, optionally
+    scaled per label (`scale_tensor(center=False)`)."""
+    _require(path, "preprocess")
+    data, subjects, timepoints, labels, label_index = load_tensor_from_parquet(
+        path,
+        "cp" if method == "cp" else "parafac2",
+        min_timepoints=tensor.min_timepoints,
+        max_invalid_fraction=tensor.max_invalid_fraction,
+    )
+    mean = std = None
+    if tensor.scale:
+        data, mean, std = scale_tensor(data, center=False)
+    torch_data = (
+        torch.as_tensor(data)
+        if isinstance(data, np.ndarray)
+        else [torch.as_tensor(s) for s in data]
+    )
+    return DecompositionInput(
+        torch_data,
+        subjects,
+        timepoints,
+        labels,
+        label_index,
+        mean,
+        std,
+    )
+
+
+def _numpy(value: Any) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def run_decomposition(config: DecompositionConfig) -> list[Path]:
+    """`gmri decompose`: one fit per rank -> `rank_<r>.h5` and `fits.csv`.
+
+    Returns the written model paths, in `ranks` order.
+    """
+    data = load_decomposition_input(config.input, config.method, config.tensor)
+    device = setup_backend()
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    fit = config.fit
+    fit_kwargs = {
+        "init_repeats": fit.restarts,
+        "max_iter": fit.max_iter,
+        "tolerance": fit.tolerance,
+        "restart_procs": fit.restart_procs,
+        "device": device,
+        "progress_bar": False,
+        **fit.options,
+    }
+    common = {
+        "subjects": data.subjects,
+        "timepoints": data.timepoints,
+        "labels": data.labels,
+        "label_index": data.label_index,
+        "scale_mean": data.scale_mean,
+        "scale_std": data.scale_std,
+    }
+
+    written, errors = [], []
+    for rank in config.ranks:
+        if config.method == "cp":
+            weights, factors, error = run_CP_decomposition_repeated(
+                data.data,
+                rank,
+                **fit_kwargs,
+            )
+            subject_mode, time_mode, label_mode = (_numpy(f) for f in factors)
+            saved = SavedDecomposition(
+                method="cp",
+                rank=rank,
+                error=float(error),
+                weights=_numpy(weights),
+                subject_mode=subject_mode,
+                label_mode=label_mode,
+                time_mode=time_mode,
+                **common,
+            )
+        else:
+            model, error = run_PARAFAC2_decomposition_repeated(
+                data.data,
+                rank,
+                **fit_kwargs,
+            )
+            saved = SavedDecomposition(
+                method="parafac2",
+                rank=rank,
+                error=float(error),
+                weights=_numpy(model.weights),
+                subject_mode=_numpy(model.subject_mode),
+                label_mode=_numpy(model.label_mode),
+                evolving_states=[_numpy(state) for state in model.evolving_states],
+                **common,
+            )
+        path = config.output_dir / f"rank_{rank}.h5"
+        save_decomposition(path, saved)
+        written.append(path)
+        errors.append(saved.error)
+
+    pd.DataFrame({"rank": config.ranks, "error": errors}).to_csv(
+        config.output_dir / "fits.csv",
+        index=False,
+    )
+    copy_config(config.source, config.output_dir, "decomposition")
     return written
