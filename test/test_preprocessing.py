@@ -1,3 +1,5 @@
+import warnings
+from collections import Counter
 from operator import itemgetter
 
 import nibabel as nib
@@ -6,16 +8,20 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pytest
+from gMRItensor import preprocessing
 from gMRItensor.preprocessing import _atomic_outputs
 from gMRItensor.preprocessing import _iter_parallel
 from gMRItensor.preprocessing import _load_labeled_tracer_voxels
 from gMRItensor.preprocessing import compute_roi_scaling
+from gMRItensor.preprocessing import compute_roi_statistics
 from gMRItensor.preprocessing import compute_tracer_from_image
 from gMRItensor.preprocessing import compute_tracer_parallel
 from gMRItensor.preprocessing import iter_tracer_results
 from gMRItensor.preprocessing import load_tensor_from_parquet
 from gMRItensor.preprocessing import prepare_tensor
 from gMRItensor.preprocessing import scale_tensor
+from gMRItensor.preprocessing import tracer_to_concentration
+from gMRItensor.preprocessing import write_preprocessed_data
 from gMRItensor.preprocessing import write_tracer_parquet
 from nibabel.orientations import axcodes2ornt
 from nibabel.orientations import io_orientation
@@ -999,3 +1005,222 @@ def test_atomic_outputs_removes_tmp_files_on_failure(tmp_path):
             raise RuntimeError("boom")
 
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("signal_type", ["R1map", "T1map"])
+def test_tracer_to_concentration_converts_delta_r1_to_mm(signal_type):
+    # 0.0032 1/ms = 3.2 1/s, which at r1 = 3.2 1/(mM s) is exactly 1 mM.
+    tracer = np.array([0.0032, 0.0064, np.nan])
+
+    concentration = tracer_to_concentration(tracer, signal_type)
+
+    np.testing.assert_allclose(concentration, [1.0, 2.0, np.nan])
+    np.testing.assert_allclose(
+        tracer_to_concentration(tracer * 1000, signal_type, time_unit="s"),
+        concentration,
+    )
+    np.testing.assert_allclose(
+        tracer_to_concentration(tracer, signal_type, relaxivity=1.6),
+        [2.0, 4.0, np.nan],
+    )
+
+
+def test_tracer_to_concentration_rejects_bad_arguments():
+    with pytest.raises(ValueError, match="T1w"):
+        tracer_to_concentration(np.ones(3), "T1w")
+    with pytest.raises(ValueError, match="time_unit"):
+        tracer_to_concentration(np.ones(3), "R1map", time_unit="min")
+
+
+def _roi_rows(stats: pd.DataFrame) -> dict[str, pd.Series]:
+    return {row["roi"]: row for _, row in stats.iterrows()}
+
+
+def test_compute_roi_statistics_per_label_and_pooled_group():
+    # Raw (unrounded) segmentation ids, as `_load_labeled_tracer_voxels`
+    # returns them; label 4 has no finite voxel at all.
+    tracer = np.array([1.0, 2.0, 3.0, 10.0, 20.0, np.nan, 5.0, np.nan])
+    segmentation = np.array([1, 1, 1.0000001, 2, 2, 2, 3, 4])
+    groups = {"g12": np.array([1, 2]), "absent": np.array([99])}
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")  # no empty-slice warnings for label 4
+        stats = compute_roi_statistics(tracer, segmentation, 2.0, groups)
+
+    assert list(stats["roi"]) == ["1", "2", "3", "4", "g12"]
+    assert list(stats["roi_type"]) == ["label"] * 4 + ["group"]
+    rows = _roi_rows(stats)
+    assert (rows["1"]["n_voxels"], rows["1"]["n_valid"]) == (3, 3)
+    assert rows["1"]["median"] == pytest.approx(2.0)
+    assert rows["1"]["volume_mm3"] == pytest.approx(6.0)
+    assert (rows["2"]["n_voxels"], rows["2"]["n_valid"]) == (3, 2)
+    assert rows["2"]["median"] == pytest.approx(15.0)
+    assert rows["2"]["mean"] == pytest.approx(15.0)
+    assert rows["4"]["n_valid"] == 0
+    assert np.isnan(rows["4"]["median"]) and np.isnan(rows["4"]["mean"])
+    # The group median pools voxels, it is not a median of label medians.
+    assert (rows["g12"]["n_voxels"], rows["g12"]["n_valid"]) == (6, 5)
+    assert rows["g12"]["median"] == pytest.approx(3.0)
+    assert rows["g12"]["mean"] == pytest.approx(7.2)
+    assert rows["g12"]["volume_mm3"] == pytest.approx(12.0)
+    concentration_columns = ["median_concentration", "mean_concentration"]
+    assert stats[concentration_columns + ["total_amount"]].isna().all().all()
+
+
+def test_compute_roi_statistics_concentration_and_total_amount():
+    tracer = np.array([1.0, 2.0, 3.0, 4.0])
+    segmentation = np.array([1, 1, 1, 2])
+    concentration = np.array([1.0, 2.0, np.nan, 4.0])  # mM
+
+    stats = compute_roi_statistics(
+        tracer,
+        segmentation,
+        24.0,
+        {"both": np.array([1, 2])},
+        concentration=concentration,
+        include_labels=False,
+    )
+
+    assert list(stats["roi"]) == ["both"]
+    row = stats.iloc[0]
+    assert row["median_concentration"] == pytest.approx(2.0)
+    assert row["mean_concentration"] == pytest.approx(7.0 / 3.0)
+    # mM * mm^3 = 1e-6 mmol, summed over the finite voxels only.
+    assert row["total_amount"] == pytest.approx(7.0 * 24.0 * 1e-6)
+
+
+def _set_affine(args_list, affine):
+    """Re-save every image of `args_list` on the same data with `affine`."""
+    keys = ("baseline_path", "post_injection_path", "mask_path", "segmentation_path")
+    for path in {args[key] for args in args_list for key in keys}:
+        # Copy first: `get_fdata` may memory-map the file being overwritten.
+        data = np.array(nib.load(path).get_fdata())
+        nib.save(nib.Nifti1Image(data, affine), path)
+
+
+@pytest.mark.parametrize("n_procs", [1, 2])
+@pytest.mark.parametrize("func", [np.nanmedian, None])
+def test_write_preprocessed_data_tracer_output_matches_write_tracer_parquet(
+    tmp_path,
+    func,
+    n_procs,
+):
+    # Regression: the single-pass writer must give exactly the tracer files
+    # `write_tracer_parquet` gives, so `load_tensor_from_parquet` is unchanged.
+    args_list = _make_streaming_args_list(tmp_path, func)
+    reference = tmp_path / "reference"
+    reference.mkdir()
+    expected_tracer, expected_coords = write_tracer_parquet(
+        args_list,
+        reference / "tracer.parquet",
+        n_procs=1,
+    )
+
+    paths = write_preprocessed_data(args_list, tmp_path / "out", n_procs=n_procs)
+
+    assert paths.tracer == tmp_path / "out" / "data" / "tracer.parquet"
+    assert paths.roi_statistics == tmp_path / "out" / "data" / "roi_statistics.parquet"
+    pd.testing.assert_frame_equal(
+        pd.read_parquet(paths.tracer),
+        pd.read_parquet(expected_tracer),
+    )
+    assert (
+        pq.ParquetFile(paths.tracer).num_row_groups
+        == pq.ParquetFile(expected_tracer).num_row_groups
+    )
+    if func is None:
+        pd.testing.assert_frame_equal(
+            pd.read_parquet(paths.coords),
+            pd.read_parquet(expected_coords),
+        )
+    else:
+        assert paths.coords is None and expected_coords is None
+        assert not (tmp_path / "out" / "data" / "tracer.coords.parquet").exists()
+
+
+def test_write_preprocessed_data_roi_statistics_round_trip(tmp_path):
+    args_list = _make_streaming_args_list(tmp_path, np.nanmedian)
+    _set_affine(args_list, np.diag([2.0, 3.0, 4.0, 1.0]))  # 24 mm^3 voxels
+    groups = {"both": np.array([1, 2])}
+
+    paths = write_preprocessed_data(args_list, tmp_path, roi_groups=groups, n_procs=1)
+
+    stats = pd.read_parquet(paths.roi_statistics)
+    assert list(stats.columns[:2]) == ["subject", "time_point"]
+    for args in args_list:
+        got = stats.query(
+            f"subject == '{args['subject']}' and time_point == {args['time_point']}",
+        ).drop(columns=["subject", "time_point"])
+        tracer, segmentation, _, voxel_volume_mm3 = _load_labeled_tracer_voxels(
+            **{k: v for k, v in _direct_kwargs(args).items() if k != "func"},
+        )
+        expected = compute_roi_statistics(
+            tracer,
+            segmentation,
+            voxel_volume_mm3,
+            groups,
+            concentration=tracer_to_concentration(tracer, "R1map"),
+        )
+        pd.testing.assert_frame_equal(got.reset_index(drop=True), expected)
+
+    # First image: label 1 holds 10, 20, 30 [1/ms] -> 1e4 / 3.2 mM per unit.
+    first = stats.query("subject == 's0' and time_point == 0 and roi == '1'").iloc[0]
+    assert first["volume_mm3"] == pytest.approx(3 * 24.0)
+    assert first["total_amount"] == pytest.approx(60.0 * 1000 / 3.2 * 24.0 * 1e-6)
+
+
+@pytest.mark.parametrize(
+    "kwargs, signal_type",
+    [({}, "T1w"), ({"relaxivity": None}, "R1map")],
+)
+def test_write_preprocessed_data_without_concentration(tmp_path, kwargs, signal_type):
+    args_list = _make_streaming_args_list(tmp_path, np.nanmedian, n_images=2)
+    # Nonzero baseline, so the T1w ratio is finite.
+    nib.save(
+        nib.Nifti1Image(np.ones((2, 2, 2)), np.eye(4)),
+        args_list[0]["baseline_path"],
+    )
+    for args in args_list:
+        args["signal_type"] = signal_type
+
+    paths = write_preprocessed_data(args_list, tmp_path, n_procs=1, **kwargs)
+
+    stats = pd.read_parquet(paths.roi_statistics)
+    assert stats["median"].notna().all()
+    columns = ["median_concentration", "mean_concentration", "total_amount"]
+    assert stats[columns].isna().all().all()
+
+
+def test_write_preprocessed_data_loads_each_image_once(tmp_path, monkeypatch):
+    args_list = _make_streaming_args_list(tmp_path, None)
+    calls: Counter = Counter()
+    original_loader = preprocessing._load_labeled_tracer_voxels
+
+    def counting_loader(*args, **kwargs):
+        calls[args[1]] += 1  # keyed by post_injection_path
+        return original_loader(*args, **kwargs)
+
+    monkeypatch.setattr(preprocessing, "_load_labeled_tracer_voxels", counting_loader)
+
+    write_preprocessed_data(args_list, tmp_path, n_procs=1)
+
+    assert calls == Counter(args["post_injection_path"] for args in args_list)
+    assert set(calls.values()) == {1}
+
+
+def test_write_preprocessed_data_cleans_up_on_failure(tmp_path):
+    args_list = _make_streaming_args_list(tmp_path, None, n_images=2)
+    args_list[1]["post_injection_path"] = tmp_path / "does_not_exist.nii"
+
+    with pytest.raises(FileNotFoundError):
+        write_preprocessed_data(args_list, tmp_path / "out", n_procs=1)
+
+    assert list((tmp_path / "out" / "data").iterdir()) == []
+
+
+def test_write_preprocessed_data_rejects_bad_arguments(tmp_path):
+    with pytest.raises(ValueError, match="empty"):
+        write_preprocessed_data([], tmp_path)
+    args_list = _make_streaming_args_list(tmp_path, None, n_images=1)
+    with pytest.raises(ValueError, match="time_unit"):
+        write_preprocessed_data(args_list, tmp_path, time_unit="min")
