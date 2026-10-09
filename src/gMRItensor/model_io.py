@@ -17,8 +17,9 @@ class SavedDecomposition:
     CP has one shared `time_mode` over `timepoints`; PARAFAC2 has one
     `evolving_states[i]` per subject over `timepoints[i]`. `labels` and
     `label_index` identify `label_mode` rows, as returned by
-    `load_tensor_from_parquet`; `scale_mean`/`scale_std` are the per-label
-    scaling applied before fitting, or None if unscaled.
+    `load_tensor_from_parquet`. `scale_mean`/`scale_std` are the per-label
+    statistics of the fitted data: `centered` says whether `scale_mean` was
+    subtracted, and `scale_std` is None if the data was not divided by it.
     """
 
     method: Literal["cp", "parafac2"]
@@ -35,6 +36,7 @@ class SavedDecomposition:
     evolving_states: list[np.ndarray] | None = None
     scale_mean: np.ndarray | None = None
     scale_std: np.ndarray | None = None
+    centered: bool = False
 
 
 def _write_ragged(file: h5py.File, name: str, arrays: list[np.ndarray]) -> None:
@@ -62,6 +64,7 @@ def save_decomposition(path: Path, saved: SavedDecomposition) -> None:
             file.attrs["method"] = saved.method
             file.attrs["rank"] = saved.rank
             file.attrs["error"] = saved.error
+            file.attrs["centered"] = saved.centered
             for name in _ARRAYS:
                 file.create_dataset(name, data=np.asarray(getattr(saved, name)))
             for name in _OPTIONAL_ARRAYS:
@@ -109,6 +112,7 @@ def load_decomposition(path: Path) -> SavedDecomposition:
             method=method,  # type: ignore[arg-type]
             rank=int(file.attrs["rank"]),
             error=float(file.attrs["error"]),
+            centered=bool(file.attrs.get("centered", False)),
             subjects=subjects,
             timepoints=timepoints,
             time_mode=time_mode,

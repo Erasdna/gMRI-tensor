@@ -277,7 +277,7 @@ def test_run_decomposition_cp_wiring(
         method="cp",
         ranks=[3],
         tensor={"scale": False},
-        fit={"restarts": 4, "max_iter": 10, "options": {"non_negative": False}},
+        fit={"restarts": 4, "max_iter": 10, "non_negative_modes": "none"},
     )
 
     run_decomposition(config)
@@ -465,3 +465,71 @@ def test_progress_bar_option_is_passed_through(
     run_decomposition_job(decomposition, 0)
 
     assert seen == [True, True]
+
+
+def test_center_only_and_unconstrained_cp(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def fake_cp(tensor: torch.Tensor, rank: int, **kwargs: Any) -> tuple:
+        calls.append((tensor.numpy().copy(), kwargs))
+        factors = [torch.rand(n, rank) for n in tensor.shape]
+        return torch.ones(rank), factors, torch.tensor(0.5)
+
+    monkeypatch.setattr(pipeline, "run_CP_decomposition_repeated", fake_cp)
+    run_preprocessing(preprocessing_config(synthetic_study))
+    config = decomposition_config(
+        synthetic_study,
+        method="cp",
+        ranks=[2],
+        tensor={"center": True, "scale": False},
+        fit={"restarts": 1, "non_negative_modes": "none"},
+    )
+
+    run_decomposition(config)
+
+    ((tensor, kwargs),) = calls
+    np.testing.assert_allclose(tensor.mean(axis=(0, 1)), 0.0, atol=1e-5)
+    assert kwargs["non_negative"] is False
+    saved = load_decomposition(config.output_dir / "rank_2.h5")
+    assert saved.centered is True
+    assert saved.scale_std is None and saved.scale_mean is not None
+
+
+@pytest.mark.parametrize(
+    "modes, expected",
+    [("auto", "auto"), ([0, 2], (0, 2)), ("none", None)],
+)
+def test_non_negative_modes_reach_parafac2(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    modes: Any,
+    expected: Any,
+) -> None:
+    calls = []
+
+    def fake_parafac2(slices: list, rank: int, **kwargs: Any) -> tuple:
+        calls.append(kwargs)
+        model = pipeline.PARAFAC2Model(
+            weights=torch.ones(rank),
+            subject_mode=torch.rand(len(slices), rank),
+            evolving_states=[torch.rand(s.shape[0], rank) for s in slices],
+            label_mode=torch.rand(slices[0].shape[1], rank),
+        )
+        return model, torch.tensor(0.5)
+
+    monkeypatch.setattr(pipeline, "run_PARAFAC2_decomposition_repeated", fake_parafac2)
+    run_preprocessing(preprocessing_config(synthetic_study))
+    config = decomposition_config(
+        synthetic_study,
+        ranks=[2],
+        fit={"restarts": 1, "non_negative_modes": modes},
+    )
+
+    run_decomposition(config)
+
+    (kwargs,) = calls
+    assert kwargs["nn_modes"] == expected
+    assert "non_negative" not in kwargs

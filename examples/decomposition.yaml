@@ -6,6 +6,7 @@ method: parafac2             # cp | parafac2
 ranks: [2, 3, 4]
 tensor:
   scale: true                # per-label scaling over subjects and time points
+  center: false              # subtract per-label means (needs non_negative_modes: none)
   min_timepoints: null       # null -> every time point required
   max_invalid_fraction: 0.9
 fit:
@@ -13,6 +14,7 @@ fit:
   max_iter: 2000
   tolerance: 1e-5
   restart_procs: 1
+  non_negative_modes: auto   # auto | none | modes, 0 subject, 1 time, 2 label
   options:                   # forwarded to run_PARAFAC2_decomposition_repeated
     solver: tensorly
 distributed:                 # for `plan` / `run --job N` / `collect`

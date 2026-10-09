@@ -7,12 +7,14 @@ method: parafac2
 ranks: [2, 3, 4]
 tensor:
   scale: true
+  center: false              # subtract per-label means (needs non_negative_modes: none)
   min_timepoints: null
   max_invalid_fraction: 0.9
 fit:
   restarts: 20
   max_iter: 2000
   tolerance: 1e-5
+  non_negative_modes: auto   # auto | none | modes, 0 subject, 1 time, 2 label
   options: {}
 engine: halfhalf             # halfhalf | cv
 repeats: 20

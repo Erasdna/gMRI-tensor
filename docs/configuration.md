@@ -153,6 +153,7 @@ Every listed ROI is checked against the statistics file before anything is writt
 | Key | Type | Default | Meaning |
 |---|---|---|---|
 | `scale` | boolean | `true` | Divide each label by its standard deviation over all subjects and time points before fitting. The scaling is saved with the model. |
+| `center` | boolean | `false` | Subtract each label's mean over all subjects and time points (before scaling). Centered data is negative, so this requires `fit.non_negative_modes: none`. The model file records the mean and whether it was subtracted. |
 | `min_timepoints` | integer \| `null` | `null` | Minimum valid time points to keep a subject. `null` requires all of them. For CP, a lower value leaves NaN rows (see `fit.options.allow_nan_imputation`). |
 | `max_invalid_fraction` | number in [0, 1] | `0.9` | Drop a scan session whose fraction of non-finite values is larger. |
 
@@ -164,14 +165,23 @@ Every listed ROI is checked against the statistics file before anything is writt
 | `max_iter` | integer ≥ 1 | `2000` | Iteration limit per restart. |
 | `tolerance` | number > 0 | `1e-5` | Convergence tolerance on the relative reconstruction error. |
 | `restart_procs` | integer ≥ 1 | `1` | Parallel processes for the restarts (decomposition only; replicability uses `n_procs`). |
+| `non_negative_modes` | `auto` \| `none` \| list of modes | `auto` | Modes constrained to be non-negative: 0 = subject, 1 = time (PARAFAC2: evolving), 2 = label. See below. |
 | `options` | mapping | `{}` | Passed unchanged to the decomposition runner. |
 
+`fit.non_negative_modes`:
+
+| Value | PARAFAC2 | CP |
+|---|---|---|
+| `auto` | the solver's default: modes `[0, 2]` with `tensorly`, `[0, 1, 2]` with `matcouply` | all modes |
+| `none` (or `null`) | unconstrained | unconstrained |
+| list, e.g. `[0, 2]` | exactly those modes; `tensorly` cannot constrain mode 1, so use `solver: matcouply` for that | only `[0, 1, 2]`: CP constrains all modes or none |
+
 `fit.options` examples:
-- PARAFAC2: `solver: matcouply`, `nn_modes: auto`, `aoadmm_options: {...}`.
-- CP: `non_negative: false`, `allow_nan_imputation: true`.
+- PARAFAC2: `solver: matcouply`, `aoadmm_options: {...}`.
+- CP: `allow_nan_imputation: true`.
 - Either method: `progress_bar: true`.
 
-An unknown option fails with the runner's error.
+An unknown option fails with the runner's error. Non-negativity is set only with `non_negative_modes`; putting `nn_modes` or `non_negative` in `options` is a config error.
 
 `distributed` (shared with replicability):
 
@@ -216,6 +226,20 @@ N=$(gmri decompose plan decomposition.yaml)     # prints only the number of jobs
 sbatch --array=0-$((N-1)) job.sh                # job.sh: gmri decompose run decomposition.yaml --job $SLURM_ARRAY_TASK_ID
 gmri decompose collect decomposition.yaml       # after every job has finished
 ```
+
+### How `restarts` maps onto jobs
+
+`fit.restarts` is the number of random initialisations (seeds `0 … restarts-1`) of each fit. `plan` turns every fit × seed into one task and groups `tasks_per_job` tasks into a job. `plan` prints the result, `ceil(tasks / tasks_per_job)`, which is your array size.
+
+| Stage | Tasks | Example (`examples/*.yaml`, `tasks_per_job: 4`) |
+|---|---|---|
+| decomposition | `len(ranks) × restarts` | 3 ranks × 50 restarts = 150 tasks → 38 jobs (`--array=0-37`) |
+| replicability, `halfhalf` | `len(ranks) × 2 × repeats × restarts` | 3 × 40 halves × 20 = 2400 tasks → 600 jobs |
+| replicability, `cv` | `len(ranks) × splits × repeats × restarts` | |
+
+- **Within a job:** a job fits its tasks one after another, or in parallel with `fit.restart_procs` (decomposition) or `n_procs` (replicability). Request `--cpus-per-task` to match.
+- **Collecting:** `collect` keeps the best seed of each rank (and of each half or fold), exactly as a single-process run would.
+- **Array size limits:** many clusters cap array size (`MaxArraySize`, often 1001). If `plan` prints more jobs than that, raise `tasks_per_job`.
 
 Things to know before using it:
 - **Resuming:** a job skips restarts that are already in the store, so a failed or pre-empted job can simply be re-queued.

@@ -106,3 +106,24 @@ def test_save_is_atomic(tmp_path: Path) -> None:
         save_decomposition(tmp_path / "rank_2.h5", broken)  # type: ignore[arg-type]
 
     assert list(tmp_path.iterdir()) == []
+
+
+def test_round_trip_centered_flag(tmp_path: Path) -> None:
+    rng = np.random.default_rng(4)
+    saved = replace(
+        SavedDecomposition(
+            method="cp",
+            timepoints=np.array([0, 6]),
+            time_mode=rng.random((2, 2)),
+            centered=True,
+            **_common(2, rng),
+        ),
+        scale_std=None,
+    )
+
+    save_decomposition(tmp_path / "rank_2.h5", saved)
+    loaded = load_decomposition(tmp_path / "rank_2.h5")
+
+    assert loaded.centered is True
+    assert loaded.scale_std is None
+    np.testing.assert_array_equal(loaded.scale_mean, saved.scale_mean)

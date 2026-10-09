@@ -45,6 +45,7 @@ from gMRItensor.plotting.roi_evolution import figure_path
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_panels
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_rows
 from gMRItensor.plotting.utils import save_figure
+from gMRItensor.preprocessing import compute_roi_scaling
 from gMRItensor.preprocessing import load_tensor_from_parquet
 from gMRItensor.preprocessing import PreprocessedPaths
 from gMRItensor.preprocessing import scale_tensor
@@ -318,6 +319,7 @@ class DecompositionInput(NamedTuple):
     label_index: np.ndarray
     scale_mean: np.ndarray | None
     scale_std: np.ndarray | None
+    centered: bool
 
 
 def load_decomposition_input(
@@ -326,7 +328,7 @@ def load_decomposition_input(
     tensor: TensorConfig,
 ) -> DecompositionInput:
     """Load the tracer parquet as a CP tensor or PARAFAC2 slices, optionally
-    scaled per label (`scale_tensor(center=False)`)."""
+    centered and/or scaled per label over all subjects and time points."""
     _require(path, "preprocess")
     data, subjects, timepoints, labels, label_index = load_tensor_from_parquet(
         path,
@@ -336,7 +338,10 @@ def load_decomposition_input(
     )
     mean = std = None
     if tensor.scale:
-        data, mean, std = scale_tensor(data, center=False)
+        data, mean, std = scale_tensor(data, center=tensor.center)
+    elif tensor.center:
+        mean, _ = compute_roi_scaling(data)
+        data = data - mean if isinstance(data, np.ndarray) else [s - mean for s in data]
     torch_data = (
         torch.as_tensor(data)
         if isinstance(data, np.ndarray)
@@ -350,6 +355,7 @@ def load_decomposition_input(
         label_index,
         mean,
         std,
+        tensor.center,
     )
 
 
@@ -363,14 +369,24 @@ def _method(method: str) -> Literal["CP", "PARAFAC2"]:
     return "CP" if method == "cp" else "PARAFAC2"
 
 
-def _fit_options(fit: FitConfig) -> dict[str, Any]:
+def _fit_options(fit: FitConfig, method: str) -> dict[str, Any]:
     """`run_*_decomposition_repeated` options from `fit` (also what
-    `jobs.run_tasks`/`jobs.collect` take; restart-loop ones are ignored there)."""
+    `jobs.run_tasks`/`jobs.collect` take; restart-loop ones are ignored there).
+
+    CP's non-negativity is all-or-nothing (`non_negative`); PARAFAC2 takes
+    the modes (`nn_modes`, `"auto"` = the solver's default).
+    """
+    non_negativity: dict[str, Any] = (
+        {"non_negative": fit.non_negative_modes is not None}
+        if method == "cp"
+        else {"nn_modes": fit.non_negative_modes}
+    )
     return {
         "init_repeats": fit.restarts,
         "max_iter": fit.max_iter,
         "tolerance": fit.tolerance,
         "progress_bar": False,  # quiet batch logs unless fit.options asks
+        **non_negativity,
         **fit.options,
     }
 
@@ -460,6 +476,7 @@ def _saved_decomposition(
         "label_index": data.label_index,
         "scale_mean": data.scale_mean,
         "scale_std": data.scale_std,
+        "centered": data.centered,
     }
     if isinstance(model, PARAFAC2Model):
         return SavedDecomposition(
@@ -511,7 +528,7 @@ def run_decomposition(config: DecompositionConfig) -> list[Path]:
     options = {
         "restart_procs": config.fit.restart_procs,
         "device": device,
-        **_fit_options(config.fit),
+        **_fit_options(config.fit, config.method),
     }
     fits = []
     for rank in config.ranks:
@@ -565,7 +582,7 @@ def run_decomposition_job(config: DecompositionConfig, job: int) -> int:
         config.method,
         config.store_dir,
         config.fit.restart_procs,
-        _fit_options(config.fit),
+        _fit_options(config.fit, config.method),
     )
     return len(tasks)
 
@@ -574,7 +591,7 @@ def collect_decomposition(config: DecompositionConfig) -> list[Path]:
     """`gmri decompose collect`: best restart per rank -> the same files as
     `run_decomposition`."""
     data = load_decomposition_input(config.input, config.method, config.tensor)
-    options = _fit_options(config.fit)
+    options = _fit_options(config.fit, config.method)
     fits = []
     for rank in config.ranks:
         plan = plan_restarts(len(data.subjects), config.fit.restarts)
@@ -669,7 +686,7 @@ def run_replicability(config: ReplicabilityConfig) -> Path:
             method=_method(config.method),
             stratification=stratification,
             n_procs=config.n_procs,
-            **_fit_options(config.fit),
+            **_fit_options(config.fit, config.method),
         )
         rows.extend(_score_rows(config, rank, scores))
     return _write_replicability(config, rows)
@@ -716,7 +733,7 @@ def run_replicability_job(config: ReplicabilityConfig, job: int) -> int:
         config.method,
         config.store_dir,
         config.n_procs,
-        _fit_options(config.fit),
+        _fit_options(config.fit, config.method),
     )
     return len(tasks)
 
@@ -725,7 +742,7 @@ def collect_replicability(config: ReplicabilityConfig) -> Path:
     """`gmri replicability collect`: score the gathered fits ->
     `replicability.csv`, as `run_replicability` writes it."""
     data = load_decomposition_input(config.input, config.method, config.tensor)
-    options = _fit_options(config.fit)
+    options = _fit_options(config.fit, config.method)
     rows = []
     for rank, plan in _replicability_plans(config, data).items():
         summaries = _collect_rank(plan, config.store_dir, rank, config.method, options)

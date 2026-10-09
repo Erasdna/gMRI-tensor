@@ -1,5 +1,6 @@
 import shutil
 from pathlib import Path
+from typing import Any
 from typing import Callable
 
 import pytest
@@ -315,3 +316,69 @@ def test_configuration_docs_cover_every_key() -> None:
         key for key in keys if f"`{key}`" not in docs and f"`regions.{key}`" not in docs
     )
     assert undocumented == []
+
+
+@pytest.mark.parametrize(
+    "value, expected",
+    [(None, None), ("none", None), ("auto", "auto"), ([2, 0], (0, 2))],
+)
+def test_non_negative_modes(tmp_path: Path, value: Any, expected: Any) -> None:
+    path = _write_config(
+        tmp_path,
+        "d",
+        _decomposition(fit={"non_negative_modes": value}),
+    )
+
+    assert load_decomposition_config(path).fit.non_negative_modes == expected
+
+
+def test_non_negative_modes_and_center_defaults(tmp_path: Path) -> None:
+    config = load_decomposition_config(_write_config(tmp_path, "d", _decomposition()))
+
+    assert config.fit.non_negative_modes == "auto"
+    assert config.tensor.center is False
+
+
+@pytest.mark.parametrize(
+    "data, match",
+    [
+        (
+            _decomposition(method="cp", fit={"non_negative_modes": [0, 2]}),
+            r"fit\.non_negative_modes: CP",
+        ),
+        (_decomposition(fit={"non_negative_modes": [3]}), r"fit\.non_negative_modes"),
+        (_decomposition(fit={"non_negative_modes": "some"}), "non_negative_modes"),
+        (
+            _decomposition(tensor={"center": True}),
+            r"tensor\.center.*non_negative_modes",
+        ),
+        (
+            _decomposition(fit={"options": {"nn_modes": [0]}}),
+            r"fit\.options\.nn_modes",
+        ),
+        (
+            _replicability(method="cp", fit={"options": {"non_negative": False}}),
+            r"fit\.options\.non_negative",
+        ),
+    ],
+)
+def test_non_negativity_errors(tmp_path: Path, data: dict, match: str) -> None:
+    (tmp_path / "subjects.csv").touch()
+    loader = (
+        load_replicability_config if "engine" in data else load_decomposition_config
+    )
+
+    with pytest.raises(ConfigError, match=match):
+        loader(_write_config(tmp_path, "c", data))
+
+
+def test_center_without_non_negativity_loads(tmp_path: Path) -> None:
+    data = _decomposition(
+        tensor={"center": True, "scale": False},
+        fit={"non_negative_modes": "none"},
+    )
+
+    config = load_decomposition_config(_write_config(tmp_path, "d", data))
+
+    assert config.tensor.center is True and config.tensor.scale is False
+    assert config.fit.non_negative_modes is None

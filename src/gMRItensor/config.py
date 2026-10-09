@@ -266,18 +266,24 @@ class TensorConfig:
     """How the tracer parquet becomes a tensor; see `load_tensor_from_parquet`."""
 
     scale: bool = True
+    center: bool = False
     min_timepoints: int | None = None
     max_invalid_fraction: float = 0.9
 
 
 @dataclass(frozen=True)
 class FitConfig:
-    """Restart settings plus `options` forwarded to the decomposition runner."""
+    """Restart settings plus `options` forwarded to the decomposition runner.
+
+    `non_negative_modes` is `"auto"` (the solver's default), None
+    (unconstrained) or mode indices: 0 subject, 1 time/evolving, 2 label.
+    """
 
     restarts: int = 50
     max_iter: int = 2000
     tolerance: float = 1e-5
     restart_procs: int = 1
+    non_negative_modes: Literal["auto"] | tuple[int, ...] | None = "auto"
     options: dict[str, Any] = field(default_factory=dict)
 
 
@@ -446,6 +452,7 @@ def load_plotting_config(path: Path | str) -> PlottingConfig:
 def _read_tensor(reader: _Reader) -> TensorConfig:
     tensor = TensorConfig(
         scale=reader.boolean("scale", True),
+        center=reader.boolean("center", False),
         min_timepoints=reader.integer("min_timepoints", None),
         max_invalid_fraction=reader.number(
             "max_invalid_fraction",
@@ -458,16 +465,69 @@ def _read_tensor(reader: _Reader) -> TensorConfig:
     return tensor
 
 
+# Runner options that `fit.non_negative_modes` sets.
+_NON_NEGATIVITY_OPTIONS = ("nn_modes", "non_negative")
+
+
+def _read_non_negative_modes(
+    reader: _Reader,
+) -> Literal["auto"] | tuple[int, ...] | None:
+    key = "non_negative_modes"
+    if key in reader._data and reader._data[key] in (None, "none"):
+        del reader._data[key]
+        return None
+    value = reader._data.get(key, "auto")
+    if value == "auto":
+        reader._data.pop(key, None)
+        return "auto"
+    if isinstance(value, str):
+        raise reader.error(key, f"must be auto, none or a list of modes, got {value!r}")
+    modes = reader.integers(key, minimum=0)
+    if max(modes) > 2:
+        raise reader.error(
+            key,
+            f"modes are 0 (subject), 1 (time), 2 (label), got {modes}",
+        )
+    return tuple(sorted(set(modes)))
+
+
 def _read_fit(reader: _Reader) -> FitConfig:
     fit = FitConfig(
         restarts=reader.integer("restarts", 50),
         max_iter=reader.integer("max_iter", 2000),
         tolerance=reader.number("tolerance", 1e-5, low=0.0, strict=True),
         restart_procs=reader.integer("restart_procs", 1),
+        non_negative_modes=_read_non_negative_modes(reader),
         options=reader.mapping("options"),
     )
+    for key in _NON_NEGATIVITY_OPTIONS:
+        if key in fit.options:
+            raise reader.error(
+                f"options.{key}",
+                "set non-negativity with fit.non_negative_modes",
+            )
     reader.finish()
     return fit
+
+
+def _check_fit(
+    reader: _Reader,
+    method: str,
+    tensor: TensorConfig,
+    fit: FitConfig,
+) -> None:
+    """Rules linking `method`, `tensor.center` and `fit.non_negative_modes`."""
+    modes = fit.non_negative_modes
+    if method == "cp" and isinstance(modes, tuple) and set(modes) != {0, 1, 2}:
+        raise reader.error(
+            "fit.non_negative_modes",
+            "CP constrains all modes or none: use auto, none or [0, 1, 2]",
+        )
+    if tensor.center and modes is not None:
+        raise reader.error(
+            "tensor.center",
+            "centered data is negative; set fit.non_negative_modes: none",
+        )
 
 
 def _read_distributed(reader: _Reader) -> DistributedConfig:
@@ -493,6 +553,7 @@ def load_decomposition_config(path: Path | str) -> DecompositionConfig:
         distributed=_read_distributed(reader.child("distributed")),
     )
     reader.finish()
+    _check_fit(reader, config.method, config.tensor, config.fit)
     return config
 
 
@@ -518,6 +579,7 @@ def load_replicability_config(path: Path | str) -> ReplicabilityConfig:
         distributed=_read_distributed(reader.child("distributed")),
     )
     reader.finish()
+    _check_fit(reader, config.method, config.tensor, config.fit)
     if config.stratify_by is not None and config.subject_info is None:
         raise reader.error("stratify_by", "needs subject_info")
     if config.engine == "cv" and config.splits is None:
