@@ -2,167 +2,233 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 from gMRItensor.cli import main
 
 
-def _configs(root: Path) -> dict[str, Path]:
-    data: dict[str, dict[str, Any]] = {
-        "preprocessing": {
-            "manifest": "scans.csv",
-            "output_dir": "results",
-            "signal_type": "T1map",
-            "n_procs": 1,
-            "regions": {"presets": ["ventricles", "white_matter"]},
-        },
-        "plotting": {
-            "roi_statistics": "results/data/roi_statistics.parquet",
-            "subject_info": "subjects.csv",
-            "group_variable": "diagnosis",
-            "output_dir": "results",
-            "figures": [
-                {
-                    "rois": ["ventricles"],
-                    "statistics": ["median_concentration"],
-                    "layout": "rows",
-                },
-            ],
-            "formats": ["png"],
-            "dpi": 50,
-        },
-        "decomposition": {
-            "input": "results/data/tracer.parquet",
-            "output_dir": "results/decompositions/parafac2",
-            "method": "parafac2",
-            "ranks": [2],
-            "fit": {"restarts": 2, "max_iter": 50},
-        },
-        "replicability": {
-            "input": "results/data/tracer.parquet",
-            "subject_info": "subjects.csv",
-            "output_dir": "results/replicability/parafac2",
-            "method": "parafac2",
-            "ranks": [1],
-            "fit": {"restarts": 2, "max_iter": 50},
-            "engine": "halfhalf",
-            "repeats": 2,
-            "stratify_by": "diagnosis",
-        },
-    }
-    paths = {}
-    for name, config in data.items():
-        paths[name] = root / f"{name}.yaml"
-        paths[name].write_text(yaml.safe_dump(config))
-    return paths
+def _run(argv: list[Any]) -> int:
+    return main([str(arg) for arg in argv])
 
 
-def test_cli_runs_each_stage_alone(synthetic_study: Any) -> None:
-    configs = _configs(synthetic_study.root)
-    results = synthetic_study.root / "results"
+def _preprocess(study: Any, *extra: str) -> Path:
+    results = study.root / "results"
+    code = _run(
+        [
+            "preprocess",
+            "--manifest",
+            study.manifest,
+            "--output-dir",
+            results,
+            "--input-type",
+            "T1map",
+            "--time-unit",
+            "ms",
+            "--n-procs",
+            1,
+            *extra,
+        ],
+    )
+    assert code == 0
+    return results
 
-    assert main(["preprocess", str(configs["preprocessing"])]) == 0
-    assert (results / "data" / "roi_statistics.parquet").exists()
-    assert main(["plot", str(configs["plotting"])]) == 0
-    assert (results / "figures" / "roi" / "single" / "median_concentration").is_dir()
-    assert main(["decompose", "run", str(configs["decomposition"])]) == 0
-    assert (results / "decompositions" / "parafac2" / "rank_2.h5").exists()
-    assert main(["replicability", "run", str(configs["replicability"])]) == 0
-    assert (results / "replicability" / "parafac2" / "replicability.csv").exists()
+
+def _fit_args(results: Path, name: str) -> list[Any]:
+    return [
+        "--input",
+        results / "data" / "roi_signal.parquet",
+        "--output-dir",
+        results / name,
+        "--method",
+        "parafac2",
+        "--ranks",
+        1,
+        "--restarts",
+        2,
+        "--max-iter",
+        50,
+    ]
 
 
-def test_cli_reports_config_errors(
+def test_cli_runs_every_command(
     synthetic_study: Any,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    path = synthetic_study.root / "preprocessing.yaml"
-    path.write_text(
-        yaml.safe_dump(
-            {
-                "manifest": "scans.csv",
-                "output_dir": "r",
-                "signal_type": "T1map",
-                "x": 1,
-            },
-        ),
-    )
+    results = _preprocess(synthetic_study, "--store-voxels")
+    assert (results / "data" / "voxels.parquet").exists()
 
-    assert main(["preprocess", str(path)]) == 2
-    assert "x: unknown key" in capsys.readouterr().err
+    common = [
+        "--subject-info",
+        synthetic_study.subject_info,
+        "--group-variable",
+        "diagnosis",
+    ]
+    assert (
+        _run(
+            [
+                "plot",
+                "statistics",
+                "--roi-signal",
+                results / "data" / "roi_signal.parquet",
+                *common,
+                "--output-dir",
+                results,
+                "--region",
+                "ventricles",
+                "--region",
+                "mine=10,49",
+                "--rois",
+                "4",
+                "--statistics",
+                "median",
+                "median_concentration",
+                "--formats",
+                "png",
+                "--dpi",
+                50,
+            ],
+        )
+        == 0
+    )
+    assert "group differences" in capsys.readouterr().out
+    assert (results / "roi_analysis" / "summary.csv").exists()
+
+    assert _run(["decompose", "run", *_fit_args(results, "decomposition")]) == 0
+    model = results / "decomposition" / "rank_1.h5"
+    assert model.exists()
+
+    replicability = [
+        "replicability",
+        "run",
+        *_fit_args(results, "replicability"),
+        "--engine",
+        "halfhalf",
+        "--repeats",
+        2,
+        "--subject-info",
+        synthetic_study.subject_info,
+        "--stratify-by",
+        "diagnosis",
+    ]
+    assert _run(replicability) == 0
+    assert (results / "replicability" / "replicability.csv").exists()
+
+    plot = [
+        "plot",
+        "decomposition",
+        "--model",
+        model,
+        *common,
+        "--output-dir",
+        results,
+        "--segmentation",
+        synthetic_study.root / "images" / "seg.nii",
+        "--formats",
+        "png",
+        "--dpi",
+        50,
+    ]
+    assert _run(plot) == 0
+    assert (results / "figures" / "decomposition" / "rank_1__mode_grid.png").exists()
+    assert _run([*plot, "--time"]) == 0
+
+
+@pytest.mark.parametrize("command", ["decompose", "replicability"])
+def test_cli_plan_run_collect(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+) -> None:
+    results = _preprocess(synthetic_study)
+    extra = (
+        ["--engine", "halfhalf", "--repeats", 1] if command == "replicability" else []
+    )
+    capsys.readouterr()
+
+    assert _run([command, "plan", *_fit_args(results, command), *extra]) == 0
+    n_jobs = int(capsys.readouterr().out)  # stdout is just the job count
+    assert n_jobs > 1
+    for job in range(n_jobs):
+        # Array jobs only need the output directory: the rest is in plan.json.
+        assert (
+            _run([command, "run", "--output-dir", results / command, "--job", job]) == 0
+        )
+    assert _run([command, "collect", "--output-dir", results / command]) == 0
+
+    output = "rank_1.h5" if command == "decompose" else "replicability.csv"
+    assert (results / command / output).exists()
+
+
+def test_cli_reports_errors_on_one_line(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _preprocess(synthetic_study)
+    capsys.readouterr()
+
+    code = _run(
+        ["decompose", "run", *_fit_args(results, "d"), "--non-negative-modes", "7"],
+    )
+    assert code == 2
+    assert "non_negative_modes" in capsys.readouterr().err
+
+    assert _run(["decompose", "run", "--output-dir", results / "d", "--job", 0]) == 2
+    assert "plan" in capsys.readouterr().err
+
+    assert _run(["decompose", "run", "--output-dir", results / "d"]) == 2
+    assert "--input" in capsys.readouterr().err
 
 
 def test_cli_plot_before_preprocess(
     synthetic_study: Any,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    configs = _configs(synthetic_study.root)
+    code = _run(
+        [
+            "plot",
+            "statistics",
+            "--roi-signal",
+            synthetic_study.root / "results" / "data" / "roi_signal.parquet",
+            "--subject-info",
+            synthetic_study.subject_info,
+            "--group-variable",
+            "diagnosis",
+            "--output-dir",
+            synthetic_study.root / "results",
+        ],
+    )
 
-    assert main(["plot", str(configs["plotting"])]) == 2
+    assert code == 2
     assert "gmri preprocess" in capsys.readouterr().err
 
 
-def test_cli_requires_a_command(capsys: pytest.CaptureFixture[str]) -> None:
-    with pytest.raises(SystemExit) as excinfo:
-        main([])
+def test_cli_parses_fit_options_and_modes() -> None:
+    from gMRItensor.cli import _fit_option
+    from gMRItensor.cli import _non_negative_modes
 
-    assert excinfo.value.code == 2
-    assert "preprocess" in capsys.readouterr().err
-
-
-@pytest.mark.parametrize(
-    "command, name, output",
-    [
-        ("decompose", "decomposition", "rank_2.h5"),
-        ("replicability", "replicability", "replicability.csv"),
-    ],
-)
-def test_cli_plan_run_collect(
-    synthetic_study: Any,
-    capsys: pytest.CaptureFixture[str],
-    command: str,
-    name: str,
-    output: str,
-) -> None:
-    configs = _configs(synthetic_study.root)
-    config = str(configs[name])
-    assert main(["preprocess", str(configs["preprocessing"])]) == 0
-    capsys.readouterr()
-
-    assert main([command, "plan", config]) == 0
-    n_jobs = int(capsys.readouterr().out)  # stdout is just the job count
-    assert n_jobs > 1
-    for job in range(n_jobs):
-        assert main([command, "run", config, "--job", str(job)]) == 0
-    assert main([command, "collect", config]) == 0
-
-    out_dir = (
-        synthetic_study.root
-        / "results"
-        / name.replace("decomposition", "decompositions")
-        / "parafac2"
+    assert _fit_option("progress_bar=true") == ("progress_bar", True)
+    assert _fit_option('aoadmm_options={"l2_penalty": 0.1}') == (
+        "aoadmm_options",
+        {"l2_penalty": 0.1},
     )
-    assert (out_dir / output).exists()
-
-
-def test_cli_run_job_out_of_range(
-    synthetic_study: Any,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    configs = _configs(synthetic_study.root)
-    assert main(["preprocess", str(configs["preprocessing"])]) == 0
-
-    code = main(["decompose", "run", str(configs["decomposition"]), "--job", "99"])
-
-    assert code == 2
-    assert "out of range" in capsys.readouterr().err
+    assert _fit_option("label=abc") == ("label", "abc")
+    assert _non_negative_modes("auto") == "auto"
+    assert _non_negative_modes("none") is None
+    assert _non_negative_modes("2,0") == (2, 0)
 
 
 @pytest.mark.parametrize(
     "argv, expected",
     [
-        (["--help"], ["preprocess", "plot", "decompose", "replicability"]),
+        (["--help"], ["preprocess", "decompose", "replicability", "plot"]),
         (["decompose", "--help"], ["plan", "run", "collect"]),
-        (["replicability", "run", "--help"], ["--job", "config"]),
-        (["plot", "--help"], ["config"]),
+        (["decompose", "plan", "--help"], ["--ranks", "--tasks-per-job", "--center"]),
+        (["replicability", "run", "--help"], ["--job", "--engine"]),
+        (["plot", "--help"], ["statistics", "decomposition"]),
+        (["plot", "statistics", "--help"], ["--region", "--rois", "--relaxivity"]),
+        (
+            ["plot", "decomposition", "--help"],
+            ["--segmentation", "--mode-grid", "--slices"],
+        ),
+        (["preprocess", "--help"], ["--input-type", "--store-voxels", "--time-unit"]),
     ],
 )
 def test_cli_help(

@@ -12,11 +12,12 @@ uv sync
 
 ## Package overview
 
-- `gMRItensor.preprocessing` — compute tracer signal (T1map/R1map/T1w) from baseline and post-injection images, extract per-region/voxel values via masks and segmentations, and pivot results into a tensor ready for decomposition (`prepare_tensor`).
+- `gMRItensor.preprocessing` — compute the tracer signal (ΔR1 in 1/s from T1 or R1 maps, or the T1w ratio) from baseline and post-injection images, write per-label (`roi_signal`) and optionally per-voxel tables (`write_preprocessed_data`), and stream them into decomposition tensors (`load_tensor_from_parquet`).
+- `gMRItensor.pipeline` / `gMRItensor.options` — the `gmri` steps as functions taking validated settings, for use from scripts.
 - `gMRItensor.decomposition` — CP and PARAFAC2 decomposition (`compute_CP_decomposition`, `compute_PARAFAC2_decomposition`), with multi-restart runners (`run_CP_decomposition_repeated`, `run_PARAFAC2_decomposition_repeated`) and a `setup_backend` helper for configuring TensorLy's PyTorch backend.
 - `gMRItensor.replicability` — split-half and cross-validation engines (`HalfHalfEngine`, `CrossValidationEngine`) for assessing decomposition replicability, plus `evaluate_replicability_multiproc` for running them in parallel.
 - `gMRItensor.jobs` — scatter/gather restarts (`plan_restarts`, `plan_replicability`, `job_slice`, `run_tasks`, `collect`, `DirectoryStore`) for spreading one fit or replicability analysis over many jobs, e.g. a SLURM array, with the same results as the centralised path.
-- `gMRItensor.roi_groups` — FreeSurfer label presets (ventricles, grey/white matter, limbic system, CSF counterparts at `id + 10000`, …) and `resolve_roi_groups` for combining presets with custom regions.
+- `gMRItensor.roi_groups` — FreeSurfer label presets (ventricles, grey/white matter, limbic system, CSF counterparts at `id + 10000`, …), `parse_region` for presets or custom `name=ids` regions, `aggregate_roi_signal` for combining labels into regions and `add_concentration` for ΔR1 → mM.
 - `gMRItensor.group_statistics` — group summaries (mean ± SEM) and per-time-point group comparisons (Mann-Whitney / Kruskal-Wallis, BH-FDR per facet) over time, shared by the evolving mode and the ROI analysis.
 - `gMRItensor.plotting` — visualization of decomposition modes (subject-mode boxplots and correlations, spatial-mode brain overlays, mode grids, evolving-mode trajectories) and ROI tracer evolution (`plot_roi_evolution_rows`, `plot_roi_evolution_panels`).
 
@@ -26,38 +27,38 @@ The steps below follow the pipeline order. Each step reads the output of the pre
 
 ### Command line
 
-Each stage runs on its own from one YAML config, which names its inputs and outputs. Paths are relative to the config file. `examples/*.yaml` are commented templates; every option is described in [docs/configuration.md](docs/configuration.md).
+Every step is a `gmri` command with plain arguments, and each reads only files earlier steps wrote. Every argument is described in [docs/cli.md](docs/cli.md), and `gmri <command> --help` lists them with their defaults.
 
 ```bash
-gmri preprocess  preprocessing.yaml       # images -> results/data/{tracer,roi_statistics}.parquet
-gmri plot        plotting.yaml            # ROI statistics -> results/roi_analysis/ tables + results/figures/roi/
-gmri decompose     run decomposition.yaml # tracer table -> rank_<r>.h5 + fits.csv
-gmri replicability run replicability.yaml # tracer table -> replicability.csv (factor match scores)
+gmri preprocess --manifest scans.csv --output-dir results --input-type T1map --time-unit ms [--store-voxels]
+gmri plot statistics --roi-signal results/data/roi_signal.parquet --subject-info subjects.csv \
+    --group-variable diagnosis --output-dir results --statistics median total_amount
+gmri decompose run --input results/data/roi_signal.parquet --output-dir results/parafac2 \
+    --method parafac2 --ranks 2 3 4
+gmri replicability run --input results/data/roi_signal.parquet --output-dir results/replicability \
+    --method parafac2 --ranks 2 3 4 --engine halfhalf --repeats 20
+gmri plot decomposition --model results/parafac2/rank_3.h5 --subject-info subjects.csv \
+    --group-variable diagnosis --output-dir results --segmentation template_seg.nii.gz
 ```
 
-Decomposition and replicability can also spread their restarts over many jobs, e.g. a SLURM array. `collect` writes the same files as a single-process `run`:
-
-```bash
-N=$(gmri decompose plan decomposition.yaml)          # number of jobs
-# in each array job:
-gmri decompose run decomposition.yaml --job $SLURM_ARRAY_TASK_ID
-# after all jobs have finished:
-gmri decompose collect decomposition.yaml
-```
-
-- **Help:** `gmri --help` and `gmri <command> [<action>] --help` describe every argument.
-- **Errors:** unknown config keys are errors, and every error names the file and field.
-- **Provenance:** each stage copies its config next to its outputs.
+- **`preprocess`:** stores the per-label median, mean and voxel counts (and, with `--store-voxels`, every voxel's value) as ΔR1 in 1/s, or as the ratio for T1w.
+- **`plot statistics`:**
+  - **Regions:** combines labels into regions, either presets or `--region name=ids`.
+  - **Concentration:** converts to concentration (`--relaxivity`, default 3.2).
+  - **Output:** prints the significant group differences, writes one table per statistic and draws one figure per ROI.
+- **`decompose` / `replicability`:** fit per-ROI (`roi_signal.parquet`) or per-voxel (`voxels.parquet`) data. They can also spread their restarts over a SLURM array with `plan`, then `run --job $SLURM_ARRAY_TASK_ID`, then `collect`.
+- **`plot decomposition`:** draws the mode grid, subject mode, time or evolving mode, and spatial maps (`--mode-grid --subject-mode --time --spatial`; all by default).
 
 The sections below show the same steps through the Python API.
 
 ### Preprocessing
 
-Each `args_list` entry describes one scan: the baseline, post-injection, mask and segmentation NIfTI paths on one grid, the `signal_type`, an aggregation `func`, and the `subject` and `time_point` it belongs to.
+Each `args_list` entry describes one scan: the baseline, post-injection, mask and segmentation NIfTI paths on one grid, the `signal_type`, and the `subject` and `time_point` it belongs to. `gmri preprocess` builds this list from the manifest CSV.
 
 ```python
-import numpy as np
-from gMRItensor.preprocessing import load_tensor_from_parquet, scale_tensor, write_preprocessed_data
+from gMRItensor.options import TensorOptions
+from gMRItensor.pipeline import load_decomposition_input
+from gMRItensor.preprocessing import write_preprocessed_data
 
 args_list = [
     {
@@ -66,42 +67,38 @@ args_list = [
         "mask_path": "sub-01/brain_mask.nii.gz",
         "segmentation_path": "sub-01/aparc+aseg.nii.gz",
         "signal_type": "T1map",  # or "R1map", "T1w"
-        "func": np.nanmedian,     # one value per label; None keeps every voxel
         "subject": "sub-01",
         "time_point": 24,
     },
     # ... one entry per scan
 ]
-paths = write_preprocessed_data(args_list, "results", n_procs=5)
+paths = write_preprocessed_data(args_list, "results", time_unit="ms", store_voxels=False, n_procs=5)
 
-slices, subjects, timepoints, labels, label_index = load_tensor_from_parquet(paths.tracer, "parafac2")
-slices, mean, std = scale_tensor(slices)  # per-label scaling over subjects and time points
+data = load_decomposition_input(paths.roi_signal, "parafac2", TensorOptions(scale=True), statistic="median")
+slices, subjects, timepoints = data.data, data.subjects, data.timepoints  # torch slices, one per subject
 ```
 
-- Tracer signal is ΔR1 for T1map/R1map and the post/baseline ratio for T1w. Only voxels inside the mask with a nonzero segmentation label are used.
-- Every image is read once. `results/data/` gets `tracer.parquet` (plus `tracer.coords.parquet` with voxel coordinates when `func=None`) and `roi_statistics.parquet`. `write_tracer_parquet` writes only the tracer file.
-- `load_tensor_from_parquet` streams the file into a tensor without loading the long table into memory:
-  - `"cp"` gives a regular `(subjects, time_points, labels)` array.
-  - `"parafac2"` gives one `(n_timepoints_i, labels)` slice per subject.
-  - Sessions with more than `max_invalid_fraction` non-finite values are dropped, and only labels finite in every kept session remain.
-- `(labels, label_index)` identifies each tensor column. Use it to map spatial modes back onto voxels with the coords file.
+- **Signal:** ΔR1 = R1_post − R1_baseline in 1/s for T1 or R1 maps, or the post/baseline ratio for T1w. Only voxels inside the mask with a nonzero segmentation label are used.
+- **Outputs:**
+  - Every image is read once.
+  - `results/data/roi_signal.parquet` gets each label's median, mean, voxel counts and voxel volume.
+  - `store_voxels=True` adds `voxels.parquet` and `voxels.coords.parquet`, which map every voxel back to the common template.
+- **Tensor columns:** `load_decomposition_input` turns either file into a tensor. With `roi_signal` input, each column is one label's `statistic`.
+- **Loading rules** (`load_tensor_from_parquet`): sessions with more than `max_invalid_fraction` non-finite values are dropped, and only columns finite in every kept session remain.
 
 ### Decomposition
 
 ```python
-import torch
 from gMRItensor import run_CP_decomposition_repeated, run_PARAFAC2_decomposition_repeated, setup_backend
 
 device = setup_backend()  # GPU if GMRITENSOR_USE_GPU=TRUE, else CPU with $CPUS_PER_TASK threads
 
-model, error = run_PARAFAC2_decomposition_repeated(
-    [torch.as_tensor(s) for s in slices], rank=3, init_repeats=50, device=device,
-)
+model, error = run_PARAFAC2_decomposition_repeated(slices, rank=3, init_repeats=50, device=device)
 # model.subject_mode: (subjects, rank); model.evolving_states[i]: subject i's (n_timepoints_i, rank) time course;
 # model.label_mode: (labels, rank)
 
-tensor, *_ = load_tensor_from_parquet(paths.tracer, "cp")
-weights, factors, error = run_CP_decomposition_repeated(torch.as_tensor(tensor), rank=3, device=device)
+tensor = load_decomposition_input(paths.roi_signal, "cp", TensorOptions()).data  # (subjects, time points, labels)
+weights, factors, error = run_CP_decomposition_repeated(tensor, rank=3, device=device)
 ```
 
 - Both runners fit from `init_repeats` random restarts and keep the best accepted fit. `restart_procs` spreads the restarts over processes.
@@ -115,7 +112,7 @@ weights, factors, error = run_CP_decomposition_repeated(torch.as_tensor(tensor),
 from gMRItensor.replicability import HalfHalfEngine, evaluate_replicability_multiproc
 
 scores = evaluate_replicability_multiproc(
-    HalfHalfEngine(repeats=20), [torch.as_tensor(s) for s in slices], rank=3, method="PARAFAC2",
+    HalfHalfEngine(repeats=20), slices, rank=3, method="PARAFAC2",
     n_procs=4, init_repeats=20,
 )
 ```
@@ -164,26 +161,32 @@ fig, axs, significance = plot_evolving_mode(
 
 ### ROI tracer evolution
 
-Images are read once; every later step works from the saved tables, and plotting only draws them.
+Regions, concentrations and statistics are computed from `roi_signal.parquet` at plotting time. `gmri plot statistics` does all of this; in a script:
 
 ```python
-from gMRItensor.group_statistics import compare_roi_groups, load_roi_statistics, summarize_roi_statistics
-from gMRItensor.plotting import figure_path, plot_roi_evolution_panels, save_figure
-from gMRItensor.preprocessing import write_preprocessed_data
-from gMRItensor.roi_groups import resolve_roi_groups
+import pandas as pd
+from gMRItensor.group_statistics import compare_groups_over_time, resolve_subject_groups, summarize_groups_over_time
+from gMRItensor.plotting import plot_roi_evolution_panels, save_figure
+from gMRItensor.roi_groups import add_concentration, aggregate_roi_signal, parse_region
 
-groups = resolve_roi_groups(["ventricles", "white_matter"], custom={"my_region": [17, 53]})
-paths = write_preprocessed_data(args_list, "results", roi_groups=groups)  # results/data/*.parquet
+regions = dict(parse_region(spec) for spec in ["ventricles", "white_matter", "my_region=17,53"])
+rois = aggregate_roi_signal(pd.read_parquet("results/data/roi_signal.parquet"), regions)
+rois = add_concentration(rois, relaxivity=3.2).rename(columns={"time_point": "timepoint"})
+subjects = sorted(rois["subject"].unique())
+rois["group"] = rois["subject"].map(dict(zip(subjects, resolve_subject_groups(subjects, subject_info, "diagnosis"))))
 
-stats = load_roi_statistics(paths.roi_statistics, subject_info, "diagnosis", rois=list(groups))
-summary = summarize_roi_statistics(stats, "median_concentration")
-significance = compare_roi_groups(stats, "median_concentration")
+summary = summarize_groups_over_time(rois, facet="roi", value="median_concentration")
+significance = compare_groups_over_time(rois, sorted(rois["group"].unique()), facet="roi", value="median_concentration")
+significance["significant"] = significance["p_adj"] < 0.05
 
-fig, _ = plot_roi_evolution_panels(summary, significance, list(groups), "median_concentration", n_rows=1, n_cols=3, page_width="double")
-save_figure(fig, figure_path("results", "overview", None, "median_concentration", "panels"))
+fig, _ = plot_roi_evolution_panels(summary, significance, list(regions), "median_concentration", n_rows=1, n_cols=3)
+save_figure(fig, "results/figures/overview")
 ```
 
-`args_list` entries are the `write_tracer_parquet` arguments (image paths, `signal_type`, `func`, `subject`, `time_point`). For T1map/R1map, concentration is `ΔR1 / r1` in mM (defaults `relaxivity=3.2` 1/(mM·s) and `time_unit="ms"`), and `total_amount` is in mmol. A single r1 is applied to CSF and parenchyma alike, so parenchymal concentrations are approximate.
+How regions are combined:
+- **Exact:** counts and volumes are summed, and region means are `n_valid`-weighted, so both are exact.
+- **Approximate:** a region's median is the `n_valid`-weighted median of its label medians.
+- **Concentration:** ΔR1 / r1 in mM, and `total_amount` in mmol. A single r1 is applied to CSF and parenchyma alike, so parenchymal concentrations are approximate.
 
 ## Development
 

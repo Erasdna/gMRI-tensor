@@ -3,9 +3,10 @@
 Shared by the decomposition's evolving mode (faceted by component) and the
 ROI-level tracer analysis (faceted by ROI).
 """
-from collections.abc import Sequence
-from pathlib import Path
+from collections.abc import Mapping
+from typing import Any
 
+import numpy as np
 import pandas as pd
 from scipy.stats import kruskal
 from scipy.stats import mannwhitneyu
@@ -117,75 +118,50 @@ def compare_groups_over_time(
     return pd.DataFrame.from_records(records)[columns]
 
 
-def load_roi_statistics(
-    path: Path | str,
-    subject_info: pd.DataFrame,
-    group_variable: str,
-    rois: Sequence[str] | None = None,
+def significance_summary(
+    tables: Mapping[str, tuple[pd.DataFrame, pd.DataFrame]],
 ) -> pd.DataFrame:
-    """Read a `write_preprocessed_data` ROI statistics file for group analysis.
+    """One row per statistic and ROI: where the groups differ over time.
 
-    Returns the long frame (one row per subject, time point and ROI) with
-    `time_point` renamed to `timepoint` and each subject's `group_variable`
-    value attached as `group`, optionally restricted to `rois`. Raises
-    `ValueError` for a requested ROI missing from the file or a subject
-    missing from `subject_info`.
+    `tables` maps each statistic to its `(summary, significance)` pair:
+    `summarize_groups_over_time` / `compare_groups_over_time` output faceted
+    by `roi`, the latter with a `significant` column. Returns `statistic`,
+    `roi`, `n_tested` (time points tested), `significant_timepoints`
+    (comma-separated, empty if none), `min_p_adj` and `higher_group` (the
+    group with the highest mean at the time point of `min_p_adj`).
     """
-    stats = pd.read_parquet(path)
-    if rois is not None:
-        missing = sorted(set(rois) - set(stats["roi"]))
-        if missing:
-            raise ValueError(f"ROI(s) not in {path}: {missing}")
-        stats = stats[stats["roi"].isin(rois)]
-
-    subjects = sorted(stats["subject"].unique())
-    groups = resolve_subject_groups(subjects, subject_info, group_variable)
-    stats = stats.rename(columns={"time_point": "timepoint"})
-    stats["group"] = stats["subject"].map(dict(zip(subjects, groups)))
-    return stats.reset_index(drop=True)
-
-
-def _observed(stats_df: pd.DataFrame, statistic: str) -> pd.DataFrame:
-    """Rows of `stats_df` with a value for `statistic` (e.g. no NaN median)."""
-    if statistic not in stats_df.columns:
-        raise ValueError(f"Statistic '{statistic}' is not a column of the frame")
-    return stats_df.dropna(subset=[statistic])
-
-
-def summarize_roi_statistics(stats_df: pd.DataFrame, statistic: str) -> pd.DataFrame:
-    """Per-ROI, per-group mean +/- SEM of `statistic` at each time point.
-
-    `stats_df` is `load_roi_statistics` output. Missing values are dropped
-    first, so `n` counts the subjects that contribute. Returns columns
-    `roi`, `group`, `timepoint`, `mean`, `sem`, `n` (ribbon plot input).
-    """
-    return summarize_groups_over_time(
-        _observed(stats_df, statistic),
-        facet="roi",
-        value=statistic,
-    )
-
-
-def compare_roi_groups(
-    stats_df: pd.DataFrame,
-    statistic: str,
-    min_group_n: int = 2,
-    alpha: float = 0.05,
-) -> pd.DataFrame:
-    """Test for a group difference in `statistic` at each time point, per ROI.
-
-    `stats_df` is `load_roi_statistics` output; every group in it is
-    compared, after dropping missing values. Tests and the per-ROI BH-FDR
-    family are as in `compare_groups_over_time`. Returns columns `roi`,
-    `timepoint`, `p_value`, `p_adj`, `significant` (`p_adj < alpha`).
-    """
-    observed = _observed(stats_df, statistic)
-    significance = compare_groups_over_time(
-        observed,
-        sorted(stats_df["group"].unique()),
-        facet="roi",
-        value=statistic,
-        min_group_n=min_group_n,
-    )
-    significance["significant"] = significance["p_adj"] < alpha
-    return significance
+    columns = [
+        "statistic",
+        "roi",
+        "n_tested",
+        "significant_timepoints",
+        "min_p_adj",
+        "higher_group",
+    ]
+    rows = []
+    for statistic, (summary, significance) in tables.items():
+        for roi in summary["roi"].drop_duplicates():
+            tested = significance[significance["roi"] == roi]
+            row: dict[str, Any] = {
+                "statistic": statistic,
+                "roi": roi,
+                "n_tested": len(tested),
+                "significant_timepoints": ", ".join(
+                    str(t)
+                    for t in sorted(tested.loc[tested["significant"], "timepoint"])
+                ),
+                "min_p_adj": np.nan,
+                "higher_group": "",
+            }
+            if not tested.empty:
+                best = tested.loc[tested["p_adj"].astype(float).idxmin()]
+                row["min_p_adj"] = float(best["p_adj"])
+                at_best = summary[
+                    (summary["roi"] == roi)
+                    & (summary["timepoint"] == best["timepoint"])
+                ]
+                row["higher_group"] = str(
+                    at_best.loc[at_best["mean"].idxmax(), "group"],
+                )
+            rows.append(row)
+    return pd.DataFrame(rows, columns=columns)

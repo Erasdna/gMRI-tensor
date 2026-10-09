@@ -127,3 +127,39 @@ def test_round_trip_centered_flag(tmp_path: Path) -> None:
     assert loaded.centered is True
     assert loaded.scale_std is None
     np.testing.assert_array_equal(loaded.scale_mean, saved.scale_mean)
+
+
+def test_round_trip_voxel_template(tmp_path: Path) -> None:
+    rng = np.random.default_rng(5)
+    saved = replace(
+        SavedDecomposition(
+            method="cp",
+            timepoints=np.array([0, 6]),
+            time_mode=rng.random((2, 2)),
+            **_common(2, rng),
+        ),
+        voxel_coords=rng.integers(0, 6, size=(5, 3)),
+        template_shape=np.array([6, 6, 6]),
+        template_affine=np.diag([2.0, 2.0, 2.0, 1.0]),
+    )
+
+    save_decomposition(tmp_path / "rank_2.h5", saved)
+    loaded = load_decomposition(tmp_path / "rank_2.h5")
+
+    _assert_equal(loaded, saved)
+    plain = load_decomposition(_save_plain(tmp_path, rng))
+    assert plain.voxel_coords is None and plain.template_shape is None
+
+
+def _save_plain(tmp_path: Path, rng: np.random.Generator) -> Path:
+    path = tmp_path / "plain.h5"
+    save_decomposition(
+        path,
+        SavedDecomposition(
+            method="cp",
+            timepoints=np.array([0]),
+            time_mode=rng.random((1, 2)),
+            **_common(2, rng),
+        ),
+    )
+    return path

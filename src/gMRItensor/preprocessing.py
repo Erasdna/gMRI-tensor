@@ -1,6 +1,7 @@
+import json
 from collections import deque
-from collections.abc import Mapping
 from contextlib import contextmanager
+from contextlib import ExitStack
 from functools import partial
 from itertools import islice
 from multiprocessing import Pool
@@ -406,209 +407,144 @@ def write_tracer_parquet(
     return tracer_path, coords_path if per_voxel else None
 
 
-def tracer_to_concentration(
+SIGNAL_TYPES = ("T1map", "R1map", "T1w")
+
+
+def delta_r1_per_second(
     tracer: np.ndarray,
     signal_type: str,
-    relaxivity: float = 3.2,
-    time_unit: Literal["s", "ms"] = "ms",
+    time_unit: str = "ms",
 ) -> np.ndarray:
-    """Convert a ΔR1 tracer signal to contrast agent concentration [mM].
+    """`compute_tracer` output in the unit preprocessing stores it in.
 
-    `c = ΔR1 / r1`, with ΔR1 from `compute_tracer` in 1/`time_unit` (1/ms
-    for T1 maps in ms) and `relaxivity` r1 in 1/(mM·s). The default 3.2 is
-    gadobutrol at 3T in water/CSF; one r1 is applied to every voxel, so
-    parenchymal concentrations are approximate (tissue r1 is not measured).
-
-    Raises `ValueError` for `"T1w"`, whose signal ratio is not ΔR1.
+    T1map (T1 in `time_unit`) and R1map (R1 in 1/`time_unit`) both give ΔR1
+    = R1_post - R1_baseline, returned in 1/s. T1w gives the post/baseline
+    ratio, which has no unit and is returned unchanged.
     """
-    if signal_type not in ("T1map", "R1map"):
-        raise ValueError(
-            f"Concentration needs a T1map or R1map signal, got {signal_type!r}",
-        )
     if time_unit not in ("s", "ms"):
         raise ValueError(f"time_unit must be 's' or 'ms', got {time_unit!r}")
-    delta_r1_per_s = tracer * 1000.0 if time_unit == "ms" else tracer
-    return delta_r1_per_s / relaxivity
+    if signal_type not in SIGNAL_TYPES:
+        raise ValueError(
+            f"signal_type must be one of {SIGNAL_TYPES}, got {signal_type!r}",
+        )
+    if signal_type == "T1w" or time_unit == "s":
+        return tracer
+    return tracer * 1000.0
 
 
-# Statistic columns of `compute_roi_statistics`, for group analysis/plots.
-ROI_STATISTIC_COLUMNS = (
-    "median",
-    "mean",
-    "median_concentration",
-    "mean_concentration",
-    "total_amount",
-)
-
-_ROI_STATISTICS_DTYPES = {
-    "roi": str,
-    "roi_type": str,
-    "n_voxels": np.int64,
-    "n_valid": np.int64,
-    "volume_mm3": np.float64,
-    "median": np.float64,
-    "mean": np.float64,
-    "median_concentration": np.float64,
-    "mean_concentration": np.float64,
-    "total_amount": np.float64,
-}
-
-# mM * mm^3 = (1e-3 mol / 1e-3 m^3) * 1e-9 m^3 = 1e-9 mol = 1e-6 mmol.
-_MM_MM3_TO_MMOL = 1e-6
-
-
-def _finite_median_mean(values: np.ndarray) -> tuple[float, float]:
-    finite = values[np.isfinite(values)]
-    if finite.size == 0:
-        return np.nan, np.nan
-    return float(np.median(finite)), float(np.mean(finite))
-
-
-def _roi_statistics_row(
-    roi: str,
-    roi_type: str,
-    tracer: np.ndarray,
-    concentration: np.ndarray | None,
-    voxel_volume_mm3: float,
-) -> dict[str, Any]:
-    median, mean = _finite_median_mean(tracer)
-    median_concentration, mean_concentration, total_amount = np.nan, np.nan, np.nan
-    if concentration is not None:
-        median_concentration, mean_concentration = _finite_median_mean(concentration)
-        finite_concentration = concentration[np.isfinite(concentration)]
-        if finite_concentration.size:
-            total_amount = (
-                float(finite_concentration.sum()) * voxel_volume_mm3 * _MM_MM3_TO_MMOL
-            )
+def _signal_metadata(kind: str, signal_type: str) -> dict[str, str]:
+    is_ratio = signal_type == "T1w"
     return {
-        "roi": roi,
-        "roi_type": roi_type,
-        "n_voxels": len(tracer),
-        "n_valid": int(np.count_nonzero(np.isfinite(tracer))),
-        "volume_mm3": len(tracer) * voxel_volume_mm3,
-        "median": median,
-        "mean": mean,
-        "median_concentration": median_concentration,
-        "mean_concentration": mean_concentration,
-        "total_amount": total_amount,
+        "kind": kind,
+        "input_type": signal_type,
+        "signal": "ratio" if is_ratio else "delta_R1",
+        "unit": "1" if is_ratio else "1/s",
     }
 
 
-def compute_roi_statistics(
-    tracer: np.ndarray,
+def read_signal_metadata(path: Path | str) -> dict[str, str]:
+    """The metadata `write_preprocessed_data` stores in each of its files.
+
+    `kind` (`roi_signal`, `voxels` or `coords`), `input_type`, `signal`
+    (`delta_R1` or `ratio`) and `unit`; coords files add the template
+    `shape` and `affine` as JSON.
+    """
+    metadata = pq.read_schema(path).metadata or {}
+    return {
+        key.decode(): value.decode()
+        for key, value in metadata.items()
+        if not key.startswith(b"pandas") and not key.startswith(b"ARROW")
+    }
+
+
+_ROI_SIGNAL_DTYPES = {
+    "label": np.int64,
+    "median": np.float64,
+    "mean": np.float64,
+    "n_voxels": np.int64,
+    "n_valid": np.int64,
+    "voxel_volume_mm3": np.float64,
+}
+
+
+def compute_roi_signal(
+    signal: np.ndarray,
     segmentation: np.ndarray,
     voxel_volume_mm3: float,
-    roi_groups: Mapping[str, np.ndarray] | None = None,
-    concentration: np.ndarray | None = None,
-    include_labels: bool = True,
 ) -> pd.DataFrame:
-    """Per-label and per-ROI-group statistics of one image's labeled voxels.
+    """Median, mean and voxel counts of `signal` per segmentation label.
 
-    Inputs are `_load_labeled_tracer_voxels` output (`segmentation` ids are
-    rounded here) and optionally `tracer_to_concentration` of `tracer`.
-    One `roi_type="label"` row per label id (`roi=str(id)`, ascending) if
-    `include_labels`, then one `roi_type="group"` row per `roi_groups` entry
-    (e.g. `roi_groups.resolve_roi_groups` output) pooling the voxels of its
-    ids -- so a group median is the exact median over those voxels. Groups
-    without voxels in this image are omitted.
-
-    Statistics use finite voxels only: `n_voxels`/`volume_mm3` count all of
-    the ROI's voxels, `n_valid` the finite ones. `median`/`mean` are of the
-    tracer signal; `median_concentration`/`mean_concentration` [mM] and
-    `total_amount` [mmol, sum over finite voxels] are NaN without
-    `concentration`.
+    `segmentation` ids are rounded. `n_voxels` counts every voxel of the
+    label, `n_valid` the finite ones the median/mean are taken over (NaN if
+    none). One row per label, ascending; `voxel_volume_mm3` is repeated so
+    region volumes and totals can be computed later.
     """
     labels = np.rint(segmentation).astype(np.int64)
+    order = np.argsort(labels, kind="stable")
+    unique_labels, starts = np.unique(labels[order], return_index=True)
     records = []
-
-    if include_labels:
-        order = np.argsort(labels, kind="stable")
-        unique_labels, starts = np.unique(labels[order], return_index=True)
-        for label, voxels in zip(unique_labels, np.split(order, starts[1:])):
-            records.append(
-                _roi_statistics_row(
-                    str(label),
-                    "label",
-                    tracer[voxels],
-                    None if concentration is None else concentration[voxels],
-                    voxel_volume_mm3,
-                ),
-            )
-
-    for name, ids in (roi_groups or {}).items():
-        in_group = np.isin(labels, ids)
-        if not in_group.any():
-            continue
+    for label, voxels in zip(unique_labels, np.split(order, starts[1:])):
+        values = signal[voxels]
+        finite = values[np.isfinite(values)]
         records.append(
-            _roi_statistics_row(
-                name,
-                "group",
-                tracer[in_group],
-                None if concentration is None else concentration[in_group],
-                voxel_volume_mm3,
-            ),
+            {
+                "label": int(label),
+                "median": float(np.median(finite)) if finite.size else np.nan,
+                "mean": float(np.mean(finite)) if finite.size else np.nan,
+                "n_voxels": len(values),
+                "n_valid": finite.size,
+                "voxel_volume_mm3": voxel_volume_mm3,
+            },
         )
-
     return pd.DataFrame.from_records(
         records,
-        columns=list(_ROI_STATISTICS_DTYPES),
-    ).astype(_ROI_STATISTICS_DTYPES)
+        columns=list(_ROI_SIGNAL_DTYPES),
+    ).astype(_ROI_SIGNAL_DTYPES)
 
 
-_ROI_STATISTICS_SCHEMA = pa.schema(
+_ROI_SIGNAL_SCHEMA = pa.schema(
     [
         ("subject", pa.string()),
         ("time_point", pa.int64()),
-        ("roi", pa.string()),
-        ("roi_type", pa.string()),
-        ("n_voxels", pa.int64()),
-        ("n_valid", pa.int64()),
-        ("volume_mm3", pa.float64()),
+        ("label", pa.int64()),
         ("median", pa.float64()),
         ("mean", pa.float64()),
-        ("median_concentration", pa.float64()),
-        ("mean_concentration", pa.float64()),
-        ("total_amount", pa.float64()),
+        ("n_voxels", pa.int64()),
+        ("n_valid", pa.int64()),
+        ("voxel_volume_mm3", pa.float64()),
     ],
 )
 
 
-def _roi_statistics_table(
-    subject: Any,
-    time_point: Any,
-    roi_statistics: pd.DataFrame,
-) -> pa.Table:
-    n = len(roi_statistics)
+def _roi_signal_table(subject: Any, time_point: Any, roi: pd.DataFrame) -> pa.Table:
+    n = len(roi)
     columns: dict[str, Any] = {
         "subject": pa.repeat(pa.scalar(str(subject)), n),
         "time_point": pa.repeat(pa.scalar(time_point, pa.int64()), n),
     }
-    for name in _ROI_STATISTICS_DTYPES:
+    for name in _ROI_SIGNAL_DTYPES:
         columns[name] = pa.array(
-            roi_statistics[name].to_numpy(),
-            type=_ROI_STATISTICS_SCHEMA.field(name).type,
+            roi[name].to_numpy(),
+            type=_ROI_SIGNAL_SCHEMA.field(name).type,
         )
-    return pa.table(columns, schema=_ROI_STATISTICS_SCHEMA)
+    return pa.table(columns, schema=_ROI_SIGNAL_SCHEMA)
 
 
 class PreprocessedPaths(NamedTuple):
-    """Files written by `write_preprocessed_data`; `coords` None in ROI mode."""
+    """Files written by `write_preprocessed_data`; voxel files None unless
+    `store_voxels`."""
 
-    tracer: Path
+    roi_signal: Path
+    voxels: Path | None
     coords: Path | None
-    roi_statistics: Path
 
 
 def _preprocess_worker(
     args: dict[str, Any],
-    roi_groups: Mapping[str, np.ndarray] | None,
-    relaxivity: float | None,
-    time_unit: Literal["s", "ms"],
-) -> tuple[
-    tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray] | np.ndarray],
-    pd.DataFrame,
-]:
-    """Load one image once; return its tracer rows and ROI statistics."""
+    time_unit: str,
+    store_voxels: bool,
+) -> tuple[pd.DataFrame, tuple[Any, ...] | None]:
+    """Load one scan once; return its ROI signal and, optionally, voxel rows."""
     tracer, segmentation, voxel_coords, voxel_volume_mm3 = _load_labeled_tracer_voxels(
         args["baseline_path"],
         args["post_injection_path"],
@@ -616,101 +552,134 @@ def _preprocess_worker(
         args["mask_path"],
         args["segmentation_path"],
     )
-    concentration = (
-        None
-        if relaxivity is None or args["signal_type"] == "T1w"
-        else tracer_to_concentration(
-            tracer,
-            args["signal_type"],
-            relaxivity,
-            time_unit,
-        )
+    signal = delta_r1_per_second(tracer, args["signal_type"], time_unit)
+    roi = compute_roi_signal(signal, segmentation, voxel_volume_mm3)
+    rows = (
+        _tracer_rows(signal, segmentation, voxel_coords, None) if store_voxels else None
     )
-    roi_statistics = compute_roi_statistics(
-        tracer,
-        segmentation,
-        voxel_volume_mm3,
-        roi_groups,
-        concentration,
-    )
-    return (
-        _tracer_rows(tracer, segmentation, voxel_coords, args["func"]),
-        roi_statistics,
-    )
+    return roi, rows
+
+
+def _template_metadata(segmentation_path: Path) -> dict[str, str]:
+    """Shape and affine of the (canonical) template grid, as JSON."""
+    image = cast(Nifti1Image, nib.as_closest_canonical(nib.load(segmentation_path)))
+    return {
+        "shape": json.dumps([int(n) for n in image.shape[:3]]),
+        "affine": json.dumps(np.asarray(image.affine).tolist()),
+    }
+
+
+def _with_metadata(table: pa.Table, metadata: dict[str, str]) -> pa.Table:
+    return table.replace_schema_metadata(metadata)
 
 
 def write_preprocessed_data(
     args_list: list[dict[str, Any]],
     output_dir: Path | str,
-    roi_groups: Mapping[str, np.ndarray] | None = None,
-    relaxivity: float | None = 3.2,
-    time_unit: Literal["s", "ms"] = "ms",
+    time_unit: str = "ms",
+    store_voxels: bool = False,
     n_procs: int = 5,
 ) -> PreprocessedPaths:
-    """Read every image once and write all data products to `output_dir/data/`.
+    """Read every scan once and write the data products to `output_dir/data/`.
 
-    Per `args_list` entry (as in `write_tracer_parquet`) the images are
-    loaded once, and both products are derived from that load:
+    `args_list` entries are as in `write_tracer_parquet` (without `func`);
+    all must share one `signal_type`. The signal is ΔR1 in 1/s for T1map and
+    R1map input (`delta_r1_per_second`, `time_unit` being the unit of the
+    maps) and the post/baseline ratio for T1w.
 
-    - `tracer.parquet` (+ `tracer.coords.parquet` per voxel): exactly what
-      `write_tracer_parquet` writes, for `load_tensor_from_parquet`.
-    - `roi_statistics.parquet`: `compute_roi_statistics` per image, with
-      leading `subject`/`time_point` columns. Concentration columns are NaN
-      for `T1w` images or `relaxivity=None`; see `tracer_to_concentration`.
+    - `roi_signal.parquet`: `compute_roi_signal` per scan, with leading
+      `subject`/`time_point` columns.
+    - With `store_voxels`: `voxels.parquet` (one row per labeled voxel, in
+      the `write_tracer_parquet` per-voxel schema, for
+      `load_tensor_from_parquet`) and `voxels.coords.parquet` (each voxel's
+      `(labels, label_index)` key and `(i, j, k)` index, with the template
+      `shape`/`affine` in its metadata). Every scan must have the same
+      labeled voxels as the first -- one common template -- or `ValueError`.
 
-    One row group per image in both files; files are only moved into place
-    on success.
+    Each file records `read_signal_metadata`. One row group per scan; files
+    are only moved into place on success.
     """
     if not args_list:
         raise ValueError("args_list is empty; nothing to write")
     if time_unit not in ("s", "ms"):
         raise ValueError(f"time_unit must be 's' or 'ms', got {time_unit!r}")
+    signal_types = {args["signal_type"] for args in args_list}
+    if len(signal_types) != 1:
+        raise ValueError(
+            f"all scans must share one signal_type, got {sorted(signal_types)}",
+        )
+    (signal_type,) = signal_types
 
     data_dir = Path(output_dir) / "data"
     data_dir.mkdir(parents=True, exist_ok=True)
-    per_voxel = args_list[0]["func"] is None
-    coords_path = data_dir / "tracer.coords.parquet"
-    paths = PreprocessedPaths(
-        tracer=data_dir / "tracer.parquet",
-        coords=coords_path if per_voxel else None,
-        roi_statistics=data_dir / "roi_statistics.parquet",
-    )
-    worker = partial(
-        _preprocess_worker,
-        roi_groups=roi_groups,
-        relaxivity=relaxivity,
-        time_unit=time_unit,
-    )
+    roi_path = data_dir / "roi_signal.parquet"
+    voxels_path = data_dir / "voxels.parquet"
+    coords_path = data_dir / "voxels.coords.parquet"
+    roi_metadata = _signal_metadata("roi_signal", signal_type)
+    voxels_metadata = _signal_metadata("voxels", signal_type)
+    worker = partial(_preprocess_worker, time_unit=time_unit, store_voxels=store_voxels)
 
-    with (
-        _atomic_outputs(
-            paths.tracer,
-            coords_path,
-            paths.roi_statistics,
-        ) as (tmp_tracer, tmp_coords, tmp_roi_statistics),
-        pq.ParquetWriter(tmp_tracer, _TRACER_SCHEMA) as tracer_writer,
-        pq.ParquetWriter(
-            tmp_roi_statistics,
-            _ROI_STATISTICS_SCHEMA,
-        ) as roi_statistics_writer,
-    ):
-        for i, (args, (rows, roi_statistics)) in enumerate(
-            _iter_parallel(args_list, worker, n_procs, desc="Preprocessing images"),
-        ):
-            result = TracerResult(args["subject"], args["time_point"], *rows)
-            if i == 0 and per_voxel:
-                pq.write_table(_coords_table(result), tmp_coords)
-            table = _tracer_table(result)
-            tracer_writer.write_table(table, row_group_size=max(table.num_rows, 1))
-            roi_statistics_writer.write_table(
-                _roi_statistics_table(
-                    args["subject"],
-                    args["time_point"],
-                    roi_statistics,
+    with ExitStack() as stack:
+        tmp_roi, tmp_voxels, tmp_coords = stack.enter_context(
+            _atomic_outputs(roi_path, voxels_path, coords_path),
+        )
+        roi_writer = stack.enter_context(
+            pq.ParquetWriter(tmp_roi, _ROI_SIGNAL_SCHEMA.with_metadata(roi_metadata)),
+        )
+        voxels_writer = (
+            stack.enter_context(
+                pq.ParquetWriter(
+                    tmp_voxels,
+                    _TRACER_SCHEMA.with_metadata(voxels_metadata),
                 ),
             )
+            if store_voxels
+            else None
+        )
+        first: TracerResult | None = None
+        for args, (roi, rows) in _iter_parallel(
+            args_list,
+            worker,
+            n_procs,
+            desc="Preprocessing images",
+        ):
+            roi_table = _roi_signal_table(args["subject"], args["time_point"], roi)
+            roi_writer.write_table(_with_metadata(roi_table, roi_metadata))
+            if voxels_writer is None:
+                continue
+            result = TracerResult(args["subject"], args["time_point"], *rows)
+            if first is None:
+                first = result
+                coords_metadata = {
+                    **_signal_metadata("coords", signal_type),
+                    **_template_metadata(args["segmentation_path"]),
+                }
+                pq.write_table(
+                    _with_metadata(_coords_table(result), coords_metadata),
+                    tmp_coords,
+                )
+            elif not (
+                np.array_equal(result.labels, first.labels)
+                and np.array_equal(result.index_list, first.index_list)
+            ):
+                raise ValueError(
+                    f"scan (subject {result.subject}, time point "
+                    f"{result.time_point}) has different labeled voxels than "
+                    f"the first scan (subject {first.subject}, time point "
+                    f"{first.time_point}); store_voxels needs every scan on one "
+                    "common template",
+                )
+            table = _tracer_table(result)
+            voxels_writer.write_table(
+                _with_metadata(table, voxels_metadata),
+                row_group_size=max(table.num_rows, 1),
+            )
 
-    return paths
+    return PreprocessedPaths(
+        roi_path,
+        voxels_path if store_voxels else None,
+        coords_path if store_voxels else None,
+    )
 
 
 def compute_roi_scaling(

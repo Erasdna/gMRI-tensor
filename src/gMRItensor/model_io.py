@@ -7,7 +7,13 @@ import h5py
 import numpy as np
 
 _ARRAYS = ("weights", "subject_mode", "label_mode", "labels", "label_index")
-_OPTIONAL_ARRAYS = ("scale_mean", "scale_std")
+_OPTIONAL_ARRAYS = (
+    "scale_mean",
+    "scale_std",
+    "voxel_coords",
+    "template_shape",
+    "template_affine",
+)
 
 
 @dataclass(frozen=True)
@@ -20,6 +26,8 @@ class SavedDecomposition:
     `load_tensor_from_parquet`. `scale_mean`/`scale_std` are the per-label
     statistics of the fitted data: `centered` says whether `scale_mean` was
     subtracted, and `scale_std` is None if the data was not divided by it.
+    Voxel models also carry each `label_mode` row's `voxel_coords` (i, j, k)
+    on the template grid (`template_shape`, `template_affine`).
     """
 
     method: Literal["cp", "parafac2"]
@@ -37,6 +45,9 @@ class SavedDecomposition:
     scale_mean: np.ndarray | None = None
     scale_std: np.ndarray | None = None
     centered: bool = False
+    voxel_coords: np.ndarray | None = None
+    template_shape: np.ndarray | None = None
+    template_affine: np.ndarray | None = None
 
 
 def _write_ragged(file: h5py.File, name: str, arrays: list[np.ndarray]) -> None:

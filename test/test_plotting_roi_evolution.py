@@ -3,8 +3,8 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
-from gMRItensor.group_statistics import compare_roi_groups
-from gMRItensor.group_statistics import summarize_roi_statistics
+from gMRItensor.group_statistics import compare_groups_over_time
+from gMRItensor.group_statistics import summarize_groups_over_time
 from gMRItensor.plotting.roi_evolution import figure_path
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_panels
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_rows
@@ -20,7 +20,7 @@ ROIS = ("ventricles", "white_matter", "thalamus")
 
 
 def make_roi_statistics(n_per_group: int = 6, seed: int = 0) -> pd.DataFrame:
-    """`load_roi_statistics`-like frame: group B is shifted in `ventricles`
+    """Per-scan ROI frame: group B is shifted in `ventricles`
     at time points 2 and 3 only, so exactly those are significant."""
     rng = np.random.default_rng(seed)
     rows = []
@@ -46,8 +46,9 @@ def make_roi_statistics(n_per_group: int = 6, seed: int = 0) -> pd.DataFrame:
 @pytest.fixture
 def roi_tables() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     stats = make_roi_statistics()
-    summary = summarize_roi_statistics(stats, "median")
-    significance = compare_roi_groups(stats, "median")
+    summary = summarize_groups_over_time(stats, facet="roi", value="median")
+    significance = compare_groups_over_time(stats, ["A", "B"], "roi", "median")
+    significance["significant"] = significance["p_adj"] < 0.05
     return stats, summary, significance
 
 
@@ -81,7 +82,7 @@ def test_rows_layout_shape_stars_and_colors(roi_tables):
     assert len(fig.legends) == 1
     assert all(ax.get_legend() is None for ax in axs.flat)
     assert axs[0, 0].get_ylabel() == "ventricles"
-    assert fig.get_supylabel() == "Median signal (a.u.)"
+    assert fig.get_supylabel() == "Median ΔR1 (1/s)"
     plt.close(fig)
 
 
@@ -150,7 +151,7 @@ def test_layouts_without_significance(roi_tables):
 
 
 def test_statistic_label_units():
-    assert statistic_label("median") == "Median signal (a.u.)"
+    assert statistic_label("median") == "Median ΔR1 (1/s)"
     assert statistic_label("mean_concentration") == "Mean concentration (mM)"
     assert statistic_label("total_amount") == "Total amount (mmol)"
     assert statistic_label("custom") == "custom"
@@ -194,3 +195,21 @@ def test_save_figure_writes_all_formats_and_closes(tmp_path):
     ]
     assert all(path.stat().st_size > 0 for path in paths)
     assert not plt.fignum_exists(fig.number)
+
+
+def test_statistic_label_follows_the_signal():
+    assert statistic_label("median", signal="ratio") == "Median signal ratio"
+    assert statistic_label("mean", signal="delta_R1") == "Mean ΔR1 (1/s)"
+
+
+def test_plot_time_mode_one_row_per_component():
+    from gMRItensor.plotting.time_mode import plot_time_mode
+
+    rng = np.random.default_rng(0)
+    fig, axs = plot_time_mode(rng.random((4, 3)), [0, 6, 24, 48], page_width="single")
+
+    assert axs.shape == (3,)
+    assert [len(ax.lines) for ax in axs] == [1, 1, 1]
+    np.testing.assert_array_equal(axs[0].lines[0].get_xdata(), [0, 6, 24, 48])
+    assert axs[2].get_ylabel() == "Component 3"
+    plt.close(fig)

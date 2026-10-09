@@ -1,8 +1,8 @@
 """Tracer evolution per ROI and subject group, drawn from precomputed tables.
 
-Inputs are `group_statistics` outputs (`summarize_roi_statistics`,
-`compare_roi_groups`, `load_roi_statistics`); nothing here computes
-statistics.
+Inputs are the tables `gmri plot statistics` writes (per-scan ROI rows,
+`summarize_groups_over_time` and `compare_groups_over_time` output faceted
+by `roi`); nothing here computes statistics.
 """
 from collections.abc import Sequence
 from pathlib import Path
@@ -25,8 +25,6 @@ matplotlib.use("Agg")
 TIME_LABEL = "Time after injection [h]"
 
 _STATISTIC_LABELS = {
-    "median": "Median signal (a.u.)",
-    "mean": "Mean signal (a.u.)",
     "median_concentration": "Median concentration (mM)",
     "mean_concentration": "Mean concentration (mM)",
     "total_amount": "Total amount (mmol)",
@@ -39,8 +37,15 @@ _STAR_OFFSET_PT = 1.0
 _FIGURE_LABEL_HEIGHT = 0.5
 
 
-def statistic_label(statistic: str) -> str:
-    """Y-axis label with unit for a `compute_roi_statistics` column."""
+def statistic_label(statistic: str, signal: str = "delta_R1") -> str:
+    """Y-axis label with unit for an ROI statistic.
+
+    `signal` is the preprocessed signal (`read_signal_metadata`): `delta_R1`
+    (in 1/s) or `ratio` (T1w post/baseline).
+    """
+    if statistic in ("median", "mean"):
+        name = statistic.capitalize()
+        return f"{name} signal ratio" if signal == "ratio" else f"{name} ΔR1 (1/s)"
     return _STATISTIC_LABELS.get(statistic, statistic)
 
 
@@ -81,6 +86,7 @@ def _add_figure_labels(
     legend_ax: matplotlib.axes.Axes,
     n_groups: int,
     statistic: str,
+    signal: str,
 ) -> None:
     """One legend above all panels plus shared time and statistic labels.
 
@@ -97,7 +103,7 @@ def _add_figure_labels(
     )
     fontsize = plt.rcParams["axes.labelsize"]
     fig.supxlabel(TIME_LABEL, fontsize=fontsize)
-    fig.supylabel(statistic_label(statistic), fontsize=fontsize)
+    fig.supylabel(statistic_label(statistic, signal), fontsize=fontsize)
 
 
 def _mark_significance(
@@ -149,13 +155,15 @@ def plot_roi_evolution_rows(
     statistic: str,
     page_width: str | float = "double",
     width_to_height_ratio: float = 1.618,
+    signal: str = "delta_R1",
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """One row per ROI: group ribbons, then each group's subject curves.
 
     Same layout as `plot_evolving_mode`, with ROIs as rows. `summary` is
-    `summarize_roi_statistics` output, `subject_values` the
-    `load_roi_statistics` frame it came from and `significance`
-    `compare_roi_groups` output for the same `statistic`. Significant time
+    `summarize_groups_over_time(..., facet="roi")` output, `subject_values`
+    the per-scan ROI frame it came from (with `group` and `timepoint`) and
+    `significance` the matching `compare_groups_over_time` output with a
+    `significant` column, for the same `statistic`. Significant time
     points get a `*` above the ribbon. `page_width` is a `JOURNAL_WIDTHS`
     name or inches.
 
@@ -209,7 +217,7 @@ def plot_roi_evolution_rows(
     axs[0, 0].set_title(r"Mean $\pm$ SEM")
     for col, category in enumerate(categories, start=1):
         axs[0, col].set_title(str(category))
-    _add_figure_labels(fig, axs[0, 0], len(categories), statistic)
+    _add_figure_labels(fig, axs[0, 0], len(categories), statistic, signal)
 
     apply_row_ylims(axs, row_ylims)
     fig.draw_without_rendering()  # fix axes sizes for `_mark_significance`
@@ -234,6 +242,7 @@ def plot_roi_evolution_panels(
     page_width: str | float = "double",
     sharey: bool = False,
     width_to_height_ratio: float = 1.618,
+    signal: str = "delta_R1",
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """A grid of group-ribbon panels, one per ROI, filled row by row.
 
@@ -271,7 +280,7 @@ def plot_roi_evolution_panels(
         shared = (min(lo for lo, _ in ylims), max(hi for _, hi in ylims))
         ylims = [shared] * len(ylims)
     apply_row_ylims(np.array(panels).reshape(-1, 1), ylims)
-    _add_figure_labels(fig, panels[0], len(categories), statistic)
+    _add_figure_labels(fig, panels[0], len(categories), statistic, signal)
     fig.draw_without_rendering()  # fix axes sizes for `_mark_significance`
     for ax, roi in zip(panels, rois):
         _mark_significance(

@@ -3,11 +3,9 @@ import numpy as np
 import pandas as pd
 import pytest
 from gMRItensor.group_statistics import compare_groups_over_time
-from gMRItensor.group_statistics import compare_roi_groups
-from gMRItensor.group_statistics import load_roi_statistics
 from gMRItensor.group_statistics import resolve_subject_groups
+from gMRItensor.group_statistics import significance_summary
 from gMRItensor.group_statistics import summarize_groups_over_time
-from gMRItensor.group_statistics import summarize_roi_statistics
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.utils import scale_mode
 from scipy.stats import mannwhitneyu
@@ -165,97 +163,27 @@ def test_plot_evolving_mode_significance_matches_direct_scipy():
         np.testing.assert_array_equal(got["significant"], expected_adj < 0.05)
 
 
-def _write_roi_statistics(long_df: pd.DataFrame, path) -> tuple:
-    """`make_shifted_long_df` as a `write_preprocessed_data` ROI statistics
-    file, plus the matching `subject_info`."""
-    stats = long_df.rename(columns={"timepoint": "time_point"})
-    subject_info = stats[["subject", "group"]].drop_duplicates()
-    subject_info = subject_info.rename(columns={"subject": "subjects"})
-    stats = stats.drop(columns="group").assign(roi_type="group")
-    stats["mean"] = stats["median"] + 1.0
-    stats.to_parquet(path)
-    return path, subject_info.rename(columns={"group": "diagnosis"})
-
-
-def test_load_roi_statistics_attaches_groups_and_filters_rois(tmp_path):
+def test_significance_summary_names_significant_rois_and_higher_group():
     long_df = make_shifted_long_df()
-    path, subject_info = _write_roi_statistics(long_df, tmp_path / "stats.parquet")
+    tables = {}
+    for statistic in ("median",):
+        summary = summarize_groups_over_time(long_df, facet="roi", value=statistic)
+        significance = compare_groups_over_time(long_df, ["A", "B"], "roi", statistic)
+        significance["significant"] = significance["p_adj"] < 0.05
+        tables[statistic] = (summary, significance)
 
-    stats = load_roi_statistics(path, subject_info, "diagnosis", rois=["wm"])
+    result = significance_summary(tables)
 
-    assert set(stats["roi"]) == {"wm"}
-    assert "timepoint" in stats.columns and "time_point" not in stats.columns
-    expected = long_df[long_df["roi"] == "wm"].set_index(["subject", "timepoint"])
-    got = stats.set_index(["subject", "timepoint"]).loc[expected.index]
-    np.testing.assert_array_equal(got["group"], expected["group"])
-    assert len(load_roi_statistics(path, subject_info, "diagnosis")) == len(long_df)
-
-
-def test_load_roi_statistics_rejects_unknown_roi_and_subject(tmp_path):
-    path, subject_info = _write_roi_statistics(
-        make_shifted_long_df(),
-        tmp_path / "stats.parquet",
-    )
-
-    with pytest.raises(ValueError, match="not_a_roi"):
-        load_roi_statistics(path, subject_info, "diagnosis", rois=["not_a_roi"])
-    with pytest.raises(ValueError, match="not found"):
-        load_roi_statistics(path, subject_info.iloc[1:], "diagnosis")
-
-
-def test_summarize_roi_statistics_ignores_missing_values():
-    long_df = make_shifted_long_df()
-    long_df.loc[0, "median"] = np.nan
-
-    summary = summarize_roi_statistics(long_df, "median")
-
-    expected = summarize_groups_over_time(
-        long_df.dropna(subset=["median"]),
-        facet="roi",
-        value="median",
-    )
-    pd.testing.assert_frame_equal(summary, expected)
-    first = long_df.loc[0]
-    row = summary[
-        (summary["roi"] == first["roi"])
-        & (summary["group"] == first["group"])
-        & (summary["timepoint"] == first["timepoint"])
-    ].iloc[0]
-    assert row["n"] == 7  # 8 subjects per group, one missing
-
-
-def test_compare_roi_groups_flags_shifted_timepoints():
-    long_df = make_shifted_long_df()
-    long_df.loc[0, "median"] = np.nan  # must not turn a p-value into NaN
-
-    significance = compare_roi_groups(long_df, "median", alpha=0.05)
-
-    assert list(significance.columns) == [
+    assert list(result.columns) == [
+        "statistic",
         "roi",
-        "timepoint",
-        "p_value",
-        "p_adj",
-        "significant",
+        "n_tested",
+        "significant_timepoints",
+        "min_p_adj",
+        "higher_group",
     ]
-    assert significance["p_value"].notna().all()
-    flagged = set(
-        significance.loc[significance["significant"], ["roi", "timepoint"]].apply(
-            tuple,
-            axis=1,
-        ),
-    )
-    assert flagged == {("ventricles", 2), ("ventricles", 3)}
-    assert not compare_roi_groups(long_df, "median", alpha=0.0)["significant"].any()
-
-
-def test_compare_roi_groups_min_group_n_and_bad_statistic():
-    long_df = make_shifted_long_df(n_per_group=3)
-
-    significance = compare_roi_groups(long_df, "median", min_group_n=4)
-
-    assert significance.empty
-    assert "significant" in significance.columns
-    with pytest.raises(ValueError, match="not_a_statistic"):
-        compare_roi_groups(long_df, "not_a_statistic")
-    with pytest.raises(ValueError, match="not_a_statistic"):
-        summarize_roi_statistics(long_df, "not_a_statistic")
+    rows = result.set_index("roi")
+    assert rows.loc["ventricles", "significant_timepoints"] == "2, 3"
+    assert rows.loc["ventricles", "higher_group"] == "B"
+    assert rows.loc["ventricles", "n_tested"] == 4
+    assert rows.loc["wm", "significant_timepoints"] == ""

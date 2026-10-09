@@ -127,9 +127,12 @@ def _percentile_vlim(
     Zero is excluded rather than clipped to: `scatter_to_volume` fills
     voxels outside the mask with exact 0, which is not a real value and
     would otherwise dominate the percentile. Genuine negative entries, e.g.
-    from an unconstrained spatial mode, are kept.
+    from an unconstrained spatial mode, are kept. Without nonzero entries
+    (an empty region) the range is (0, 1), so the panel is drawn blank.
     """
     nonzero = values[values != 0]
+    if nonzero.size == 0:
+        return 0.0, 1.0
     return np.percentile(nonzero, low), np.percentile(nonzero, high)
 
 
