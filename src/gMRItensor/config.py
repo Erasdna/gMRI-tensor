@@ -282,6 +282,18 @@ class FitConfig:
 
 
 @dataclass(frozen=True)
+class DistributedConfig:
+    """Scatter/gather restarts (`gmri <stage> plan|run --job|collect`).
+
+    `store` is the restart-result directory, relative to `output_dir`;
+    `tasks_per_job` is how many `(group, seed)` fits one job runs.
+    """
+
+    store: str = "restarts"
+    tasks_per_job: int = 1
+
+
+@dataclass(frozen=True)
 class DecompositionConfig:
     """`gmri decompose`: tracer parquet -> one fit per rank."""
 
@@ -292,6 +304,12 @@ class DecompositionConfig:
     ranks: tuple[int, ...]
     tensor: TensorConfig = field(default_factory=TensorConfig)
     fit: FitConfig = field(default_factory=FitConfig)
+    distributed: DistributedConfig = field(default_factory=DistributedConfig)
+
+    @property
+    def store_dir(self) -> Path:
+        """Where distributed jobs keep their per-restart results."""
+        return self.output_dir / self.distributed.store
 
 
 @dataclass(frozen=True)
@@ -312,6 +330,12 @@ class ReplicabilityConfig:
     seed: int = 0
     tensor: TensorConfig = field(default_factory=TensorConfig)
     fit: FitConfig = field(default_factory=FitConfig)
+    distributed: DistributedConfig = field(default_factory=DistributedConfig)
+
+    @property
+    def store_dir(self) -> Path:
+        """Where distributed jobs keep their per-restart results."""
+        return self.output_dir / self.distributed.store
 
 
 def _read_regions(reader: _Reader) -> RegionsConfig:
@@ -446,6 +470,15 @@ def _read_fit(reader: _Reader) -> FitConfig:
     return fit
 
 
+def _read_distributed(reader: _Reader) -> DistributedConfig:
+    distributed = DistributedConfig(
+        store=reader.string("store", "restarts"),
+        tasks_per_job=reader.integer("tasks_per_job", 1),
+    )
+    reader.finish()
+    return distributed
+
+
 def load_decomposition_config(path: Path | str) -> DecompositionConfig:
     """Read and validate a `gmri decompose` config."""
     reader = _open(path)
@@ -457,6 +490,7 @@ def load_decomposition_config(path: Path | str) -> DecompositionConfig:
         ranks=reader.integers("ranks"),
         tensor=_read_tensor(reader.child("tensor")),
         fit=_read_fit(reader.child("fit")),
+        distributed=_read_distributed(reader.child("distributed")),
     )
     reader.finish()
     return config
@@ -481,6 +515,7 @@ def load_replicability_config(path: Path | str) -> ReplicabilityConfig:
         seed=reader.integer("seed", 0, minimum=0),
         tensor=_read_tensor(reader.child("tensor")),
         fit=_read_fit(reader.child("fit")),
+        distributed=_read_distributed(reader.child("distributed")),
     )
     reader.finish()
     if config.stratify_by is not None and config.subject_info is None:

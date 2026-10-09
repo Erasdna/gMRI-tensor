@@ -26,19 +26,28 @@ The steps below follow the pipeline order. Each step reads the output of the pre
 
 ### Command line
 
-Each stage runs on its own from one YAML config, which names its inputs and outputs (paths are relative to the config file):
+Each stage runs on its own from one YAML config, which names its inputs and outputs. Paths are relative to the config file. `examples/*.yaml` are commented templates; every option is described in [docs/configuration.md](docs/configuration.md).
 
 ```bash
-gmri preprocess    examples/preprocessing.yaml   # images -> results/data/{tracer,roi_statistics}.parquet
-gmri plot          examples/plotting.yaml        # ROI statistics -> results/roi_analysis/ tables + results/figures/roi/
-gmri decompose     examples/decomposition.yaml   # tracer table -> rank_<r>.h5 + fits.csv
-gmri replicability examples/replicability.yaml   # tracer table -> replicability.csv (factor match scores)
+gmri preprocess  preprocessing.yaml       # images -> results/data/{tracer,roi_statistics}.parquet
+gmri plot        plotting.yaml            # ROI statistics -> results/roi_analysis/ tables + results/figures/roi/
+gmri decompose     run decomposition.yaml # tracer table -> rank_<r>.h5 + fits.csv
+gmri replicability run replicability.yaml # tracer table -> replicability.csv (factor match scores)
 ```
 
-- **Configs:** the commented `examples/*.yaml` list every option. Unknown keys are errors, and every error names the file and field.
+Decomposition and replicability can also spread their restarts over many jobs, e.g. a SLURM array. `collect` writes the same files as a single-process `run`:
+
+```bash
+N=$(gmri decompose plan decomposition.yaml)          # number of jobs
+# in each array job:
+gmri decompose run decomposition.yaml --job $SLURM_ARRAY_TASK_ID
+# after all jobs have finished:
+gmri decompose collect decomposition.yaml
+```
+
+- **Help:** `gmri --help` and `gmri <command> [<action>] --help` describe every argument.
+- **Errors:** unknown config keys are errors, and every error names the file and field.
 - **Provenance:** each stage copies its config next to its outputs.
-- **Manifest:** the preprocessing manifest is a CSV with one row per scan: `subject, time_point, baseline_path, post_injection_path, mask_path, segmentation_path`.
-- **`fit.options`:** passed verbatim to the decomposition runner, e.g. `solver: matcouply` or `non_negative: false`.
 
 The sections below show the same steps through the Python API.
 

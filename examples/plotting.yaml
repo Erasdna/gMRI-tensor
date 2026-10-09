@@ -1,4 +1,5 @@
 # gmri plot examples/plotting.yaml
+# Template; every option: docs/configuration.md
 roi_statistics: results/data/roi_statistics.parquet
 subject_info: subjects.csv          # `subjects` column + group_variable
 group_variable: diagnosis

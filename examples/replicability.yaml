@@ -1,4 +1,5 @@
-# gmri replicability examples/replicability.yaml
+# gmri replicability run examples/replicability.yaml
+# Template; every option: docs/configuration.md
 input: results/data/tracer.parquet
 subject_info: subjects.csv   # only needed with stratify_by
 output_dir: results/replicability/parafac2_halfhalf
@@ -19,3 +20,6 @@ splits: 5                    # cv only
 stratify_by: diagnosis       # optional subject_info column
 n_procs: 4
 seed: 0
+distributed:                 # for `plan` / `run --job N` / `collect`
+  store: restarts            # per-restart results, relative to output_dir
+  tasks_per_job: 4

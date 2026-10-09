@@ -3,10 +3,14 @@
 `run_preprocessing` reads images; every other stage reads only files a
 previous stage wrote, so each can be run (and rerun) on its own.
 """
+import math
 import shutil
+from collections.abc import Hashable
 from collections.abc import Sequence
+from itertools import groupby
 from pathlib import Path
 from typing import Any
+from typing import Literal
 from typing import NamedTuple
 
 import matplotlib
@@ -15,10 +19,12 @@ import pandas as pd
 import torch
 from gMRItensor.config import ConfigError
 from gMRItensor.config import DecompositionConfig
+from gMRItensor.config import FitConfig
 from gMRItensor.config import PlottingConfig
 from gMRItensor.config import PreprocessingConfig
 from gMRItensor.config import ReplicabilityConfig
 from gMRItensor.config import TensorConfig
+from gMRItensor.decomposition import PARAFAC2Model
 from gMRItensor.decomposition import run_CP_decomposition_repeated
 from gMRItensor.decomposition import run_PARAFAC2_decomposition_repeated
 from gMRItensor.decomposition import setup_backend
@@ -26,6 +32,13 @@ from gMRItensor.group_statistics import compare_roi_groups
 from gMRItensor.group_statistics import load_roi_statistics
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import summarize_roi_statistics
+from gMRItensor.jobs import collect
+from gMRItensor.jobs import DirectoryStore
+from gMRItensor.jobs import FitTask
+from gMRItensor.jobs import GroupSummary
+from gMRItensor.jobs import plan_replicability
+from gMRItensor.jobs import plan_restarts
+from gMRItensor.jobs import run_tasks
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
 from gMRItensor.plotting.roi_evolution import figure_path
@@ -346,25 +359,101 @@ def _numpy(value: Any) -> np.ndarray:
     return np.asarray(value)
 
 
-def run_decomposition(config: DecompositionConfig) -> list[Path]:
-    """`gmri decompose`: one fit per rank -> `rank_<r>.h5` and `fits.csv`.
+def _method(method: str) -> Literal["CP", "PARAFAC2"]:
+    return "CP" if method == "cp" else "PARAFAC2"
 
-    Returns the written model paths, in `ranks` order.
-    """
-    data = load_decomposition_input(config.input, config.method, config.tensor)
-    device = setup_backend()
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    fit = config.fit
-    fit_kwargs = {
+
+def _fit_options(fit: FitConfig) -> dict[str, Any]:
+    """`run_*_decomposition_repeated` options from `fit` (also what
+    `jobs.run_tasks`/`jobs.collect` take; restart-loop ones are ignored there)."""
+    return {
         "init_repeats": fit.restarts,
         "max_iter": fit.max_iter,
         "tolerance": fit.tolerance,
-        "restart_procs": fit.restart_procs,
-        "device": device,
-        "progress_bar": False,
+        "progress_bar": False,  # quiet batch logs unless fit.options asks
         **fit.options,
     }
-    common = {
+
+
+# One distributed task: the rank it belongs to and its (group, seed) fit.
+_RankTask = tuple[int, FitTask]
+
+
+def _n_jobs(plan: Sequence[_RankTask], tasks_per_job: int) -> int:
+    return math.ceil(len(plan) / tasks_per_job)
+
+
+def _job_tasks(
+    plan: Sequence[_RankTask],
+    job: int,
+    tasks_per_job: int,
+) -> list[_RankTask]:
+    total = _n_jobs(plan, tasks_per_job)
+    if not 0 <= job < total:
+        raise ValueError(f"job {job} is out of range: the plan has {total} jobs")
+    start = job * tasks_per_job
+    stop = start + tasks_per_job
+    return list(plan[start:stop])
+
+
+def _run_job_tasks(
+    tasks: Sequence[_RankTask],
+    data: DecompositionInput,
+    method: str,
+    store_dir: Path,
+    n_procs: int,
+    options: dict[str, Any],
+) -> None:
+    """Fit `tasks` rank by rank into `<store_dir>/rank_<r>/`."""
+    options = dict(options)
+    progress_bar = bool(options.pop("progress_bar", False))
+    setup_backend()
+    for rank, rank_tasks in groupby(tasks, key=lambda item: item[0]):
+        run_tasks(
+            [task for _, task in rank_tasks],
+            data.data,
+            rank,
+            _method(method),
+            DirectoryStore(store_dir / f"rank_{rank}"),
+            n_procs=n_procs,
+            progress_bar=progress_bar,
+            **options,
+        )
+
+
+def _collect_rank(
+    plan: Sequence[FitTask],
+    store_dir: Path,
+    rank: int,
+    method: str,
+    options: dict[str, Any],
+) -> dict[Hashable, GroupSummary]:
+    """Gather one rank's restarts; refuse if any restart has no result yet."""
+    summaries = collect(
+        plan,
+        DirectoryStore(store_dir / f"rank_{rank}"),
+        method=_method(method),
+        **options,
+    )
+    missing = sum(len(summary.missing) for summary in summaries.values())
+    if missing:
+        raise ValueError(
+            f"rank {rank}: {missing} of {len(plan)} restarts missing from "
+            f"{store_dir}; run every `run --job` first",
+        )
+    return summaries
+
+
+def _saved_decomposition(
+    method: str,
+    rank: int,
+    model: PARAFAC2Model | tuple[Any, list[Any]],
+    error: float,
+    data: DecompositionInput,
+) -> SavedDecomposition:
+    common: dict[str, Any] = {
+        "rank": rank,
+        "error": float(error),
         "subjects": data.subjects,
         "timepoints": data.timepoints,
         "labels": data.labels,
@@ -372,53 +461,131 @@ def run_decomposition(config: DecompositionConfig) -> list[Path]:
         "scale_mean": data.scale_mean,
         "scale_std": data.scale_std,
     }
+    if isinstance(model, PARAFAC2Model):
+        return SavedDecomposition(
+            method="parafac2",
+            weights=_numpy(model.weights),
+            subject_mode=_numpy(model.subject_mode),
+            label_mode=_numpy(model.label_mode),
+            evolving_states=[_numpy(state) for state in model.evolving_states],
+            **common,
+        )
+    weights, factors = model
+    subject_mode, time_mode, label_mode = (_numpy(f) for f in factors)
+    return SavedDecomposition(
+        method="cp",
+        weights=_numpy(weights),
+        subject_mode=subject_mode,
+        label_mode=label_mode,
+        time_mode=time_mode,
+        **common,
+    )
 
-    written, errors = [], []
+
+def _write_decompositions(
+    config: DecompositionConfig,
+    fits: list[SavedDecomposition],
+) -> list[Path]:
+    """`rank_<r>.h5` per fit, `fits.csv` and the config copy."""
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    written = []
+    for saved in fits:
+        path = config.output_dir / f"rank_{saved.rank}.h5"
+        save_decomposition(path, saved)
+        written.append(path)
+    pd.DataFrame(
+        {"rank": [saved.rank for saved in fits], "error": [s.error for s in fits]},
+    ).to_csv(config.output_dir / "fits.csv", index=False)
+    copy_config(config.source, config.output_dir, "decomposition")
+    return written
+
+
+def run_decomposition(config: DecompositionConfig) -> list[Path]:
+    """`gmri decompose run`: one fit per rank, in this process.
+
+    Writes `rank_<r>.h5`, `fits.csv` and `decomposition.yaml`; returns the
+    model paths in `ranks` order.
+    """
+    data = load_decomposition_input(config.input, config.method, config.tensor)
+    device = setup_backend()
+    options = {
+        "restart_procs": config.fit.restart_procs,
+        "device": device,
+        **_fit_options(config.fit),
+    }
+    fits = []
     for rank in config.ranks:
         if config.method == "cp":
             weights, factors, error = run_CP_decomposition_repeated(
                 data.data,
                 rank,
-                **fit_kwargs,
+                **options,
             )
-            subject_mode, time_mode, label_mode = (_numpy(f) for f in factors)
-            saved = SavedDecomposition(
-                method="cp",
-                rank=rank,
-                error=float(error),
-                weights=_numpy(weights),
-                subject_mode=subject_mode,
-                label_mode=label_mode,
-                time_mode=time_mode,
-                **common,
-            )
+            model: PARAFAC2Model | tuple[Any, list[Any]] = (weights, factors)
         else:
             model, error = run_PARAFAC2_decomposition_repeated(
                 data.data,
                 rank,
-                **fit_kwargs,
+                **options,
             )
-            saved = SavedDecomposition(
-                method="parafac2",
-                rank=rank,
-                error=float(error),
-                weights=_numpy(model.weights),
-                subject_mode=_numpy(model.subject_mode),
-                label_mode=_numpy(model.label_mode),
-                evolving_states=[_numpy(state) for state in model.evolving_states],
-                **common,
-            )
-        path = config.output_dir / f"rank_{rank}.h5"
-        save_decomposition(path, saved)
-        written.append(path)
-        errors.append(saved.error)
+        fits.append(_saved_decomposition(config.method, rank, model, error, data))
+    return _write_decompositions(config, fits)
 
-    pd.DataFrame({"rank": config.ranks, "error": errors}).to_csv(
-        config.output_dir / "fits.csv",
-        index=False,
+
+def _decomposition_plan(
+    config: DecompositionConfig,
+    n_subjects: int,
+) -> list[_RankTask]:
+    return [
+        (rank, task)
+        for rank in config.ranks
+        for task in plan_restarts(n_subjects, config.fit.restarts)
+    ]
+
+
+def plan_decomposition(config: DecompositionConfig) -> int:
+    """`gmri decompose plan`: number of `run --job` jobs to submit."""
+    data = load_decomposition_input(config.input, config.method, config.tensor)
+    plan = _decomposition_plan(config, len(data.subjects))
+    return _n_jobs(plan, config.distributed.tasks_per_job)
+
+
+def run_decomposition_job(config: DecompositionConfig, job: int) -> int:
+    """`gmri decompose run --job N`: fit job `N`'s restarts into the store.
+
+    Restarts already in the store are skipped, so a re-queued job resumes.
+    Returns the number of tasks in the job.
+    """
+    data = load_decomposition_input(config.input, config.method, config.tensor)
+    plan = _decomposition_plan(config, len(data.subjects))
+    tasks = _job_tasks(plan, job, config.distributed.tasks_per_job)
+    _run_job_tasks(
+        tasks,
+        data,
+        config.method,
+        config.store_dir,
+        config.fit.restart_procs,
+        _fit_options(config.fit),
     )
-    copy_config(config.source, config.output_dir, "decomposition")
-    return written
+    return len(tasks)
+
+
+def collect_decomposition(config: DecompositionConfig) -> list[Path]:
+    """`gmri decompose collect`: best restart per rank -> the same files as
+    `run_decomposition`."""
+    data = load_decomposition_input(config.input, config.method, config.tensor)
+    options = _fit_options(config.fit)
+    fits = []
+    for rank in config.ranks:
+        plan = plan_restarts(len(data.subjects), config.fit.restarts)
+        summary = _collect_rank(plan, config.store_dir, rank, config.method, options)
+        best = summary["full"].best
+        if best is None or best.model is None or best.error is None:
+            raise ValueError(f"rank {rank}: no restart converged")
+        fits.append(
+            _saved_decomposition(config.method, rank, best.model, best.error, data),
+        )
+    return _write_decompositions(config, fits)
 
 
 def _stratification(
@@ -437,15 +604,55 @@ def _stratification(
 def _engine(config: ReplicabilityConfig) -> ReplicabilityEngine:
     if config.engine == "cv":
         return CrossValidationEngine(
-            splits=int(config.splits or 2),
+            splits=int(config.splits or 3),
             repeats=config.repeats,
             seed=config.seed,
         )
     return HalfHalfEngine(repeats=config.repeats, seed=config.seed)
 
 
+def _score_rows(
+    config: ReplicabilityConfig,
+    rank: int,
+    scores: Sequence[tuple[Any, ...]],
+) -> list[dict[str, Any]]:
+    rows = []
+    for score in scores:
+        if config.engine == "cv":
+            common, fold_i, fold_j, fms = score
+            rows.append(
+                {
+                    "rank": rank,
+                    "fold_i": fold_i,
+                    "fold_j": fold_j,
+                    "n_common": len(common),
+                    "fms": float(fms),
+                },
+            )
+        else:
+            split, fms = score
+            rows.append({"rank": rank, "split": split, "fms": float(fms)})
+    return rows
+
+
+def _write_replicability(
+    config: ReplicabilityConfig,
+    rows: list[dict[str, Any]],
+) -> Path:
+    columns = (
+        ["rank", "fold_i", "fold_j", "n_common", "fms"]
+        if config.engine == "cv"
+        else ["rank", "split", "fms"]
+    )
+    config.output_dir.mkdir(parents=True, exist_ok=True)
+    path = config.output_dir / "replicability.csv"
+    pd.DataFrame(rows, columns=columns).to_csv(path, index=False)
+    copy_config(config.source, config.output_dir, "replicability")
+    return path
+
+
 def run_replicability(config: ReplicabilityConfig) -> Path:
-    """`gmri replicability`: factor match scores per rank -> `replicability.csv`.
+    """`gmri replicability run`: factor match scores per rank, in this process.
 
     The (optionally scaled) tensor is split by the engine; each rank gets a
     fresh engine with `seed`, so ranks see the same splits.
@@ -453,49 +660,74 @@ def run_replicability(config: ReplicabilityConfig) -> Path:
     data = load_decomposition_input(config.input, config.method, config.tensor)
     stratification = _stratification(config, data.subjects)
     setup_backend()
-    config.output_dir.mkdir(parents=True, exist_ok=True)
-    fit = config.fit
-    fit_kwargs = {
-        "init_repeats": fit.restarts,
-        "max_iter": fit.max_iter,
-        "tolerance": fit.tolerance,
-        "progress_bar": False,
-        **fit.options,
-    }
-
     rows = []
     for rank in config.ranks:
         scores = evaluate_replicability_multiproc(
             _engine(config),
             data.data,
             rank,
-            method="CP" if config.method == "cp" else "PARAFAC2",
+            method=_method(config.method),
             stratification=stratification,
             n_procs=config.n_procs,
-            **fit_kwargs,
+            **_fit_options(config.fit),
         )
-        for score in scores:
-            if config.engine == "cv":
-                common, fold_i, fold_j, fms = score
-                rows.append(
-                    {
-                        "rank": rank,
-                        "fold_i": fold_i,
-                        "fold_j": fold_j,
-                        "n_common": len(common),
-                        "fms": float(fms),
-                    },
-                )
-            else:
-                split, fms = score
-                rows.append({"rank": rank, "split": split, "fms": float(fms)})
+        rows.extend(_score_rows(config, rank, scores))
+    return _write_replicability(config, rows)
 
-    columns = (
-        ["rank", "fold_i", "fold_j", "n_common", "fms"]
-        if config.engine == "cv"
-        else ["rank", "split", "fms"]
+
+def _replicability_plans(
+    config: ReplicabilityConfig,
+    data: DecompositionInput,
+) -> dict[int, list[FitTask]]:
+    stratification = _stratification(config, data.subjects)
+    return {
+        rank: plan_replicability(
+            _engine(config),
+            len(data.subjects),
+            config.fit.restarts,
+            stratification,
+        )
+        for rank in config.ranks
+    }
+
+
+def _flatten(plans: dict[int, list[FitTask]]) -> list[_RankTask]:
+    return [(rank, task) for rank, plan in plans.items() for task in plan]
+
+
+def plan_replicability_jobs(config: ReplicabilityConfig) -> int:
+    """`gmri replicability plan`: number of `run --job` jobs to submit."""
+    data = load_decomposition_input(config.input, config.method, config.tensor)
+    plan = _flatten(_replicability_plans(config, data))
+    return _n_jobs(plan, config.distributed.tasks_per_job)
+
+
+def run_replicability_job(config: ReplicabilityConfig, job: int) -> int:
+    """`gmri replicability run --job N`: fit job `N`'s split/fold restarts.
+
+    Returns the number of tasks in the job.
+    """
+    data = load_decomposition_input(config.input, config.method, config.tensor)
+    plan = _flatten(_replicability_plans(config, data))
+    tasks = _job_tasks(plan, job, config.distributed.tasks_per_job)
+    _run_job_tasks(
+        tasks,
+        data,
+        config.method,
+        config.store_dir,
+        config.n_procs,
+        _fit_options(config.fit),
     )
-    path = config.output_dir / "replicability.csv"
-    pd.DataFrame(rows, columns=columns).to_csv(path, index=False)
-    copy_config(config.source, config.output_dir, "replicability")
-    return path
+    return len(tasks)
+
+
+def collect_replicability(config: ReplicabilityConfig) -> Path:
+    """`gmri replicability collect`: score the gathered fits ->
+    `replicability.csv`, as `run_replicability` writes it."""
+    data = load_decomposition_input(config.input, config.method, config.tensor)
+    options = _fit_options(config.fit)
+    rows = []
+    for rank, plan in _replicability_plans(config, data).items():
+        summaries = _collect_rank(plan, config.store_dir, rank, config.method, options)
+        rows.extend(_score_rows(config, rank, _engine(config).compute_fms(summaries)))
+    return _write_replicability(config, rows)

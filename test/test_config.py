@@ -262,3 +262,56 @@ def test_cv_needs_three_splits(tmp_path: Path) -> None:
 
     with pytest.raises(ConfigError, match="splits"):
         load_replicability_config(path)
+
+
+@pytest.mark.parametrize(
+    "make, loader",
+    [
+        (_decomposition, load_decomposition_config),
+        (_replicability, load_replicability_config),
+    ],
+)
+def test_distributed_block(tmp_path: Path, make: Callable, loader: Callable) -> None:
+    default = loader(_write_config(tmp_path, "a", make()))
+    custom = loader(
+        _write_config(
+            tmp_path,
+            "b",
+            make(distributed={"store": "shards", "tasks_per_job": 4}),
+        ),
+    )
+
+    assert default.store_dir == default.output_dir / "restarts"
+    assert default.distributed.tasks_per_job == 1
+    assert custom.store_dir == custom.output_dir / "shards"
+    assert custom.distributed.tasks_per_job == 4
+    with pytest.raises(ConfigError, match=r"distributed\.tasks_per_job"):
+        loader(_write_config(tmp_path, "c", make(distributed={"tasks_per_job": 0})))
+
+
+def test_configuration_docs_cover_every_key() -> None:
+    import dataclasses
+
+    from gMRItensor import config as configs
+
+    docs = (
+        Path(__file__).resolve().parents[1] / "docs" / "configuration.md"
+    ).read_text()
+    classes = [
+        configs.PreprocessingConfig,
+        configs.RegionsConfig,
+        configs.PlottingConfig,
+        configs.FigureSpec,
+        configs.GridSpec,
+        configs.DecompositionConfig,
+        configs.ReplicabilityConfig,
+        configs.TensorConfig,
+        configs.FitConfig,
+        configs.DistributedConfig,
+    ]
+    keys = {f.name for cls in classes for f in dataclasses.fields(cls)} - {"source"}
+
+    undocumented = sorted(
+        key for key in keys if f"`{key}`" not in docs and f"`regions.{key}`" not in docs
+    )
+    assert undocumented == []

@@ -18,12 +18,18 @@ from gMRItensor.config import PlottingConfig
 from gMRItensor.config import PreprocessingConfig
 from gMRItensor.config import ReplicabilityConfig
 from gMRItensor.model_io import load_decomposition
+from gMRItensor.pipeline import collect_decomposition
+from gMRItensor.pipeline import collect_replicability
 from gMRItensor.pipeline import grid_pages
+from gMRItensor.pipeline import plan_decomposition
+from gMRItensor.pipeline import plan_replicability_jobs
 from gMRItensor.pipeline import read_manifest
 from gMRItensor.pipeline import run_decomposition
+from gMRItensor.pipeline import run_decomposition_job
 from gMRItensor.pipeline import run_plotting
 from gMRItensor.pipeline import run_preprocessing
 from gMRItensor.pipeline import run_replicability
+from gMRItensor.pipeline import run_replicability_job
 
 
 def write_yaml(path: Path, data: dict[str, Any]) -> Path:
@@ -366,3 +372,96 @@ def test_run_plotting_keeps_numeric_label_rois_as_strings(
     ((summary, significance),) = seen
     assert set(summary["roi"]) == {"4"}
     assert set(significance["roi"]) == {"4"}
+
+
+def test_distributed_decomposition_matches_centralised(synthetic_study: Any) -> None:
+    run_preprocessing(preprocessing_config(synthetic_study))
+    central = decomposition_config(synthetic_study)
+    run_decomposition(central)
+    distributed = decomposition_config(
+        synthetic_study,
+        output_dir="results/decompositions/distributed",
+        distributed={"tasks_per_job": 3},
+    )
+
+    n_jobs = plan_decomposition(distributed)
+    assert n_jobs == 2  # 2 ranks x 2 restarts in blocks of 3
+    for job in range(n_jobs):
+        run_decomposition_job(distributed, job)
+    written = collect_decomposition(distributed)
+
+    assert [path.name for path in written] == ["rank_1.h5", "rank_2.h5"]
+    pd.testing.assert_frame_equal(
+        pd.read_csv(distributed.output_dir / "fits.csv"),
+        pd.read_csv(central.output_dir / "fits.csv"),
+    )
+    for name in ("rank_1.h5", "rank_2.h5"):
+        got = load_decomposition(distributed.output_dir / name)
+        expected = load_decomposition(central.output_dir / name)
+        np.testing.assert_allclose(got.label_mode, expected.label_mode, rtol=1e-5)
+        np.testing.assert_allclose(got.subject_mode, expected.subject_mode, rtol=1e-5)
+    assert (distributed.store_dir / "rank_1").is_dir()
+
+
+def test_collect_decomposition_reports_missing_restarts(synthetic_study: Any) -> None:
+    run_preprocessing(preprocessing_config(synthetic_study))
+    config = decomposition_config(synthetic_study, distributed={"tasks_per_job": 3})
+
+    run_decomposition_job(config, 0)
+
+    with pytest.raises(ValueError, match="1 of 2 restarts missing"):
+        collect_decomposition(config)
+    assert not (config.output_dir / "fits.csv").exists()
+
+
+def test_run_decomposition_job_out_of_range(synthetic_study: Any) -> None:
+    run_preprocessing(preprocessing_config(synthetic_study))
+    config = decomposition_config(synthetic_study)
+
+    with pytest.raises(ValueError, match="job 4 .* 4 jobs"):
+        run_decomposition_job(config, 4)
+
+
+def test_distributed_replicability_matches_centralised(synthetic_study: Any) -> None:
+    run_preprocessing(preprocessing_config(synthetic_study))
+    central = replicability_config(synthetic_study)
+    expected = pd.read_csv(run_replicability(central))
+    distributed = replicability_config(
+        synthetic_study,
+        output_dir="results/replicability/distributed",
+        distributed={"tasks_per_job": 2},
+    )
+
+    n_jobs = plan_replicability_jobs(distributed)
+    assert n_jobs == 4  # 1 rank x 2 repeats x 2 halves x 2 restarts, blocks of 2
+    for job in range(n_jobs):
+        run_replicability_job(distributed, job)
+    got = pd.read_csv(collect_replicability(distributed))
+
+    pd.testing.assert_frame_equal(got, expected, rtol=1e-5)
+
+
+def test_progress_bar_option_is_passed_through(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # `fit.options: {progress_bar: true}` must reach the fits, not clash with
+    # the stages' own quiet default.
+    run_preprocessing(preprocessing_config(synthetic_study))
+    seen = []
+    original: Any = pipeline.run_tasks
+
+    def spy(*args: Any, progress_bar: bool = True, **kwargs: Any) -> None:
+        seen.append(progress_bar)
+        original(*args, progress_bar=progress_bar, **kwargs)
+
+    monkeypatch.setattr(pipeline, "run_tasks", spy)
+    fit = {"restarts": 1, "max_iter": 20, "options": {"progress_bar": True}}
+    replicability = replicability_config(synthetic_study, fit=fit, repeats=1)
+    decomposition = decomposition_config(synthetic_study, fit=fit, ranks=[1])
+
+    run_replicability(replicability)
+    run_replicability_job(replicability, 0)
+    run_decomposition_job(decomposition, 0)
+
+    assert seen == [True, True]

@@ -1,4 +1,5 @@
-# gmri decompose examples/decomposition.yaml
+# gmri decompose run examples/decomposition.yaml
+# Template; every option: docs/configuration.md
 input: results/data/tracer.parquet
 output_dir: results/decompositions/parafac2_roi
 method: parafac2             # cp | parafac2
@@ -14,3 +15,6 @@ fit:
   restart_procs: 1
   options:                   # forwarded to run_PARAFAC2_decomposition_repeated
     solver: tensorly
+distributed:                 # for `plan` / `run --job N` / `collect`
+  store: restarts            # per-restart results, relative to output_dir
+  tasks_per_job: 4
