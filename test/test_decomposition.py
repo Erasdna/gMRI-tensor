@@ -1,14 +1,19 @@
 import dataclasses
+import inspect
 import os
 import warnings
 
 import numpy as np
 import pytest
+import tensorly as tl
 import torch
+from gMRItensor import CMFModel
+from gMRItensor import compute_CMF_decomposition
 from gMRItensor import compute_CP_decomposition
 from gMRItensor import compute_PARAFAC2_decomposition
 from gMRItensor import PARAFAC2Diagnostics
 from gMRItensor import PARAFAC2Model
+from gMRItensor import run_CMF_decomposition_repeated
 from gMRItensor import run_CP_decomposition_repeated
 from gMRItensor import run_PARAFAC2_decomposition_repeated
 from gMRItensor import setup_backend
@@ -22,6 +27,8 @@ from gMRItensor.decomposition import _zero_negligible_loadings
 from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.plotting.evolving_mode import evolving_factors_to_numpy
 from gMRItensor.plotting.utils import scale_mode
+from matcouply.decomposition import cmf_aoadmm
+from matcouply.decomposition import parafac2_aoadmm
 
 SOLVERS = ["tensorly", "matcouply"]
 
@@ -739,6 +746,85 @@ def make_parafac2_shifted_gaussians(device, n_subjects=12, n_labels=20, rank=3):
     ]
 
 
+def _library_tol(function):
+    return inspect.signature(function).parameters["tol"].default
+
+
+def test_tolerances_default_to_the_solvers_own(monkeypatch):
+    # Every method defaults to its library's own `tol` instead of a value
+    # hard-coded here; None means "the solver's default".
+    for function in (
+        run_CP_decomposition_repeated,
+        run_PARAFAC2_decomposition_repeated,
+    ):
+        assert inspect.signature(function).parameters["tolerance"].default is None
+    parameters = inspect.signature(run_PARAFAC2_decomposition_repeated).parameters
+    assert parameters["aoadmm_loss_tolerance"].default is None
+
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    slices = make_parafac2_slices(device)
+    *_, tensorly_diagnostics = compute_PARAFAC2_decomposition(
+        slices,
+        2,
+        PARAFAC2_max_iter=5000,
+    )
+    assert tensorly_diagnostics.reconstruction_tolerance == _library_tol(
+        tl.decomposition.parafac2,
+    )
+    *_, matcouply_diagnostics = compute_PARAFAC2_decomposition(
+        slices,
+        2,
+        PARAFAC2_max_iter=5000,
+        solver="matcouply",
+    )
+    assert matcouply_diagnostics.loss_tolerance == _library_tol(parafac2_aoadmm)
+    # No extra reconstruction gate unless a tolerance is asked for.
+    assert matcouply_diagnostics.reconstruction_tolerance is None
+    assert matcouply_diagnostics.loss_converged is True
+
+    seen = {}
+
+    def spy(tensor, **kwargs):
+        seen[kwargs["normalize_factors"]] = kwargs["tol"]
+        raise ConvergenceError("stop")
+
+    from gMRItensor import decomposition
+
+    tensor = make_low_rank_tensor()
+    for non_negative, library in [
+        (True, tl.decomposition.non_negative_parafac),
+        (False, tl.decomposition.parafac),
+    ]:
+        name = "non_negative_parafac_compiled" if non_negative else "parafac_compiled"
+        monkeypatch.setattr(decomposition, name, spy)
+        with pytest.raises(ConvergenceError):
+            compute_CP_decomposition(tensor, 2, non_negative=non_negative)
+        assert seen.pop(False) == _library_tol(library)
+
+
+def test_PARAFAC2_matcouply_keeps_iteration_limit_fits_without_tolerance():
+    # Like matcouply itself, a fit that runs out of iterations before its own
+    # criterion is met is returned rather than rejected -- and said so.
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    slices = make_parafac2_shifted_gaussians(device)
+
+    with pytest.warns(UserWarning, match="stopped at the iteration limit"):
+        *_, diagnostics = run_PARAFAC2_decomposition_repeated(
+            slices,
+            rank=3,
+            max_iter=2000,
+            init_repeats=1,
+            device=device,
+            progress_bar=False,
+            solver="matcouply",
+            return_diagnostics=True,
+        )
+    assert diagnostics.reached_max_iter and diagnostics.loss_converged is False
+    assert diagnostics.reconstruction_tolerance is None
+
+
 def test_PARAFAC2_matcouply_rejects_underconverged():
     # The acceptance gate: AO-ADMM stopping on its own penalized objective is
     # not enough -- if the reconstruction error is still moving, the fit is
@@ -756,6 +842,7 @@ def test_PARAFAC2_matcouply_rejects_underconverged():
             device=device,
             progress_bar=False,
             solver="matcouply",
+            tolerance=1e-5,
         )
     # The numbers saying what to change live on the chained cause.
     cause = excinfo.value.__cause__
@@ -783,6 +870,7 @@ def test_PARAFAC2_matcouply_accepts_at_iteration_limit():
             device=device,
             progress_bar=False,
             solver="matcouply",
+            tolerance=1e-5,
             return_diagnostics=True,
         )
     assert diagnostics.reached_max_iter
@@ -810,6 +898,7 @@ def test_PARAFAC2_matcouply_advises_raising_max_iter():
             device=device,
             progress_bar=False,
             solver="matcouply",
+            tolerance=1e-5,
         )
     assert "rejected" in str(excinfo.value)
     assert excinfo.value.__cause__.suggested_max_iter > 150
@@ -922,6 +1011,7 @@ def fit_both_solvers(device, **overrides):
         rank=2,
         max_iter=500,
         init_repeats=2,
+        tolerance=1e-5,  # the same gate for both, so the fields compare
         device=device,
         progress_bar=False,
         return_diagnostics=True,
@@ -1162,6 +1252,7 @@ def test_PARAFAC2_matcouply_subject_mode_exactly_non_negative():
         device=device,
         progress_bar=False,
         solver="matcouply",
+        tolerance=1e-5,
     )
     assert model.subject_mode.min() >= 0.0
     assert model.label_mode.min() >= 0.0
@@ -1184,6 +1275,7 @@ def test_PARAFAC2_matcouply_amplitude_scaled_profiles_keep_sign():
         device=device,
         progress_bar=False,
         solver="matcouply",
+        tolerance=1e-5,
     )
     evolving = evolving_factors_to_numpy(model.evolving_states)
     amplitude_scaled = np.stack(evolving) * model.subject_mode.numpy()[:, None, :]
@@ -1212,6 +1304,7 @@ def test_PARAFAC2_partial_nn_modes():
         device=device,
         progress_bar=False,
         solver="matcouply",
+        tolerance=1e-5,
         nn_modes=(0,),
     )
     assert model.subject_mode.min() >= -1e-6
@@ -1311,6 +1404,7 @@ def test_PARAFAC2_negligible_loadings_become_exactly_zero():
         device=device,
         progress_bar=False,
         solver="matcouply",
+        tolerance=1e-5,
     )
     # No residue of either sign survives in a constrained mode.
     assert model.subject_mode.min() >= 0.0
@@ -1319,3 +1413,146 @@ def test_PARAFAC2_negligible_loadings_become_exactly_zero():
     if nonzero.numel():
         scale = model.subject_mode.abs().max()
         assert (nonzero.abs() > 1e-6 * scale).all()
+
+
+# ---------------------------------------------------------------------------
+# Non-negative coupled matrix factorization (CMF)
+# ---------------------------------------------------------------------------
+
+
+def make_cmf_slices(device, n_subjects=6, n_labels=8, rank=2, seed=0):
+    """A planted non-negative CMF: subject-specific time courses `B_i`, with
+    different shapes per subject, and one shared label mode `C`."""
+    rng = np.random.default_rng(seed)
+    labels = rng.random((n_labels, rank))
+    return [
+        torch.from_numpy(rng.random((4 + i % 3, rank)) @ labels.T).float().to(device)
+        for i in range(n_subjects)
+    ]
+
+
+def test_CMF_shape_contract():
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    slices = make_cmf_slices(device)
+
+    model, errors, diagnostics = compute_CMF_decomposition(
+        slices,
+        2,
+        CMF_max_iter=5000,
+    )
+
+    assert isinstance(model, CMFModel)
+    assert torch.equal(model.weights, torch.ones(2, dtype=model.weights.dtype))
+    assert tuple(model.label_mode.shape) == (8, 2)
+    assert [tuple(B.shape) for B in model.evolving_states] == [
+        (s.shape[0], 2) for s in slices
+    ]
+    # The subject mode is each subject's amplitude, derived from B_i.
+    expected = torch.stack([B.pow(2).mean(dim=0).sqrt() for B in model.evolving_states])
+    torch.testing.assert_close(model.subject_mode, expected)
+    for factor in [model.label_mode, *model.evolving_states]:
+        assert (factor >= 0).all()
+    assert float(errors[-1]) < 0.05  # recovers the planted model
+    # ... with the factors returned: A really stayed at ones.
+    for X, B in zip(slices, model.evolving_states):
+        residual = X.double() - B @ model.label_mode.T
+        assert float(torch.linalg.norm(residual) / torch.linalg.norm(X)) < 0.05
+    assert diagnostics.solver == "matcouply"
+    assert diagnostics.nn_modes == (1, 2)
+    assert diagnostics.loss_tolerance == _library_tol(cmf_aoadmm)
+
+
+def test_CMF_normalize_moves_the_scale_into_the_time_courses():
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    slices = make_cmf_slices(device)
+
+    plain, *_ = compute_CMF_decomposition(slices, 2, CMF_max_iter=5000)
+    normalized, *_ = compute_CMF_decomposition(
+        slices,
+        2,
+        CMF_max_iter=5000,
+        normalize_factors=True,
+    )
+
+    torch.testing.assert_close(
+        torch.linalg.norm(normalized.label_mode, dim=0),
+        torch.ones(2, dtype=normalized.label_mode.dtype),
+    )
+    for B_plain, B_normalized in zip(plain.evolving_states, normalized.evolving_states):
+        torch.testing.assert_close(
+            B_normalized @ normalized.label_mode.T,
+            B_plain @ plain.label_mode.T,
+            rtol=1e-4,
+            atol=1e-5,
+        )
+
+
+@pytest.mark.parametrize("key", ["parafac2", "update_A", "tol", "non_negative"])
+def test_CMF_rejects_managed_options(key):
+    slices = make_cmf_slices(torch.device("cpu"))
+    with pytest.raises(ValueError, match="managed by compute_CMF_decomposition"):
+        compute_CMF_decomposition(slices, 2, aoadmm_options={key: True})
+
+
+def test_CMF_rejects_nan_and_unconverged_fits():
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    slices = make_cmf_slices(device)
+
+    with pytest.raises(ValueError, match="NaN"):
+        compute_CMF_decomposition(
+            [slices[0] * float("nan"), *slices[1:]],
+            2,
+        )
+    with pytest.raises(ConvergenceError) as excinfo:
+        compute_CMF_decomposition(slices, 2, CMF_max_iter=2, CMF_tolerance=1e-12)
+    assert excinfo.value.reason in ("reconstruction", "feasibility")
+
+
+def test_CMF_defaults_accept_a_slowly_converging_fit():
+    # Noisy data where matcouply's own 1e-8 criterion needs far more than the
+    # default 2000 iterations: the default run still returns a model, with a
+    # warning rather than "no decomposition converged".
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    rng = np.random.default_rng(1)
+    slices = [
+        s + 0.1 * float(s.std()) * torch.from_numpy(np.abs(rng.normal(size=s.shape)))
+        for s in make_parafac2_shifted_gaussians(device)
+    ]
+
+    with pytest.warns(UserWarning, match="stopped at the iteration limit"):
+        model, error = run_CMF_decomposition_repeated(
+            [s.float() for s in slices],
+            rank=3,
+            init_repeats=1,
+            device=device,
+            progress_bar=False,
+        )
+    assert isinstance(model, CMFModel) and float(error) < 0.2
+
+
+def test_run_CMF_restarts_in_parallel_match_sequential():
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    slices = make_cmf_slices(device)
+    shared = dict(
+        rank=2,
+        max_iter=5000,
+        init_repeats=2,
+        device=device,
+        progress_bar=False,
+    )
+
+    sequential, sequential_error = run_CMF_decomposition_repeated(slices, **shared)
+    parallel, parallel_error = run_CMF_decomposition_repeated(
+        slices,
+        restart_procs=2,
+        **shared,
+    )
+
+    assert isinstance(sequential, CMFModel)
+    torch.testing.assert_close(sequential.label_mode, parallel.label_mode)
+    torch.testing.assert_close(sequential_error, parallel_error)

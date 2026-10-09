@@ -149,9 +149,11 @@ def _add_fit_arguments(parser: argparse.ArgumentParser, required: bool) -> None:
     )
     parser.add_argument(
         "--method",
-        choices=("cp", "parafac2"),
+        choices=("cp", "parafac2", "cmf"),
         required=required,
-        help="CP (shared time mode) or PARAFAC2 (evolving per-subject time mode)",
+        help="CP (shared time mode), PARAFAC2 (evolving per-subject time mode, "
+        "coupled across subjects) or CMF (non-negative coupled matrix "
+        "factorization: free per-subject time courses)",
     )
     parser.add_argument(
         "--ranks",
@@ -204,8 +206,7 @@ def _add_fit_arguments(parser: argparse.ArgumentParser, required: bool) -> None:
     fit.add_argument(
         "--tolerance",
         type=float,
-        default=1e-5,
-        help="convergence tolerance (default: 1e-5)",
+        help="convergence tolerance (default: the solver's own)",
     )
     fit.add_argument(
         "--restart-procs",
@@ -218,12 +219,12 @@ def _add_fit_arguments(parser: argparse.ArgumentParser, required: bool) -> None:
         type=_non_negative_modes,
         default="auto",
         help="auto, none or modes like 0,2 (0 subject, 1 time, 2 label); CP: auto, "
-        "none or 0,1,2 (default: auto)",
+        "none or 0,1,2; CMF auto = 1,2 (default: auto)",
     )
     fit.add_argument(
         "--solver",
         choices=("tensorly", "matcouply"),
-        help="PARAFAC2 solver (default: tensorly)",
+        help="PARAFAC2 solver (default: tensorly); CMF always uses matcouply",
     )
     fit.add_argument(
         "--fit-option",
@@ -476,7 +477,7 @@ def _add_plot(commands: Any) -> None:
     parts.add_argument(
         "--time",
         action="store_true",
-        help="CP time mode or PARAFAC2 evolving mode",
+        help="CP time mode, or PARAFAC2/CMF evolving mode",
     )
     parts.add_argument(
         "--spatial",
@@ -534,7 +535,7 @@ def _parser() -> argparse.ArgumentParser:
     _add_fit_command(
         commands,
         "decompose",
-        "Signal tables -> CP/PARAFAC2 fit per rank",
+        "Signal tables -> CP/PARAFAC2/CMF fit per rank",
         False,
     )
     _add_fit_command(

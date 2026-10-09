@@ -4,6 +4,7 @@ import os
 import numpy as np
 import pytest
 import torch
+from gMRItensor import CMFModel
 from gMRItensor import collect
 from gMRItensor import ConvergenceError
 from gMRItensor import DirectoryStore
@@ -17,6 +18,7 @@ from gMRItensor import PARAFAC2Model
 from gMRItensor import plan_replicability
 from gMRItensor import plan_restarts
 from gMRItensor import RestartResult
+from gMRItensor import run_CMF_decomposition_repeated
 from gMRItensor import run_CP_decomposition_repeated
 from gMRItensor import run_PARAFAC2_decomposition_repeated
 from gMRItensor import run_tasks
@@ -280,6 +282,43 @@ def test_directory_store_round_trip(tmp_path):
     assert not list(tmp_path.rglob("*.tmp"))
 
 
+def test_directory_store_round_trips_a_cmf_model(tmp_path):
+    store = DirectoryStore(tmp_path)
+    task = FitTask("full", (0, 1, 2), 0)
+    model = CMFModel(
+        weights=torch.ones(2),
+        subject_mode=torch.rand(3, 2),
+        evolving_states=[torch.rand(4, 2), torch.rand(5, 2), torch.rand(4, 2)],
+        label_mode=torch.rand(6, 2),
+    )
+    store.save(RestartResult(task, model, 0.2, fake_diagnostics()))
+
+    loaded = store.load(task)
+    assert loaded is not None and isinstance(loaded.model, CMFModel)
+    assert torch.equal(loaded.model.subject_mode, model.subject_mode)
+    assert all(
+        torch.equal(a, b)
+        for a, b in zip(loaded.model.evolving_states, model.evolving_states)
+    )
+
+
+def test_cmf_restarts_match_run_repeated(tmp_path):
+    slices = make_slices(8)
+    store = InMemoryStore()
+    run_tasks(plan_restarts(8, 2), slices, 2, "CMF", store, **FIT_OPTIONS)
+    [summary] = collect(plan_restarts(8, 2), store).values()
+
+    model, error = run_CMF_decomposition_repeated(
+        slices,
+        2,
+        init_repeats=2,
+        **FIT_OPTIONS,
+    )
+    assert isinstance(summary.best.model, CMFModel)
+    torch.testing.assert_close(summary.best.model.label_mode, model.label_mode)
+    assert summary.best.error == pytest.approx(float(error))
+
+
 def test_directory_store_rejects_another_plans_result(tmp_path):
     store = DirectoryStore(tmp_path)
     store.save(RestartResult(FitTask("full", (0, 1), 0), fake_model(1.0), 0.1))
@@ -312,7 +351,11 @@ def test_compute_fms_is_nan_for_a_failed_half():
 
 @pytest.mark.parametrize(
     "method, data",
-    [("PARAFAC2", make_slices(12)), ("CP", make_tensor(12))],
+    [
+        ("PARAFAC2", make_slices(12)),
+        ("CP", make_tensor(12)),
+        ("CMF", make_slices(12)),
+    ],
 )
 @pytest.mark.parametrize(
     "make_engine",

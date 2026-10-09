@@ -1,6 +1,6 @@
 # gMRI-tensor
 
-Tools for tensor (CP / PARAFAC2) decomposition of gadolinium-enhanced MRI (gMRI) data: tracer-signal preprocessing from NIfTI images, decomposition and replicability analysis, and plotting utilities for the resulting subject/spatial/temporal modes.
+Tools for tensor (CP / PARAFAC2) and coupled matrix (CMF) decomposition of gadolinium-enhanced MRI (gMRI) data: tracer-signal preprocessing from NIfTI images, decomposition and replicability analysis, and plotting utilities for the resulting subject/spatial/temporal modes.
 
 [![MIT License](https://img.shields.io/github/license/scientificcomputing/reproducibility)](LICENSE)
 
@@ -14,7 +14,7 @@ uv sync
 
 - `gMRItensor.preprocessing` — compute the tracer signal (ΔR1 in 1/s from T1 or R1 maps, or the T1w ratio) from baseline and post-injection images, write per-label (`roi_signal`) and optionally per-voxel tables (`write_preprocessed_data`), and stream them into decomposition tensors (`load_tensor_from_parquet`).
 - `gMRItensor.pipeline` / `gMRItensor.options` — the `gmri` steps as functions taking validated settings, for use from scripts.
-- `gMRItensor.decomposition` — CP and PARAFAC2 decomposition (`compute_CP_decomposition`, `compute_PARAFAC2_decomposition`), with multi-restart runners (`run_CP_decomposition_repeated`, `run_PARAFAC2_decomposition_repeated`) and a `setup_backend` helper for configuring TensorLy's PyTorch backend.
+- `gMRItensor.decomposition` — CP, PARAFAC2 and non-negative CMF decomposition (`compute_CP_decomposition`, `compute_PARAFAC2_decomposition`, `compute_CMF_decomposition`), with multi-restart runners (`run_CP_decomposition_repeated`, `run_PARAFAC2_decomposition_repeated`, `run_CMF_decomposition_repeated`) and a `setup_backend` helper for configuring TensorLy's PyTorch backend.
 - `gMRItensor.replicability` — split-half and cross-validation engines (`HalfHalfEngine`, `CrossValidationEngine`) for assessing decomposition replicability, plus `evaluate_replicability_multiproc` for running them in parallel.
 - `gMRItensor.jobs` — scatter/gather restarts (`plan_restarts`, `plan_replicability`, `job_slice`, `run_tasks`, `collect`, `DirectoryStore`) for spreading one fit or replicability analysis over many jobs, e.g. a SLURM array, with the same results as the centralised path.
 - `gMRItensor.roi_groups` — FreeSurfer label presets (ventricles, grey/white matter, limbic system, CSF counterparts at `id + 10000`, …), `parse_region` for presets or custom `name=ids` regions, `aggregate_roi_signal` for combining labels into regions and `add_concentration` for ΔR1 → mM.
@@ -89,7 +89,12 @@ slices, subjects, timepoints = data.data, data.subjects, data.timepoints  # torc
 ### Decomposition
 
 ```python
-from gMRItensor import run_CP_decomposition_repeated, run_PARAFAC2_decomposition_repeated, setup_backend
+from gMRItensor import (
+    run_CMF_decomposition_repeated,
+    run_CP_decomposition_repeated,
+    run_PARAFAC2_decomposition_repeated,
+    setup_backend,
+)
 
 device = setup_backend()  # GPU if GMRITENSOR_USE_GPU=TRUE, else CPU with $CPUS_PER_TASK threads
 
@@ -97,14 +102,20 @@ model, error = run_PARAFAC2_decomposition_repeated(slices, rank=3, init_repeats=
 # model.subject_mode: (subjects, rank); model.evolving_states[i]: subject i's (n_timepoints_i, rank) time course;
 # model.label_mode: (labels, rank)
 
+cmf, error = run_CMF_decomposition_repeated(slices, rank=3, init_repeats=50, device=device)
+# The same fields as PARAFAC2, without the PARAFAC2 constraint: cmf.evolving_states[i] is free per subject.
+# The subject weights are fixed at one, so cmf.subject_mode is derived: the RMS of each subject's time course.
+
 tensor = load_decomposition_input(paths.roi_signal, "cp", TensorOptions()).data  # (subjects, time points, labels)
 weights, factors, error = run_CP_decomposition_repeated(tensor, rank=3, device=device)
 ```
 
-- Both runners fit from `init_repeats` random restarts and keep the best accepted fit. `restart_procs` spreads the restarts over processes.
+- All runners fit from `init_repeats` random restarts and keep the best accepted fit. `restart_procs` spreads the restarts over processes.
+- Tolerances default to `None`, which means each library's own default `tol`. A TensorLy restart that runs out of iterations is rejected; a matcouply one is kept, as matcouply returns it, with a warning.
 - PARAFAC2 supports `solver="tensorly"` (default) or `"matcouply"` (AO-ADMM, with constraints passed through `aoadmm_options`). `nn_modes` chooses which modes are non-negative.
 - CP non-negativity is set with `non_negative`, and `allow_nan_imputation=True` fits tensors that contain NaN rows.
-- PARAFAC2 raises a `UserWarning` when most restarts fail for the same reason, naming the setting to change (e.g. `max_iter`).
+- CMF uses matcouply's `cmf_aoadmm` with its own defaults. `nn_modes="auto"` constrains the time and label modes, and `aoadmm_options` passes penalties and solver settings.
+- PARAFAC2 and CMF raise a `UserWarning` when most restarts fail for the same reason, naming the setting to change (e.g. `max_iter`).
 
 ### Replicability
 

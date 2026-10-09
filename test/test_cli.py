@@ -177,6 +177,37 @@ def test_cli_reports_errors_on_one_line(
     assert "--input" in capsys.readouterr().err
 
 
+def test_cli_cmf(synthetic_study: Any) -> None:
+    results = _preprocess(synthetic_study)
+    args = _fit_args(results, "cmf")
+    args[args.index("parafac2")] = "cmf"
+    assert _run(["decompose", "run", *args, "--tolerance", "1e-4"]) == 0
+
+    model = results / "cmf" / "rank_1.h5"
+    plot = [
+        "plot",
+        "decomposition",
+        "--model",
+        model,
+        "--subject-info",
+        synthetic_study.subject_info,
+        "--group-variable",
+        "diagnosis",
+        "--output-dir",
+        results,
+        "--time",
+        "--subject-mode",
+        "--formats",
+        "png",
+        "--dpi",
+        50,
+    ]
+    assert _run(plot) == 0
+    assert (
+        results / "figures" / "decomposition" / "rank_1__evolving_mode.png"
+    ).exists()
+
+
 def test_cli_plot_before_preprocess(
     synthetic_study: Any,
     capsys: pytest.CaptureFixture[str],
@@ -220,7 +251,10 @@ def test_cli_parses_fit_options_and_modes() -> None:
     [
         (["--help"], ["preprocess", "decompose", "replicability", "plot"]),
         (["decompose", "--help"], ["plan", "run", "collect"]),
-        (["decompose", "plan", "--help"], ["--ranks", "--tasks-per-job", "--center"]),
+        (
+            ["decompose", "plan", "--help"],
+            ["--ranks", "--tasks-per-job", "--center", "cmf"],
+        ),
         (["replicability", "run", "--help"], ["--job", "--engine"]),
         (["plot", "--help"], ["statistics", "decomposition"]),
         (["plot", "statistics", "--help"], ["--region", "--rois", "--relaxivity"]),

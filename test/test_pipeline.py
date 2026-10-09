@@ -691,3 +691,78 @@ def test_plot_roi_model_rejects_a_segmentation_in_another_label_space(
         run_decomposition_plots(
             plot_options(synthetic_study, model, segmentation=segmentation),
         )
+
+
+# CMF ------------------------------------------------------------------------
+
+CMF_FIT = FitOptions(restarts=2, max_iter=300, tolerance=1e-4)
+
+
+def test_cmf_end_to_end(synthetic_study: Any) -> None:
+    preprocess(synthetic_study)
+    options = decomposition_options(
+        synthetic_study,
+        method="cmf",
+        ranks=(2,),
+        fit=CMF_FIT,
+    )
+
+    (model,) = run_decomposition(options)
+
+    saved = load_decomposition(model)
+    assert saved.method == "cmf"
+    assert saved.evolving_states is not None and len(saved.evolving_states) == 6
+    assert saved.label_mode.shape == (5, 2)
+    # The subject mode is each subject's B_i amplitude (A is fixed at one).
+    amplitude = np.stack(
+        [np.sqrt((B**2).mean(axis=0)) for B in saved.evolving_states],
+    )
+    np.testing.assert_allclose(saved.subject_mode, amplitude, rtol=1e-5)
+
+    distributed = decomposition_options(
+        synthetic_study,
+        output_dir=synthetic_study.root / "results" / "cmf_distributed",
+        method="cmf",
+        ranks=(2,),
+        fit=CMF_FIT,
+        distributed=DistributedOptions(tasks_per_job=1),
+    )
+    for job in range(plan_decomposition(distributed)):
+        run_decomposition_job(distributed.output_dir, job)
+    (gathered,) = collect_decomposition(distributed.output_dir)
+    np.testing.assert_allclose(
+        load_decomposition(gathered).label_mode,
+        saved.label_mode,
+        rtol=1e-5,
+    )
+
+    written = run_decomposition_plots(
+        plot_options(
+            synthetic_study,
+            model,
+            segmentation=synthetic_study.root / "images" / "seg.nii",
+        ),
+    )
+    assert sorted(p.name for p in written) == [
+        "rank_2__evolving_mode.png",
+        "rank_2__mode_grid.png",
+        "rank_2__spatial_csf.png",
+        "rank_2__spatial_parenchyma.png",
+        "rank_2__subject_mode.png",
+    ]
+
+    scores = pd.read_csv(
+        run_replicability(
+            replicability_options(synthetic_study, method="cmf", fit=CMF_FIT),
+        ),
+    )
+    assert scores["fms"].between(0, 1).all()
+
+
+def test_cmf_rejects_the_tensorly_solver(synthetic_study: Any) -> None:
+    with pytest.raises(ValueError, match="solver"):
+        decomposition_options(
+            synthetic_study,
+            method="cmf",
+            fit=FitOptions(solver="tensorly"),
+        )

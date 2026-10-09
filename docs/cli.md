@@ -124,7 +124,7 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 |---|---|---|
 | `--input` | required | `roi_signal.parquet` for a per-ROI fit (one column per label), or `voxels.parquet` for a per-voxel fit. |
 | `--output-dir` | required | Results directory. |
-| `--method` | required | `cp` (one shared time mode; needs every subject at every time point) or `parafac2` (each subject has its own time course). |
+| `--method` | required | `cp`, `parafac2` or `cmf` (see Methods below). |
 | `--ranks` | required | One fit per rank. |
 | `--statistic` | `median` | Per-ROI statistic to decompose (`roi_signal` input only). |
 | `--no-scale` | scale | Do not divide each column by its standard deviation over subjects and time points. |
@@ -132,18 +132,28 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 | `--min-timepoints` | all | Minimum valid time points to keep a subject. For CP, a lower value leaves NaN rows (see `--fit-option allow_nan_imputation=true`). |
 | `--max-invalid-fraction` | `0.9` | Drop a scan whose fraction of non-finite values is larger. |
 | `--restarts` | `50` | Random initialisations per fit; the best accepted one is kept. |
-| `--max-iter`, `--tolerance` | `2000`, `1e-5` | Iteration limit and convergence tolerance per restart. |
+| `--max-iter`, `--tolerance` | `2000`, the solver's own | Iteration limit and convergence tolerance per restart. Without `--tolerance`, each library's own default `tol` is used: TensorLy CP `1e-8` (non-negative `1e-6`), TensorLy PARAFAC2 `1e-8`, matcouply `1e-8` on its penalized objective. A TensorLy restart that runs out of iterations is rejected; a matcouply one (PARAFAC2 or CMF) is kept, as matcouply returns it, with a warning. With matcouply, `--tolerance` adds a gate on the reconstruction-error change: restarts that settle within it are accepted, even at the iteration limit, and the rest are rejected. |
 | `--restart-procs` | `1` | Parallel processes for the restarts. |
 | `--non-negative-modes` | `auto` | Modes 0 = subject, 1 = time, 2 = label. See the table below. |
-| `--solver` | `tensorly` | PARAFAC2 solver: `tensorly` (ALS) or `matcouply` (AO-ADMM, which can also constrain mode 1). |
+| `--solver` | `tensorly` | PARAFAC2 solver: `tensorly` (ALS) or `matcouply` (AO-ADMM, which can also constrain mode 1). CMF always uses matcouply. |
 | `--fit-option KEY=VALUE` | | Any other `run_*_decomposition_repeated` option, with VALUE read as JSON, e.g. `--fit-option progress_bar=true` or `--fit-option 'aoadmm_options={"l2_penalty": 0.1}'`. Repeatable. |
 | `--tasks-per-job`, `--store` | `1`, `restarts` | Distributed runs (below). |
 
-| `--non-negative-modes` | PARAFAC2 | CP |
-|---|---|---|
-| `auto` | the solver's default: `0,2` (tensorly) or `0,1,2` (matcouply) | all modes |
-| `none` | unconstrained | unconstrained |
-| e.g. `0,2` | exactly those modes (mode 1 needs `--solver matcouply`) | only `0,1,2`: CP constrains all modes or none |
+| `--non-negative-modes` | PARAFAC2 | CMF | CP |
+|---|---|---|---|
+| `auto` | the solver's default: `0,2` (tensorly) or `0,1,2` (matcouply) | `1,2` | all modes |
+| `none` | unconstrained | unconstrained | unconstrained |
+| e.g. `0,2` | exactly those modes (mode 1 needs `--solver matcouply`) | exactly those modes (mode 0 is fixed, so it has no effect) | only `0,1,2`: CP constrains all modes or none |
+
+**Methods:**
+- **`cp`:** one time course per component, shared by all subjects. Needs every subject at every time point.
+- **`parafac2`:** each subject has its own time course per component (`B_i`). The PARAFAC2 constraint couples them: `B_iᵀB_i` is the same for every subject.
+- **`cmf`:** non-negative coupled matrix factorization, fitted with matcouply's `cmf_aoadmm`, as in Chatzis et al., *Revealing Subject-specific Temporal Patterns from Longitudinal Data*.
+  - **Model:** subject i's data is `B_i Cᵀ`. The label mode `C` is shared, and the time courses `B_i` are free, so subjects may differ in shape as well as amplitude.
+  - **Subject weights:** fixed at one during the fit, so each `B_i` carries its subject's amplitude.
+  - **Saved subject mode:** derived from the time courses, not fitted. Each entry is the RMS of that subject's time course over its time points, and it is what the subject-mode plots show.
+  - **Replicability:** the subject mode is not scored, because it is derived. `halfhalf` compares `C`; `cv` compares `C` and the stacked `B_i` of the shared subjects.
+  - **Solver settings:** matcouply's own defaults throughout. Penalties and solver settings go through `--fit-option 'aoadmm_options={...}'`, e.g. `{"inner_n_iter_max": 20, "absolute_tol": 1e-6, "feasibility_tol": 1e-5, "inner_tol": 1e-5}` (the notebook's settings).
 
 **Outputs:**
 - `rank_<r>.h5`: the fitted factors, plus the subjects, time points, label ids and scaling needed to read them. Voxel models also store each voxel's template coordinates. Load a model with `gMRItensor.model_io.load_decomposition`.
@@ -210,7 +220,7 @@ gmri plot decomposition --model results/parafac2/rank_3.h5 --subject-info subjec
 | `--output-dir` | required | Figures go to `figures/decomposition/<model>__<part>.<ext>`. |
 | `--mode-grid` | | Time, subject and spatial modes in one figure, with CSF and parenchyma shown separately. |
 | `--subject-mode` | | Group boxplot per component, plus a scatter against each `--covariates` column. |
-| `--time` | | CP: the shared time mode. PARAFAC2: group ribbons and subject curves of the evolving mode; its group tests are saved as `<model>__evolving_mode_significance.csv`. |
+| `--time` | | CP: the shared time mode. PARAFAC2 and CMF: group ribbons and subject curves of the evolving mode; its group tests are saved as `<model>__evolving_mode_significance.csv`. |
 | `--spatial` | | The spatial mode on three slices, one figure for parenchyma and one for CSF. |
 | `--segmentation` | | Label volume in the decomposition's label space (one merged file, CSF ids + 10000). Needed for the spatial parts of a per-ROI model; per-voxel models carry their own coordinates. |
 | `--background` | segmentation mask | Image to draw the spatial maps on, on the template grid. |

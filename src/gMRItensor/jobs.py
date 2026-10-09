@@ -27,7 +27,6 @@ from dataclasses import dataclass
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
-from typing import Literal
 from typing import Protocol
 from typing import TYPE_CHECKING
 from typing import Union
@@ -44,7 +43,10 @@ from .decomposition import _maybe_register_memory_efficient_khatri_rao
 from .decomposition import _release_cuda_cache
 from .decomposition import _resolve_options
 from .decomposition import _warn_parafac2_outcome
+from .decomposition import CMFModel
 from .decomposition import ConvergenceError
+from .decomposition import EVOLVING_MODELS
+from .decomposition import Method
 from .decomposition import PARAFAC2Diagnostics
 from .decomposition import PARAFAC2Model
 from .decomposition import RestartTally
@@ -52,7 +54,6 @@ from .decomposition import RestartTally
 if TYPE_CHECKING:
     from .replicability import ReplicabilityEngine
 
-Method = Literal["CP", "PARAFAC2"]
 #: A regular tensor (samples x ...), or a list of per-subject slices.
 Data = Union[torch.Tensor, list[torch.Tensor]]
 #: A CP fit as `(weights, factors)`, CPU float32.
@@ -130,7 +131,7 @@ class RestartResult:
     """
 
     task: FitTask
-    model: PARAFAC2Model | CPModel | None = None
+    model: PARAFAC2Model | CMFModel | CPModel | None = None
     error: float | None = None
     diagnostics: PARAFAC2Diagnostics | None = None
     failure_reason: str | None = None
@@ -170,7 +171,7 @@ def _result_from_outcome(
 
 
 def _subset(data: Data, indices: tuple[int, ...], method: Method) -> Data:
-    """Rows `indices` of `data`: a tensor for CP, a slice list for PARAFAC2."""
+    """Rows `indices` of `data`: a tensor for CP, a slice list otherwise."""
     if method == "CP":
         if not isinstance(data, torch.Tensor):
             raise TypeError("method='CP' needs a regular torch.Tensor.")
@@ -268,9 +269,13 @@ def _group_slug(group: Hashable) -> str:
     return "_".join(slugs)
 
 
-def _model_record(model: PARAFAC2Model | CPModel | None) -> dict[str, Any] | None:
+def _model_record(
+    model: PARAFAC2Model | CMFModel | CPModel | None,
+) -> dict[str, Any] | None:
     if model is None:
         return None
+    if isinstance(model, CMFModel):
+        return {"kind": "CMF", **dataclasses.asdict(model)}
     if isinstance(model, PARAFAC2Model):
         return {"kind": "PARAFAC2", **dataclasses.asdict(model)}
     weights, factors = model
@@ -279,12 +284,15 @@ def _model_record(model: PARAFAC2Model | CPModel | None) -> dict[str, Any] | Non
 
 def _model_from_record(
     record: dict[str, Any] | None,
-) -> PARAFAC2Model | CPModel | None:
+) -> PARAFAC2Model | CMFModel | CPModel | None:
     if record is None:
         return None
     if record["kind"] == "CP":
         return record["weights"], list(record["factors"])
     fields = {k: v for k, v in record.items() if k != "kind"}
+    if record["kind"] == "CMF":
+        fields["evolving_states"] = list(fields["evolving_states"])
+        return CMFModel(**fields)
     if fields["kiers"] is not None:
         coordinate_matrix, projections = fields["kiers"]
         fields["kiers"] = (coordinate_matrix, list(projections))
@@ -487,10 +495,10 @@ def collect(
     would pick.
 
     With `warn`, a group where no stored restart converged gets a
-    `UserWarning`. Passing `method="PARAFAC2"` and the fit's options as
-    `fit_kwargs` also emits the warnings `run_PARAFAC2_decomposition_repeated`
-    would (non-negativity residue, acceptance at the iteration limit, and
-    the restart advisory).
+    `UserWarning`. Passing `method="PARAFAC2"` (or `"CMF"`) and the fit's
+    options as `fit_kwargs` also emits the warnings that method's
+    `run_*_decomposition_repeated` would (non-negativity residue,
+    acceptance at the iteration limit, and the restart advisory).
     """
     resolved: dict[str, Any] | None = None
     if method is not None:
@@ -538,17 +546,18 @@ def collect(
                 f"{reducer.tally.failure_summary()}",
                 stacklevel=2,
             )
-        if method == "PARAFAC2" and resolved is not None:
+        if method in ("PARAFAC2", "CMF") and resolved is not None:
             model = best.model if best is not None else None
-            assert model is None or isinstance(model, PARAFAC2Model)
+            assert model is None or isinstance(model, EVOLVING_MODELS)
             _warn_parafac2_outcome(
                 model,
                 best.diagnostics if best is not None else None,
                 reducer.tally,
-                resolved["solver"],
+                resolved.get("solver", "matcouply"),
                 resolved["max_iter"],
                 resolved["tolerance"],
                 resolved["aoadmm_loss_tolerance"],
+                method_label=method,
             )
     return summaries
 

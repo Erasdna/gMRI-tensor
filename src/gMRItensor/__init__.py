@@ -4,6 +4,8 @@
 # SPDX-License-Identifier:    MIT
 import importlib.metadata
 
+from .decomposition import CMFModel
+from .decomposition import compute_CMF_decomposition
 from .decomposition import compute_CP_decomposition
 from .decomposition import compute_PARAFAC2_decomposition
 from .decomposition import ConvergenceError
@@ -11,6 +13,7 @@ from .decomposition import PARAFAC2Diagnostics
 from .decomposition import PARAFAC2Model
 from .decomposition import PARAFAC2Solver
 from .decomposition import RestartTally
+from .decomposition import run_CMF_decomposition_repeated
 from .decomposition import run_CP_decomposition_repeated
 from .decomposition import run_PARAFAC2_decomposition_repeated
 from .decomposition import setup_backend
@@ -32,6 +35,8 @@ __version__ = importlib.metadata.version(__package__)
 
 
 __all__ = [
+    "CMFModel",
+    "compute_CMF_decomposition",
     "compute_CP_decomposition",
     "compute_PARAFAC2_decomposition",
     "ConvergenceError",
@@ -39,6 +44,7 @@ __all__ = [
     "PARAFAC2Model",
     "PARAFAC2Solver",
     "RestartTally",
+    "run_CMF_decomposition_repeated",
     "run_CP_decomposition_repeated",
     "run_PARAFAC2_decomposition_repeated",
     "setup_backend",

@@ -1,4 +1,4 @@
-"""Plotting for PARAFAC2's evolving (subject-specific time) mode."""
+"""Plotting for PARAFAC2's and CMF's evolving (subject-specific time) mode."""
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -86,7 +86,7 @@ def plot_evolving_mode(
     min_group_n: int = 2,
     significance_alpha: float = 0.05,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray, pd.DataFrame]:
-    """Plot each subject's own PARAFAC2 evolving-mode (time) pattern.
+    """Plot each subject's own PARAFAC2/CMF evolving-mode (time) pattern.
 
     One row per component, `1 + n_groups` columns: the first column is a
     ribbon plot (per-group mean +/- SEM band, colored by `group_variable`),

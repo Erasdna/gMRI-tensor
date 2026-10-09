@@ -46,7 +46,7 @@ def _plot_time_column_evolving(
     categories: list[str],
     color_by_group: dict[str, str],
 ) -> None:
-    """Draw one component of a PARAFAC2 evolving mode as per-group ribbons.
+    """Draw one component of a PARAFAC2/CMF evolving mode as per-group ribbons.
 
     Same mean +/- SEM ribbon as the left column of `plot_evolving_mode`,
     with the same 5% y-padding as `apply_row_ylims`.
@@ -85,7 +85,7 @@ def plot_mode_grid(
 
     - CP: `time_mode` is one shared `(n_timepoints, rank)` array and
       `time_points` its timepoints; drawn as a single line per component.
-    - PARAFAC2: `time_mode` is a list of per-subject `(n_timepoints_i, rank)`
+    - PARAFAC2/CMF: `time_mode` is a list of per-subject `(n_timepoints_i, rank)`
       evolving factors (e.g. from `evolving_factors_to_numpy`) and
       `time_points` the matching list of per-subject timepoint arrays, both
       in `subjects` order. Drawn as a per-group mean +/- SEM ribbon, as in
@@ -108,7 +108,7 @@ def plot_mode_grid(
     if isinstance(time_mode, list):
         if not (len(time_mode) == len(time_points) == len(subjects)):
             raise ValueError(
-                "For a PARAFAC2 evolving mode, time_mode, time_points and "
+                "For a PARAFAC2/CMF evolving mode, time_mode, time_points and "
                 f"subjects must have the same length, got {len(time_mode)}, "
                 f"{len(time_points)}, {len(subjects)}",
             )

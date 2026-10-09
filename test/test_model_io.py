@@ -73,6 +73,23 @@ def test_round_trip_parafac2_ragged(tmp_path: Path) -> None:
     assert loaded.time_mode is None
 
 
+def test_round_trip_cmf_ragged(tmp_path: Path) -> None:
+    rng = np.random.default_rng(3)
+    timepoints = [np.array([0, 24]), np.array([0, 6, 24]), np.array([6, 24])]
+    saved = SavedDecomposition(
+        method="cmf",
+        timepoints=timepoints,
+        evolving_states=[rng.random((len(t), 2)) for t in timepoints],
+        **_common(2, rng),
+    )
+
+    save_decomposition(tmp_path / "rank_2.h5", saved)
+    loaded = load_decomposition(tmp_path / "rank_2.h5")
+
+    _assert_equal(loaded, saved)
+    assert loaded.time_mode is None
+
+
 def test_round_trip_without_scaling(tmp_path: Path) -> None:
     rng = np.random.default_rng(2)
     saved = replace(

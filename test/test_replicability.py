@@ -3,7 +3,9 @@ import os
 
 import pytest
 import torch
+from gMRItensor import CMFModel
 from gMRItensor import setup_backend
+from gMRItensor.replicability import _weights_and_factors
 from gMRItensor.replicability import CrossValidationEngine
 from gMRItensor.replicability import evaluate_replicability_multiproc
 from gMRItensor.replicability import HalfHalfEngine
@@ -132,7 +134,7 @@ def test_replicability_cuda_sequential_default_stratification():
     assert len(fms) == 1
 
 
-def run_replicability_parafac2(procs, solver="tensorly"):
+def run_replicability_parafac2(procs, solver="tensorly", method="PARAFAC2"):
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     device = setup_backend()
     # Ragged: 12 subjects with 4-6 time points each, sharing 20 labels/regions.
@@ -150,15 +152,16 @@ def run_replicability_parafac2(procs, solver="tensorly"):
     # evaluate_replicability_multiproc's **CP_kwargs, which is why the
     # replicability path needed no changes of its own.
     common = dict(
-        method="PARAFAC2",
+        method=method,
         n_procs=procs,
         init_repeats=3,
         max_iter=500,
         verbose_level=0,
         tolerance=1e-4,
         progress_bar=False,
-        solver=solver,
     )
+    if method == "PARAFAC2":
+        common["solver"] = solver
 
     half_fms = evaluate_replicability_multiproc(
         half_engine,
@@ -191,6 +194,28 @@ def test_replicability_parafac2_accepts_either_solver(solver):
         for entry in scores:
             fms = entry[-1]
             assert math.isfinite(float(fms))
+
+
+def test_replicability_cmf_scores_are_finite():
+    half_fms, CV_fms = run_replicability_parafac2(1, method="CMF")
+    for scores in (half_fms, CV_fms):
+        for entry in scores:
+            assert 0.0 <= float(entry[-1]) <= 1.0 + 1e-6
+
+
+def test_cmf_subject_mode_is_not_scored():
+    # CMF's subject mode is derived from B_i, so scoring it would count the
+    # time courses twice; it is replaced by ones, which always match.
+    model = CMFModel(
+        weights=torch.ones(2),
+        subject_mode=torch.rand(3, 2),
+        evolving_states=[torch.rand(4, 2) for _ in range(3)],
+        label_mode=torch.rand(5, 2),
+    )
+    _, (subject_mode, evolving, label_mode) = _weights_and_factors(model)
+    assert torch.equal(subject_mode, torch.ones(3, 2))
+    assert evolving is model.evolving_states
+    assert label_mode is model.label_mode
 
 
 if __name__ == "__main__":

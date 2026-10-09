@@ -18,6 +18,9 @@ from typing import overload
 
 import tensorly as tl
 import torch
+from matcouply._utils import get_svd
+from matcouply.decomposition import cmf_aoadmm
+from matcouply.decomposition import initialize_cmf
 from matcouply.decomposition import parafac2_aoadmm
 from tensorly.parafac2_tensor import apply_parafac2_projections
 from tensorly.tenalg.core_tenalg.mttkrp import unfolding_dot_khatri_rao_memory
@@ -27,6 +30,9 @@ from tqdm import tqdm
 #: Library used to fit PARAFAC2. Distinct from TensorLy's compute backend
 #: (numpy/pytorch), which `setup_backend` configures.
 PARAFAC2Solver = Literal["tensorly", "matcouply"]
+
+#: A decomposition method, as the restart machinery names it.
+Method = Literal["CP", "PARAFAC2", "CMF"]
 
 ConvergenceFailureReason = Literal[
     "max_iter",
@@ -83,7 +89,9 @@ class PARAFAC2Diagnostics:
     # Comparable across solvers.
     relative_reconstruction_error: float
     reconstruction_error_change: float
-    reconstruction_tolerance: float
+    #: The gate on the reconstruction-error change; None when matcouply's own
+    #: criterion was the only gate.
+    reconstruction_tolerance: float | None
     #: Non-negativity actually applied, with `"auto"` already resolved.
     nn_modes: tuple[int, ...] | None = None
     #: Largest per-component non-negativity violation in the *returned*
@@ -122,6 +130,34 @@ class PARAFAC2Model:
     evolving_states: list[torch.Tensor]
     label_mode: torch.Tensor
     kiers: tuple[torch.Tensor, list[torch.Tensor]] | None = None
+
+
+@dataclass(frozen=True)
+class CMFModel:
+    """A fitted non-negative coupled matrix factorization (CMF).
+
+    Subject `i`'s `(n_timepoints_i, n_labels)` slice is modelled as
+    `evolving_states[i] @ label_mode.T`. This is `PARAFAC2Model`'s form
+    without the PARAFAC2 constraint: nothing ties the subjects' time courses
+    together, so they may differ in shape, not only in amplitude.
+
+    The subject weights are fixed at one during the fit
+    (`cmf_aoadmm(update_A=False)`): without the constraint their scale is
+    interchangeable with the `evolving_states[i]`, which therefore carry each
+    subject's amplitude. `subject_mode` is derived, not fitted:
+    `subject_mode[i, r]` is the RMS of `evolving_states[i][:, r]` over that
+    subject's time points, so it compares subjects scanned a different number
+    of times.
+    """
+
+    weights: torch.Tensor
+    subject_mode: torch.Tensor
+    evolving_states: list[torch.Tensor]
+    label_mode: torch.Tensor
+
+
+#: Models whose mode 1 is a ragged list of per-subject time courses.
+EVOLVING_MODELS = (PARAFAC2Model, CMFModel)
 
 
 #: `parafac2_aoadmm` arguments callers may set via `aoadmm_options`.
@@ -173,8 +209,34 @@ _AOADMM_MANAGED_OPTIONS: dict[str, str] = {
 #: penalty converges markedly faster on ragged per-subject slices.
 _AOADMM_DEFAULTS: dict[str, Any] = {"constant_feasibility_penalty": True}
 
+#: `cmf_aoadmm` arguments `compute_CMF_decomposition` owns. CMF sets no
+#: defaults of its own: matcouply's apply unless `aoadmm_options` says so.
+_CMF_MANAGED_OPTIONS: dict[str, str] = {
+    **_AOADMM_MANAGED_OPTIONS,
+    "n_iter_max": "use `CMF_max_iter`",
+    "verbose": "use `CMF_verbose_level`",
+    "return_admm_vars": "not used",
+    "parafac2": "always disabled; use the PARAFAC2 method for that constraint",
+    "update_A": "always disabled: the subject weights are fixed at one",
+}
+
 #: matcouply's own default, used when reporting the feasibility gap.
 _AOADMM_DEFAULT_FEASIBILITY_TOL: float = 1e-4
+
+
+def _solver_default(function: Callable[..., Any], name: str = "tol") -> float:
+    """`function`'s own default for `name`, read from its signature.
+
+    Tolerances default to None throughout this module, meaning "whatever the
+    underlying library uses"; reading it here keeps that true across library
+    upgrades instead of copying the number.
+    """
+    return inspect.signature(inspect.unwrap(function)).parameters[name].default
+
+
+def _format_tolerance(tolerance: float | None) -> str:
+    return "the solver's own criterion" if tolerance is None else f"{tolerance:.1e}"
+
 
 #: Iterations of error history used to extrapolate a suggested `max_iter`.
 _DECAY_FIT_WINDOW: int = 50
@@ -202,7 +264,7 @@ def compute_CP_decomposition(
     random_state: int = 0,
     init: str = "random",
     CP_verbose_level: int = 0,
-    CP_tolerance: float = 1e-5,
+    CP_tolerance: float | None = None,
     normalize_factors: bool = False,
     allow_nan_imputation: bool = False,
     non_negative: bool = True,
@@ -215,7 +277,8 @@ def compute_CP_decomposition(
     equivalent (see `compute_PARAFAC2_decomposition`).
 
     `non_negative` defaults to True, appropriate for a tracer signal that is
-    physically non-negative.
+    physically non-negative. `CP_tolerance=None` uses TensorLy's own default
+    `tol` for the chosen solver.
     """
     mask = None
     if allow_nan_imputation:
@@ -231,6 +294,12 @@ def compute_CP_decomposition(
     decomposition_fn = (
         non_negative_parafac_compiled if non_negative else parafac_compiled
     )
+    if CP_tolerance is None:
+        CP_tolerance = _solver_default(
+            tl.decomposition.non_negative_parafac
+            if non_negative
+            else tl.decomposition.parafac,
+        )
     decomp, errors = decomposition_fn(
         tensor,
         rank=rank,
@@ -309,21 +378,23 @@ def _nn_modes_to_non_negative(
 
 def _build_aoadmm_options(
     aoadmm_options: dict[str, Any] | None,
+    managed: dict[str, str] = _AOADMM_MANAGED_OPTIONS,
+    defaults: dict[str, Any] = _AOADMM_DEFAULTS,
+    owner: str = "compute_PARAFAC2_decomposition",
 ) -> dict[str, Any]:
-    """Validate and merge caller-supplied AO-ADMM options over the defaults.
+    """Validate and merge caller-supplied AO-ADMM options over `defaults`.
 
     Unknown and wrapper-managed keys raise rather than being forwarded, so a
     typo surfaces immediately instead of being swallowed by matcouply.
     """
-    options = dict(_AOADMM_DEFAULTS)
+    options = dict(defaults)
     if not aoadmm_options:
         return options
 
     for key in aoadmm_options:
-        if key in _AOADMM_MANAGED_OPTIONS:
+        if key in managed:
             raise ValueError(
-                f"aoadmm_options[{key!r}] is managed by "
-                f"compute_PARAFAC2_decomposition -- {_AOADMM_MANAGED_OPTIONS[key]}.",
+                f"aoadmm_options[{key!r}] is managed by {owner} -- " f"{managed[key]}.",
             )
         if key not in _AOADMM_PASSTHROUGH_OPTIONS:
             raise ValueError(
@@ -565,6 +636,94 @@ def _to_solver_slices(
     return [s.to(device).double() for s in slices]
 
 
+def _accept_aoadmm_fit(
+    diagnostics: Any,
+    max_iter: int,
+    tolerance: float | None,
+    aoadmm_loss_tolerance: float,
+    feasibility_tol: float,
+    nn_modes: tuple[int, ...] | None,
+    method_label: str,
+) -> tuple[list[torch.Tensor], PARAFAC2Diagnostics]:
+    """Gate an AO-ADMM fit on matcouply's `diagnostics`; raise if rejected.
+
+    Shared by the PARAFAC2 and CMF fits. Rejects an infeasible fit, and one
+    whose reconstruction error is still moving by `tolerance`. With
+    `tolerance=None` a fit that ran out of iterations before matcouply's own
+    criterion was met is kept, as matcouply returns it. Returns the
+    per-iteration relative reconstruction errors and what the fit achieved.
+    """
+    rec_errors = [float(error) for error in diagnostics.rec_errors]
+    losses = [float(loss) for loss in diagnostics.regularized_loss]
+    max_gap = _max_feasibility_gap(diagnostics.feasibility_gaps)
+    n_iter = int(diagnostics.n_iter)
+    loss_change = (
+        abs(losses[-2] - losses[-1]) / abs(losses[-2])
+        if len(losses) >= 2 and losses[-2] != 0
+        else None
+    )
+    # Coerce before comparing: `is False` against a raw numpy bool_ never fires.
+    feasible = _as_optional_bool(diagnostics.satisfied_feasibility_condition)
+    loss_converged = _as_optional_bool(diagnostics.satisfied_stopping_condition)
+
+    if feasible is False:
+        raise ConvergenceError(
+            f"AO-ADMM constraints are not satisfied: max feasibility gap "
+            f"{max_gap:.3e} > feasibility_tol {feasibility_tol:.3e} after "
+            f"{n_iter}/{max_iter} iterations. The constraints requested via "
+            f"nn_modes={nn_modes} are therefore not actually enforced on this "
+            f"fit. Increase {method_label}_max_iter, or relax feasibility_tol via "
+            f"aoadmm_options if this gap is acceptable for your use.",
+            reason="feasibility",
+            level_reached=max_gap,
+        )
+
+    delta = abs(rec_errors[-2] - rec_errors[-1]) if len(rec_errors) >= 2 else math.inf
+    # Without a tolerance a fit that ran out of iterations is kept, as
+    # matcouply itself returns it; `_warn_if_accepted_at_iteration_limit`
+    # reports it.
+    if tolerance is not None and delta >= tolerance:
+        suggested = _suggest_max_iter(rec_errors, tolerance)
+        suggestion = (
+            f" Extrapolating the observed decay, about {suggested} iterations "
+            f"would be needed."
+            if suggested is not None and suggested > max_iter
+            else ""
+        )
+        raise ConvergenceError(
+            f"AO-ADMM reconstruction error has not converged: "
+            f"|delta rel. reconstruction error| = {delta:.3e} >= tolerance "
+            f"{tolerance:.3e} after {n_iter}/{max_iter} iterations "
+            f"(rel. reconstruction error {rec_errors[-1]:.6g})."
+            f"{suggestion} Increase {method_label}_max_iter, loosen {method_label}_tolerance, "
+            f"or lower aoadmm_loss_tolerance if AO-ADMM stopped early on the "
+            f"penalized objective ({diagnostics.message}).",
+            reason="reconstruction",
+            level_reached=delta,
+            suggested_max_iter=suggested,
+        )
+
+    parafac2_diagnostics = PARAFAC2Diagnostics(
+        solver="matcouply",
+        n_iter=n_iter,
+        max_iter=max_iter,
+        reached_max_iter=n_iter >= max_iter,
+        relative_reconstruction_error=rec_errors[-1],
+        reconstruction_error_change=delta,
+        reconstruction_tolerance=tolerance,
+        nn_modes=nn_modes,
+        loss_converged=loss_converged,
+        loss_tolerance=aoadmm_loss_tolerance,
+        final_relative_loss_change=loss_change,
+        feasible=feasible,
+        max_feasibility_gap=max_gap,
+        feasibility_tol=feasibility_tol,
+        message=str(diagnostics.message),
+    )
+    errors = [torch.tensor(error, dtype=torch.float64) for error in rec_errors]
+    return errors, parafac2_diagnostics
+
+
 def _compute_PARAFAC2_matcouply(
     tensor_slices: list[torch.Tensor] | torch.Tensor,
     rank: int,
@@ -572,11 +731,11 @@ def _compute_PARAFAC2_matcouply(
     random_state: int,
     init: str,
     verbose_level: int,
-    tolerance: float,
+    tolerance: float | None,
     normalize_factors: bool,
     nn_modes: tuple[int, ...] | None,
     aoadmm_options: dict[str, Any] | None,
-    aoadmm_loss_tolerance: float,
+    aoadmm_loss_tolerance: float | None,
     return_projections: bool,
     negligible_rtol: float,
     compute_device: torch.device | None,
@@ -594,6 +753,8 @@ def _compute_PARAFAC2_matcouply(
     """
     options = _build_aoadmm_options(aoadmm_options)
     feasibility_tol = options.get("feasibility_tol", _AOADMM_DEFAULT_FEASIBILITY_TOL)
+    if aoadmm_loss_tolerance is None:
+        aoadmm_loss_tolerance = _solver_default(parafac2_aoadmm)
 
     slices = (
         list(tensor_slices)
@@ -649,71 +810,15 @@ def _compute_PARAFAC2_matcouply(
 
     # Below here torch's defaults are restored, so neither float64 nor the
     # device leaks into what we return -- including on the error paths.
-    rec_errors = [float(error) for error in diagnostics.rec_errors]
-    losses = [float(loss) for loss in diagnostics.regularized_loss]
-    max_gap = _max_feasibility_gap(diagnostics.feasibility_gaps)
-    n_iter = int(diagnostics.n_iter)
-    loss_change = (
-        abs(losses[-2] - losses[-1]) / abs(losses[-2])
-        if len(losses) >= 2 and losses[-2] != 0
-        else None
+    errors, parafac2_diagnostics = _accept_aoadmm_fit(
+        diagnostics,
+        max_iter,
+        tolerance,
+        aoadmm_loss_tolerance,
+        feasibility_tol,
+        nn_modes,
+        "PARAFAC2",
     )
-    # Coerce before comparing: `is False` against a raw numpy bool_ never fires.
-    feasible = _as_optional_bool(diagnostics.satisfied_feasibility_condition)
-    loss_converged = _as_optional_bool(diagnostics.satisfied_stopping_condition)
-
-    if feasible is False:
-        raise ConvergenceError(
-            f"AO-ADMM constraints are not satisfied: max feasibility gap "
-            f"{max_gap:.3e} > feasibility_tol {feasibility_tol:.3e} after "
-            f"{n_iter}/{max_iter} iterations. The constraints requested via "
-            f"nn_modes={nn_modes} are therefore not actually enforced on this "
-            f"fit. Increase PARAFAC2_max_iter, or relax feasibility_tol via "
-            f"aoadmm_options if this gap is acceptable for your use.",
-            reason="feasibility",
-            level_reached=max_gap,
-        )
-
-    delta = abs(rec_errors[-2] - rec_errors[-1]) if len(rec_errors) >= 2 else math.inf
-    if delta >= tolerance:
-        suggested = _suggest_max_iter(rec_errors, tolerance)
-        suggestion = (
-            f" Extrapolating the observed decay, about {suggested} iterations "
-            f"would be needed."
-            if suggested is not None and suggested > max_iter
-            else ""
-        )
-        raise ConvergenceError(
-            f"AO-ADMM reconstruction error has not converged: "
-            f"|delta rel. reconstruction error| = {delta:.3e} >= tolerance "
-            f"{tolerance:.3e} after {n_iter}/{max_iter} iterations "
-            f"(rel. reconstruction error {rec_errors[-1]:.6g})."
-            f"{suggestion} Increase PARAFAC2_max_iter, loosen PARAFAC2_tolerance, "
-            f"or lower aoadmm_loss_tolerance if AO-ADMM stopped early on the "
-            f"penalized objective ({diagnostics.message}).",
-            reason="reconstruction",
-            level_reached=delta,
-            suggested_max_iter=suggested,
-        )
-
-    parafac2_diagnostics = PARAFAC2Diagnostics(
-        solver="matcouply",
-        n_iter=n_iter,
-        max_iter=max_iter,
-        reached_max_iter=n_iter >= max_iter,
-        relative_reconstruction_error=rec_errors[-1],
-        reconstruction_error_change=delta,
-        reconstruction_tolerance=tolerance,
-        nn_modes=nn_modes,
-        loss_converged=loss_converged,
-        loss_tolerance=aoadmm_loss_tolerance,
-        final_relative_loss_change=loss_change,
-        feasible=feasible,
-        max_feasibility_gap=max_gap,
-        feasibility_tol=feasibility_tol,
-        message=str(diagnostics.message),
-    )
-    errors = [torch.tensor(error, dtype=torch.float64) for error in rec_errors]
     return result, errors, parafac2_diagnostics
 
 
@@ -724,7 +829,7 @@ def _compute_PARAFAC2_tensorly(
     random_state: int,
     init: str,
     verbose_level: int,
-    tolerance: float,
+    tolerance: float | None,
     normalize_factors: bool,
     nn_modes: tuple[int, ...] | None,
     return_projections: bool,
@@ -735,6 +840,8 @@ def _compute_PARAFAC2_tensorly(
     already returns exactly matcouply's native `(weights, (A, B_is, C))`
     structure, so both solvers share one contract.
     """
+    if tolerance is None:
+        tolerance = _solver_default(tl.decomposition.parafac2)
     result, errors = tl.decomposition.parafac2(
         tensor_slices,
         rank=rank,
@@ -786,12 +893,12 @@ def compute_PARAFAC2_decomposition(
     random_state: int = 0,
     init: str = "random",
     PARAFAC2_verbose_level: int = 0,
-    PARAFAC2_tolerance: float = 1e-5,
+    PARAFAC2_tolerance: float | None = None,
     normalize_factors: bool = False,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = "auto",
     solver: PARAFAC2Solver = "tensorly",
     aoadmm_options: dict[str, Any] | None = None,
-    aoadmm_loss_tolerance: float = 1e-10,
+    aoadmm_loss_tolerance: float | None = None,
     return_projections: bool = False,
     negligible_rtol: float = 1e-6,
     compute_device: torch.device | None = None,
@@ -820,6 +927,16 @@ def compute_PARAFAC2_decomposition(
     matcouply; pass `None` for an unconstrained fit. Asking TensorLy for
     mode 1 raises, since it would otherwise only warn and leave the mode
     unconstrained.
+
+    Tolerances
+    ----------
+    None (the default) means the solver's own default `tol`. For TensorLy
+    `PARAFAC2_tolerance` is its `tol`. For matcouply `aoadmm_loss_tolerance`
+    is its `tol` on the penalized objective; a fit that runs out of
+    iterations before meeting it is kept, as matcouply returns it, with a
+    warning. Passing `PARAFAC2_tolerance` instead gates on the
+    reconstruction error, accepting fits whose error has settled to within
+    it -- even at the iteration limit -- and rejecting those that have not.
 
     `compute_device` is the device the fit runs on; None (default) uses the
     input's own device. It lets CPU-resident slices be fitted on the GPU
@@ -866,7 +983,7 @@ def compute_PARAFAC2_decomposition(
                 f"aoadmm_options only applies to solver='matcouply', not "
                 f"{solver!r}.",
             )
-        if aoadmm_loss_tolerance != 1e-10:
+        if aoadmm_loss_tolerance is not None:
             raise ValueError(
                 f"aoadmm_loss_tolerance only applies to solver='matcouply', not "
                 f"{solver!r}. TensorLy has no penalized objective; use "
@@ -938,6 +1055,147 @@ def compute_PARAFAC2_decomposition(
     return result, errors, diagnostics
 
 
+def _as_slices(tensor_slices: list[torch.Tensor] | torch.Tensor) -> list[torch.Tensor]:
+    if isinstance(tensor_slices, list):
+        return list(tensor_slices)
+    return [tensor_slices[i] for i in range(tensor_slices.shape[0])]
+
+
+def _subject_amplitudes(evolving_states: list[torch.Tensor]) -> torch.Tensor:
+    """`(n_subjects, rank)` RMS of each subject's time course per component."""
+    return torch.stack([B.pow(2).mean(dim=0).sqrt() for B in evolving_states])
+
+
+def compute_CMF_decomposition(
+    tensor_slices: list[torch.Tensor] | torch.Tensor,
+    rank: int,
+    CMF_max_iter: int = 2000,
+    random_state: int = 0,
+    init: str = "random",
+    CMF_verbose_level: int = 0,
+    CMF_tolerance: float | None = None,
+    normalize_factors: bool = False,
+    nn_modes: tuple[int, ...] | None | Literal["auto"] = "auto",
+    aoadmm_options: dict[str, Any] | None = None,
+    aoadmm_loss_tolerance: float | None = None,
+    negligible_rtol: float = 1e-6,
+    compute_device: torch.device | None = None,
+) -> tuple[CMFModel, list[torch.Tensor], PARAFAC2Diagnostics]:
+    """Compute a single non-negative coupled matrix factorization attempt.
+
+    Each subject's `(n_timepoints_i, n_labels)` slice is modelled as
+    `B_i @ C.T`: a subject-specific time course `B_i` per component, and a
+    label mode `C` shared by all subjects. Unlike PARAFAC2 nothing ties the
+    `B_i` together (see `CMFModel`).
+
+    Fitted with matcouply's `cmf_aoadmm`, following Chatzis et al.,
+    "Revealing Subject-specific Temporal Patterns from Longitudinal Data":
+    the subject weights are fixed at one (`update_A=False`) and each `B_i`
+    carries its subject's amplitude. Every restart starts from matcouply's
+    `init` with those weights replaced by ones.
+
+    `nn_modes="auto"` constrains the time (1) and label (2) modes; mode 0 is
+    fixed, so constraining it has no effect. `aoadmm_options` takes
+    `cmf_aoadmm`'s penalties and solver settings (see
+    `_AOADMM_PASSTHROUGH_OPTIONS`); unlike the PARAFAC2 wrapper none are set
+    here, so matcouply's own defaults apply. Tolerances work as for the
+    matcouply PARAFAC2 solver (see `compute_PARAFAC2_decomposition`), with
+    `CMF_tolerance` in place of `PARAFAC2_tolerance`. `normalize_factors`
+    scales `C`'s components to unit norm and moves that scale into every
+    `B_i`, so the subject amplitudes stay comparable.
+
+    There is no degeneracy check: the PARAFAC2 one relies on the constraint
+    making `B_i.T @ B_i` the same for every subject.
+
+    Raises
+    ------
+    ValueError
+        NaN input, or an unknown or wrapper-managed `aoadmm_options` key.
+    ConvergenceError
+        The constraints were left infeasible, or the fit did not converge.
+    """
+    slices = _as_slices(tensor_slices)
+    if any(torch.isnan(s).any() for s in slices):
+        raise ValueError(
+            "tensor_slices contains NaN values, which the CMF fit does not "
+            "impute -- remove or impute missing values first.",
+        )
+    nn_modes = (1, 2) if nn_modes == "auto" else nn_modes
+    options = _build_aoadmm_options(
+        aoadmm_options,
+        managed=_CMF_MANAGED_OPTIONS,
+        defaults={},
+        owner="compute_CMF_decomposition",
+    )
+    feasibility_tol = options.get(
+        "feasibility_tol",
+        _solver_default(cmf_aoadmm, "feasibility_tol"),
+    )
+    if aoadmm_loss_tolerance is None:
+        aoadmm_loss_tolerance = _solver_default(cmf_aoadmm)
+    device = compute_device if compute_device is not None else slices[0].device
+
+    with _matcouply_numeric_context(device):
+        matrices = _to_solver_slices(slices, device)
+        # One generator for the initialisation and the ADMM variables, so a
+        # seed fixes the whole fit.
+        rng = tl.check_random_state(random_state)
+        _, (A, B_is, C) = initialize_cmf(
+            matrices,
+            rank,
+            init,
+            svd_fun=get_svd(options.get("svd", _solver_default(cmf_aoadmm, "svd"))),
+            random_state=rng,
+            init_params=options.get("init_params"),
+        )
+        cmf, diagnostics = cmf_aoadmm(
+            matrices,
+            rank=rank,
+            init=(None, (torch.ones_like(A), B_is, C)),
+            n_iter_max=CMF_max_iter,
+            tol=aoadmm_loss_tolerance,
+            random_state=rng,
+            non_negative=_nn_modes_to_non_negative(nn_modes),
+            verbose=CMF_verbose_level,
+            update_A=False,
+            return_errors=True,
+            **options,
+        )
+        _, (_, evolving_states, C) = cmf
+        evolving_states = list(evolving_states)
+        # A negligible entry means "not expressed"; see
+        # `_zero_negligible_loadings` for why leaving the residue is unsafe.
+        if nn_modes and 2 in nn_modes:
+            C = _zero_negligible_loadings(C, negligible_rtol)
+        if nn_modes and 1 in nn_modes:
+            evolving_states = _zero_negligible_evolving(
+                evolving_states,
+                negligible_rtol,
+            )
+        if normalize_factors:
+            norms = torch.linalg.norm(C, dim=0)
+            safe = torch.where(norms > 0, norms, torch.ones_like(norms))
+            C = C / safe
+            evolving_states = [B * safe for B in evolving_states]
+        result = CMFModel(
+            weights=torch.ones(rank, dtype=C.dtype, device=C.device),
+            subject_mode=_subject_amplitudes(evolving_states),
+            evolving_states=evolving_states,
+            label_mode=C,
+        )
+
+    errors, cmf_diagnostics = _accept_aoadmm_fit(
+        diagnostics,
+        CMF_max_iter,
+        CMF_tolerance,
+        aoadmm_loss_tolerance,
+        feasibility_tol,
+        nn_modes,
+        "CMF",
+    )
+    return result, errors, cmf_diagnostics
+
+
 def _cp_to_cpu(decomp: Any) -> tuple[torch.Tensor, list[torch.Tensor]]:
     """CP `(weights, factors)` as CPU float32."""
     weights, factors = decomp
@@ -962,6 +1220,16 @@ def _parafac2_to_cpu(result: "PARAFAC2Model") -> "PARAFAC2Model":
     )
 
 
+def _cmf_to_cpu(result: CMFModel) -> CMFModel:
+    """A `CMFModel` as CPU float32."""
+    return CMFModel(
+        weights=result.weights.float().cpu(),
+        subject_mode=result.subject_mode.float().cpu(),
+        evolving_states=[B.float().cpu() for B in result.evolving_states],
+        label_mode=result.label_mode.float().cpu(),
+    )
+
+
 #: `run_*_repeated` options that steer the restart loop rather than one fit,
 #: and so never reach `compute_*_decomposition`.
 _RESTART_ONLY_OPTIONS: frozenset[str] = frozenset(
@@ -977,7 +1245,7 @@ _RESTART_ONLY_OPTIONS: frozenset[str] = frozenset(
 
 
 def _resolve_options(
-    method: Literal["CP", "PARAFAC2"],
+    method: Method,
     options: dict[str, Any],
 ) -> dict[str, Any]:
     """Every `run_*_repeated` option, `options` filled in with its defaults.
@@ -985,18 +1253,21 @@ def _resolve_options(
     Bound against the public signature, so the defaults have one source and
     an unknown option raises `TypeError` exactly as calling it would.
     """
-    if method not in ("CP", "PARAFAC2"):
+    runners: dict[str, Callable[..., Any]] = {
+        "CP": run_CP_decomposition_repeated,
+        "PARAFAC2": run_PARAFAC2_decomposition_repeated,
+        "CMF": run_CMF_decomposition_repeated,
+    }
+    if method not in runners:
         raise ValueError(f"Unknown decomposition method: {method!r}")
-    function: Callable[..., Any] = run_CP_decomposition_repeated
-    if method == "PARAFAC2":
-        function = run_PARAFAC2_decomposition_repeated
+    function = runners[method]
     bound = inspect.signature(function).bind_partial(**options)
     bound.apply_defaults()
     return dict(bound.arguments)
 
 
 def _compute_kwargs(
-    method: Literal["CP", "PARAFAC2"],
+    method: Method,
     rank: int,
     resolved: dict[str, Any],
 ) -> dict[str, Any]:
@@ -1010,6 +1281,19 @@ def _compute_kwargs(
             "normalize_factors": resolved["normalize"],
             "allow_nan_imputation": resolved["allow_nan_imputation"],
             "non_negative": resolved["non_negative"],
+        }
+    if method == "CMF":
+        return {
+            "rank": rank,
+            "CMF_max_iter": resolved["max_iter"],
+            "CMF_verbose_level": resolved["verbose_level"],
+            "CMF_tolerance": resolved["tolerance"],
+            "normalize_factors": resolved["normalize"],
+            "nn_modes": resolved["nn_modes"],
+            "aoadmm_options": resolved["aoadmm_options"],
+            "aoadmm_loss_tolerance": resolved["aoadmm_loss_tolerance"],
+            "negligible_rtol": resolved["negligible_rtol"],
+            "compute_device": resolved["compute_device"],
         }
     return {
         "rank": rank,
@@ -1028,7 +1312,7 @@ def _compute_kwargs(
 
 
 def _fit_one(
-    args: tuple[Literal["CP", "PARAFAC2"], int, Any, dict[str, Any]],
+    args: tuple[Method, int, Any, dict[str, Any]],
 ) -> tuple[Any, float | None, PARAFAC2Diagnostics | None, ConvergenceError | None]:
     """Run a single random-restart attempt, returning failure as a value.
 
@@ -1051,15 +1335,24 @@ def _fit_one(
                 **kwargs,
             )
             return _cp_to_cpu(decomp), float(errors[-1]), None, None
-        result, errors, diagnostics = compute_PARAFAC2_decomposition(
-            payload,
-            random_state=random_state,
-            **kwargs,
-        )
+        model: PARAFAC2Model | CMFModel
+        if method == "CMF":
+            cmf, errors, diagnostics = compute_CMF_decomposition(
+                payload,
+                random_state=random_state,
+                **kwargs,
+            )
+            model = _cmf_to_cpu(cmf)
+        else:
+            result, errors, diagnostics = compute_PARAFAC2_decomposition(
+                payload,
+                random_state=random_state,
+                **kwargs,
+            )
+            model = _parafac2_to_cpu(result)
     except ConvergenceError as error:
         return None, None, None, error
 
-    model = _parafac2_to_cpu(result)
     diagnostics = replace(
         diagnostics,
         max_nn_violation=_nn_violations(model, diagnostics.nn_modes),
@@ -1202,8 +1495,9 @@ def _build_restart_advisory(
     tally: RestartTally,
     solver: PARAFAC2Solver,
     max_iter: int,
-    tolerance: float,
-    aoadmm_loss_tolerance: float,
+    tolerance: float | None,
+    aoadmm_loss_tolerance: float | None,
+    method_label: str = "PARAFAC2",
 ) -> str | None:
     """Advise on thresholds when restarts are systematically struggling.
 
@@ -1220,12 +1514,12 @@ def _build_restart_advisory(
         level = tally.median_level("reconstruction")
         suggested = tally.suggested_max_iter()
         message = (
-            f"PARAFAC2(solver={solver!r}): {reconstruction_failures} of "
+            f"{method_label}(solver={solver!r}): {reconstruction_failures} of "
             f"{tally.attempted} restarts were rejected because the "
             f"reconstruction error had not converged within max_iter="
             f"{max_iter}."
         )
-        if level is not None:
+        if level is not None and tolerance is not None:
             message += (
                 f" Median level reached: |delta rel. reconstruction error| = "
                 f"{level:.2e} vs tolerance {tolerance:.1e}"
@@ -1242,15 +1536,17 @@ def _build_restart_advisory(
                 )
         if suggested is not None and suggested > max_iter:
             message += f" Suggested max_iter ~= {suggested} (extrapolated)."
+        tolerance_text = _format_tolerance(tolerance)
+        loss_tolerance_text = _format_tolerance(aoadmm_loss_tolerance)
         message += (
-            f" Alternatives: loosen PARAFAC2_tolerance if {tolerance:.1e} is "
-            f"stricter than you need"
+            f" Alternatives: loosen {method_label}_tolerance if "
+            f"{tolerance_text} is stricter than you need"
         )
         if solver == "matcouply":
             message += (
-                f", or lower aoadmm_loss_tolerance (currently "
-                f"{aoadmm_loss_tolerance:.1e}) if AO-ADMM is stopping early on "
-                f"the penalized objective"
+                f", or lower aoadmm_loss_tolerance, currently "
+                f"{loss_tolerance_text}, if AO-ADMM is stopping early on the "
+                "penalized objective"
             )
         return message + "."
 
@@ -1260,31 +1556,35 @@ def _build_restart_advisory(
         level_text = (
             f" Median max feasibility gap: {level:.2e}." if level is not None else ""
         )
+        default_note = " (the default here)" if method_label == "PARAFAC2" else ""
         return (
-            f"PARAFAC2(solver={solver!r}): {feasibility_failures} of "
+            f"{method_label}(solver={solver!r}): {feasibility_failures} of "
             f"{tally.attempted} restarts were rejected because AO-ADMM left "
             f"the constraints infeasible within max_iter={max_iter}."
-            f"{level_text} Raise PARAFAC2_max_iter, or relax feasibility_tol "
-            "via aoadmm_options if that gap is acceptable. "
-            "aoadmm_options={'constant_feasibility_penalty': True} (the "
-            "default here) also helps convergence markedly."
+            f"{level_text} Raise {method_label}_max_iter, or relax "
+            "feasibility_tol via aoadmm_options if that gap is acceptable. "
+            "aoadmm_options={'constant_feasibility_penalty': True}"
+            f"{default_note} also helps convergence markedly."
         )
 
     if tally.succeeded and tally.hit_iteration_limit >= tally.succeeded / 2:
+        if tolerance is None:
+            met = "were kept as the solver returned them"
+        else:
+            met = f"met the convergence tolerance of {tolerance:.1e}"
         return (
-            f"PARAFAC2(solver={solver!r}): {tally.hit_iteration_limit} of "
+            f"{method_label}(solver={solver!r}): {tally.hit_iteration_limit} of "
             f"{tally.succeeded} accepted restarts ran to the iteration limit "
-            f"(max_iter={max_iter}). The fits met the reconstruction "
-            f"tolerance {tolerance:.1e}, so they are usable, but every restart "
-            "is paying the full iteration budget and more iterations would "
-            "still improve them."
+            f"(max_iter={max_iter}). The fits {met}, so they are usable, but "
+            "every restart is paying the full iteration budget and more "
+            "iterations would still improve them."
         )
 
     return None
 
 
 def _repeat_with_restarts(
-    method: Literal["CP", "PARAFAC2"],
+    method: Method,
     payload: Any,
     kwargs: dict[str, Any],
     init_repeats: int,
@@ -1300,7 +1600,7 @@ def _repeat_with_restarts(
 
     Parameters
     ----------
-    method : Literal["CP", "PARAFAC2"]
+    method : Method
         Which compute function to call for each restart.
     payload : Any
         The `tensor`/`tensor_slices` argument for that function.
@@ -1431,7 +1731,7 @@ def run_CP_decomposition_repeated(
     device: torch.device = torch.device("cpu"),
     use_memory_efficient_khatri_rao: bool = True,
     verbose_level: int = 0,
-    tolerance: float = 1e-5,
+    tolerance: float | None = None,
     progress_bar: bool = True,
     normalize: bool = False,
     allow_nan_imputation: bool = False,
@@ -1478,7 +1778,7 @@ def run_CP_decomposition_repeated(
 
 
 def _nn_violations(
-    model: "PARAFAC2Model",
+    model: "PARAFAC2Model | CMFModel",
     nn_modes: tuple[int, ...] | None,
 ) -> dict[int, float]:
     """Largest per-component non-negativity violation in the returned model.
@@ -1511,11 +1811,12 @@ def _nn_violations(
 
 
 def _warn_if_nn_modes_violated(
-    model: "PARAFAC2Model",
+    model: "PARAFAC2Model | CMFModel",
     nn_modes: tuple[int, ...] | None,
     violations: dict[int, float],
     solver: PARAFAC2Solver,
     stacklevel: int = 3,
+    method_label: str = "PARAFAC2",
 ) -> None:
     """Warn when a constrained mode still carries negative entries.
 
@@ -1550,7 +1851,7 @@ def _warn_if_nn_modes_violated(
         return
 
     warnings.warn(
-        f"PARAFAC2(solver={solver!r}): the returned factors carry negative "
+        f"{method_label}(solver={solver!r}): the returned factors carry negative "
         f"entries in constrained {', '.join(offenders)}. These sit within "
         "AO-ADMM's feasibility gap -- the hard constraint holds on its "
         "auxiliary variables, not on the primal returned here -- so they are "
@@ -1566,6 +1867,7 @@ def _warn_if_nn_modes_violated(
 def _warn_if_accepted_at_iteration_limit(
     diagnostics: PARAFAC2Diagnostics | None,
     stacklevel: int = 3,
+    method_label: str = "PARAFAC2",
 ) -> None:
     """Explain an accepted fit whose own solver reports it didn't converge.
 
@@ -1587,17 +1889,31 @@ def _warn_if_accepted_at_iteration_limit(
         )
     loss_text = ""
     if diagnostics.final_relative_loss_change is not None:
+        loss_tolerance_text = _format_tolerance(diagnostics.loss_tolerance)
         loss_text = (
             f" -- relative loss change "
             f"{diagnostics.final_relative_loss_change:.1e} >= "
-            f"aoadmm_loss_tolerance {diagnostics.loss_tolerance:.1e}"
+            f"aoadmm_loss_tolerance {loss_tolerance_text}"
         )
+    if diagnostics.reconstruction_tolerance is None:
+        warnings.warn(
+            f"{method_label}(solver={diagnostics.solver!r}) stopped at the "
+            f"iteration limit ({diagnostics.n_iter}/{diagnostics.max_iter}) "
+            f"before meeting matcouply's own criterion{loss_text}. The fit is "
+            f"kept, as matcouply returns it (final rel. reconstruction error "
+            f"{diagnostics.relative_reconstruction_error:.3e}{gap_text}). Raise "
+            "max_iter to let it converge, or pass a tolerance to accept only "
+            "fits whose reconstruction error has settled to within it.",
+            stacklevel=stacklevel,
+        )
+        return
+    tolerance_text = _format_tolerance(diagnostics.reconstruction_tolerance)
     warnings.warn(
-        f"PARAFAC2(solver={diagnostics.solver!r}) accepted at the iteration "
+        f"{method_label}(solver={diagnostics.solver!r}) accepted at the iteration "
         f"limit ({diagnostics.n_iter}/{diagnostics.max_iter}). The "
         f"reconstruction error has converged -- |delta rel. reconstruction "
         f"error| = {diagnostics.reconstruction_error_change:.3e} < tolerance "
-        f"{diagnostics.reconstruction_tolerance:.1e}, final rel. "
+        f"{tolerance_text}, final rel. "
         f"reconstruction error "
         f"{diagnostics.relative_reconstruction_error:.3e}{gap_text} -- but "
         f"AO-ADMM's own penalized-objective criterion was not met{loss_text}. "
@@ -1608,18 +1924,20 @@ def _warn_if_accepted_at_iteration_limit(
 
 
 def _warn_parafac2_outcome(
-    model: "PARAFAC2Model | None",
+    model: "PARAFAC2Model | CMFModel | None",
     diagnostics: PARAFAC2Diagnostics | None,
     tally: RestartTally,
     solver: PARAFAC2Solver,
     max_iter: int,
-    tolerance: float,
-    aoadmm_loss_tolerance: float,
+    tolerance: float | None,
+    aoadmm_loss_tolerance: float | None,
     stacklevel: int = 3,
+    method_label: str = "PARAFAC2",
 ) -> None:
-    """Emit every PARAFAC2 warning about one best-of-restarts outcome.
+    """Emit every PARAFAC2/CMF warning about one best-of-restarts outcome.
 
-    Shared by `run_PARAFAC2_decomposition_repeated` and `jobs.collect`, so a
+    Shared by `run_PARAFAC2_decomposition_repeated`,
+    `run_CMF_decomposition_repeated` and `jobs.collect`, so a
     gathered fit is reported exactly like an in-process one. `stacklevel`
     points at the caller of whichever of those two called this.
     `max_nn_violation` is read from `diagnostics`, where `_fit_one` measured
@@ -1632,14 +1950,20 @@ def _warn_parafac2_outcome(
             diagnostics.max_nn_violation or {},
             solver,
             stacklevel=stacklevel + 1,
+            method_label=method_label,
         )
-        _warn_if_accepted_at_iteration_limit(diagnostics, stacklevel=stacklevel + 1)
+        _warn_if_accepted_at_iteration_limit(
+            diagnostics,
+            stacklevel=stacklevel + 1,
+            method_label=method_label,
+        )
     advisory = _build_restart_advisory(
         tally,
         solver,
         max_iter,
         tolerance,
         aoadmm_loss_tolerance,
+        method_label=method_label,
     )
     if advisory is not None:
         warnings.warn(advisory, stacklevel=stacklevel)
@@ -1664,14 +1988,14 @@ def run_PARAFAC2_decomposition_repeated(
     device: torch.device = ...,
     use_memory_efficient_khatri_rao: bool = ...,
     verbose_level: int = ...,
-    tolerance: float = ...,
+    tolerance: float | None = ...,
     progress_bar: bool = ...,
     normalize: bool = ...,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = ...,
     restart_procs: int = ...,
     solver: PARAFAC2Solver = ...,
     aoadmm_options: dict[str, Any] | None = ...,
-    aoadmm_loss_tolerance: float = ...,
+    aoadmm_loss_tolerance: float | None = ...,
     return_projections: bool = ...,
     negligible_rtol: float = ...,
     compute_device: torch.device | None = ...,
@@ -1689,14 +2013,14 @@ def run_PARAFAC2_decomposition_repeated(
     device: torch.device = ...,
     use_memory_efficient_khatri_rao: bool = ...,
     verbose_level: int = ...,
-    tolerance: float = ...,
+    tolerance: float | None = ...,
     progress_bar: bool = ...,
     normalize: bool = ...,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = ...,
     restart_procs: int = ...,
     solver: PARAFAC2Solver = ...,
     aoadmm_options: dict[str, Any] | None = ...,
-    aoadmm_loss_tolerance: float = ...,
+    aoadmm_loss_tolerance: float | None = ...,
     return_projections: bool = ...,
     negligible_rtol: float = ...,
     compute_device: torch.device | None = ...,
@@ -1714,14 +2038,14 @@ def run_PARAFAC2_decomposition_repeated(
     device: torch.device = torch.device("cpu"),
     use_memory_efficient_khatri_rao: bool = True,
     verbose_level: int = 0,
-    tolerance: float = 1e-5,
+    tolerance: float | None = None,
     progress_bar: bool = True,
     normalize: bool = False,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = "auto",
     restart_procs: int = 1,
     solver: PARAFAC2Solver = "tensorly",
     aoadmm_options: dict[str, Any] | None = None,
-    aoadmm_loss_tolerance: float = 1e-10,
+    aoadmm_loss_tolerance: float | None = None,
     return_projections: bool = False,
     negligible_rtol: float = 1e-6,
     compute_device: torch.device | None = None,
@@ -1802,6 +2126,137 @@ def run_PARAFAC2_decomposition_repeated(
         max_iter,
         tolerance,
         aoadmm_loss_tolerance,
+    )
+
+    if return_diagnostics:
+        return best_model, best_error, best_diagnostics
+    return best_model, best_error
+
+
+CMFResult = tuple[CMFModel, torch.Tensor]
+CMFResultWithDiagnostics = tuple[CMFModel, torch.Tensor, PARAFAC2Diagnostics]
+
+
+@overload
+def run_CMF_decomposition_repeated(
+    tensor_slices: list[torch.Tensor] | torch.Tensor,
+    rank: int,
+    max_iter: int = ...,
+    init_repeats: int = ...,
+    device: torch.device = ...,
+    use_memory_efficient_khatri_rao: bool = ...,
+    verbose_level: int = ...,
+    tolerance: float | None = ...,
+    progress_bar: bool = ...,
+    normalize: bool = ...,
+    nn_modes: tuple[int, ...] | None | Literal["auto"] = ...,
+    restart_procs: int = ...,
+    aoadmm_options: dict[str, Any] | None = ...,
+    aoadmm_loss_tolerance: float | None = ...,
+    negligible_rtol: float = ...,
+    compute_device: torch.device | None = ...,
+    return_diagnostics: Literal[False] = ...,
+) -> CMFResult:
+    ...
+
+
+@overload
+def run_CMF_decomposition_repeated(
+    tensor_slices: list[torch.Tensor] | torch.Tensor,
+    rank: int,
+    max_iter: int = ...,
+    init_repeats: int = ...,
+    device: torch.device = ...,
+    use_memory_efficient_khatri_rao: bool = ...,
+    verbose_level: int = ...,
+    tolerance: float | None = ...,
+    progress_bar: bool = ...,
+    normalize: bool = ...,
+    nn_modes: tuple[int, ...] | None | Literal["auto"] = ...,
+    restart_procs: int = ...,
+    aoadmm_options: dict[str, Any] | None = ...,
+    aoadmm_loss_tolerance: float | None = ...,
+    negligible_rtol: float = ...,
+    compute_device: torch.device | None = ...,
+    *,
+    return_diagnostics: Literal[True],
+) -> CMFResultWithDiagnostics:
+    ...
+
+
+def run_CMF_decomposition_repeated(
+    tensor_slices: list[torch.Tensor] | torch.Tensor,
+    rank: int,
+    max_iter: int = 2000,
+    init_repeats: int = 50,
+    device: torch.device = torch.device("cpu"),
+    use_memory_efficient_khatri_rao: bool = True,
+    verbose_level: int = 0,
+    tolerance: float | None = None,
+    progress_bar: bool = True,
+    normalize: bool = False,
+    nn_modes: tuple[int, ...] | None | Literal["auto"] = "auto",
+    restart_procs: int = 1,
+    aoadmm_options: dict[str, Any] | None = None,
+    aoadmm_loss_tolerance: float | None = None,
+    negligible_rtol: float = 1e-6,
+    compute_device: torch.device | None = None,
+    return_diagnostics: bool = False,
+) -> CMFResult | CMFResultWithDiagnostics:
+    """Repeatedly fit a non-negative CMF from random restarts.
+
+    See `compute_CMF_decomposition` for the model, `nn_modes`,
+    `aoadmm_options` and the tolerances, and `_repeat_with_restarts` for
+    `restart_procs`. Option names match `run_PARAFAC2_decomposition_repeated`
+    (without `solver`, since only matcouply fits a CMF), so one `**kwargs`
+    dict routes to either; `use_memory_efficient_khatri_rao` is accepted for
+    that reason and has no effect here.
+
+    Warns like the PARAFAC2 runner when the solver is struggling.
+
+    Returns
+    -------
+    tuple
+        `(model, error)`, plus the winning restart's diagnostics when
+        `return_diagnostics=True`. `model` is a `CMFModel`; `error` is the
+        relative reconstruction error.
+    """
+    kwargs = _compute_kwargs(
+        "CMF",
+        rank,
+        {
+            "max_iter": max_iter,
+            "verbose_level": verbose_level,
+            "tolerance": tolerance,
+            "normalize": normalize,
+            "nn_modes": nn_modes,
+            "aoadmm_options": aoadmm_options,
+            "aoadmm_loss_tolerance": aoadmm_loss_tolerance,
+            "negligible_rtol": negligible_rtol,
+            "compute_device": compute_device,
+        },
+    )
+
+    best_model, best_error, best_diagnostics, tally = _repeat_with_restarts(
+        "CMF",
+        tensor_slices,
+        kwargs,
+        init_repeats,
+        compute_device if compute_device is not None else device,
+        verbose_level,
+        progress_bar,
+        restart_procs=restart_procs,
+    )
+
+    _warn_parafac2_outcome(
+        best_model,
+        best_diagnostics,
+        tally,
+        "matcouply",
+        max_iter,
+        tolerance,
+        aoadmm_loss_tolerance,
+        method_label="CMF",
     )
 
     if return_diagnostics:

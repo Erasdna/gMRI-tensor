@@ -13,7 +13,6 @@ from itertools import groupby
 from pathlib import Path
 from typing import Any
 from typing import cast
-from typing import Literal
 from typing import NamedTuple
 
 import matplotlib
@@ -23,7 +22,10 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
+from gMRItensor.decomposition import CMFModel
+from gMRItensor.decomposition import Method
 from gMRItensor.decomposition import PARAFAC2Model
+from gMRItensor.decomposition import run_CMF_decomposition_repeated
 from gMRItensor.decomposition import run_CP_decomposition_repeated
 from gMRItensor.decomposition import run_PARAFAC2_decomposition_repeated
 from gMRItensor.decomposition import setup_backend
@@ -463,23 +465,27 @@ def _numpy(value: Any) -> np.ndarray:
     return np.asarray(value)
 
 
-def _method(method: str) -> Literal["CP", "PARAFAC2"]:
-    return "CP" if method == "cp" else "PARAFAC2"
+_METHODS: dict[str, Method] = {"cp": "CP", "parafac2": "PARAFAC2", "cmf": "CMF"}
+
+
+def _method(method: str) -> Method:
+    return _METHODS[method]
 
 
 def _fit_options(fit: FitOptions, method: str) -> dict[str, Any]:
     """`run_*_decomposition_repeated` options from `fit` (also what
     `jobs.run_tasks`/`jobs.collect` take; restart-loop ones are ignored there).
 
-    CP's non-negativity is all-or-nothing (`non_negative`); PARAFAC2 takes
-    the modes (`nn_modes`, `"auto"` = the solver's default) and `solver`.
+    CP's non-negativity is all-or-nothing (`non_negative`); PARAFAC2 and
+    CMF take the modes (`nn_modes`, `"auto"` = the method's default), and
+    PARAFAC2 also its `solver` (CMF only has matcouply's).
     """
     specific: dict[str, Any]
     if method == "cp":
         specific = {"non_negative": fit.non_negative_modes is not None}
     else:
         specific = {"nn_modes": fit.non_negative_modes}
-        if fit.solver is not None:
+        if fit.solver is not None and method == "parafac2":
             specific["solver"] = fit.solver
     return {
         "init_repeats": fit.restarts,
@@ -592,7 +598,7 @@ def load_plan(output_dir: Path, expected: type) -> Any:
 
 def _saved_decomposition(
     rank: int,
-    model: PARAFAC2Model | tuple[Any, list[Any]],
+    model: PARAFAC2Model | CMFModel | tuple[Any, list[Any]],
     error: float,
     data: DecompositionInput,
 ) -> SavedDecomposition:
@@ -610,9 +616,9 @@ def _saved_decomposition(
         "template_shape": data.template_shape,
         "template_affine": data.template_affine,
     }
-    if isinstance(model, PARAFAC2Model):
+    if isinstance(model, (PARAFAC2Model, CMFModel)):
         return SavedDecomposition(
-            method="parafac2",
+            method="cmf" if isinstance(model, CMFModel) else "parafac2",
             weights=_numpy(model.weights),
             subject_mode=_numpy(model.subject_mode),
             label_mode=_numpy(model.label_mode),
@@ -682,7 +688,16 @@ def run_decomposition(options: DecompositionOptions) -> list[Path]:
                 rank,
                 **fit_kwargs,
             )
-            model: PARAFAC2Model | tuple[Any, list[Any]] = (weights, factors)
+            model: PARAFAC2Model | CMFModel | tuple[Any, list[Any]] = (
+                weights,
+                factors,
+            )
+        elif options.method == "cmf":
+            model, error = run_CMF_decomposition_repeated(
+                data.data,
+                rank,
+                **fit_kwargs,
+            )
         else:
             model, error = run_PARAFAC2_decomposition_repeated(
                 data.data,

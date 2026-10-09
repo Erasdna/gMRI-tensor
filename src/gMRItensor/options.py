@@ -110,13 +110,14 @@ class FitOptions:
 
     `non_negative_modes`: `"auto"` (the solver's default), None
     (unconstrained) or mode indices -- 0 subject, 1 time/evolving, 2 label.
-    `solver` is PARAFAC2's (None = its default). `extra` holds further
+    `tolerance` None uses the solver's own default. `solver` is PARAFAC2's
+    (None = its default). `extra` holds further
     runner options, passed unchanged.
     """
 
     restarts: int = 50
     max_iter: int = 2000
-    tolerance: float = 1e-5
+    tolerance: float | None = None
     restart_procs: int = 1
     non_negative_modes: Literal["auto"] | tuple[int, ...] | None = "auto"
     solver: Literal["tensorly", "matcouply"] | None = None
@@ -126,7 +127,10 @@ class FitOptions:
         for name in ("restarts", "max_iter", "restart_procs"):
             value = getattr(self, name)
             _check(value >= 1, f"{name} must be >= 1, got {value}")
-        _check(self.tolerance > 0, f"tolerance must be > 0, got {self.tolerance}")
+        _check(
+            self.tolerance is None or self.tolerance > 0,
+            f"tolerance must be > 0, got {self.tolerance}",
+        )
         _check(
             self.solver in (None, "tensorly", "matcouply"),
             f"solver must be tensorly or matcouply, got {self.solver!r}",
@@ -164,8 +168,8 @@ class DistributedOptions:
 
 def _check_fit(method: str, tensor: TensorOptions, fit: FitOptions) -> None:
     _check(
-        method in ("cp", "parafac2"),
-        f"method must be cp or parafac2, got {method!r}",
+        method in ("cp", "parafac2", "cmf"),
+        f"method must be cp, parafac2 or cmf, got {method!r}",
     )
     modes = fit.non_negative_modes
     if method == "cp":
@@ -175,6 +179,11 @@ def _check_fit(method: str, tensor: TensorOptions, fit: FitOptions) -> None:
             "none or 0,1,2",
         )
         _check(fit.solver is None, "solver applies to PARAFAC2 only")
+    if method == "cmf":
+        _check(
+            fit.solver in (None, "matcouply"),
+            "CMF is fitted with matcouply only; solver must be unset or matcouply",
+        )
     _check(
         not tensor.center or modes is None,
         "center makes the data negative; it needs non_negative_modes none",
@@ -188,7 +197,7 @@ class DecompositionOptions:
 
     input: Path
     output_dir: Path
-    method: Literal["cp", "parafac2"]
+    method: Literal["cp", "parafac2", "cmf"]
     ranks: tuple[int, ...]
     statistic: Literal["median", "mean"] = "median"
     tensor: TensorOptions = field(default_factory=TensorOptions)
@@ -220,7 +229,7 @@ class ReplicabilityOptions:
 
     input: Path
     output_dir: Path
-    method: Literal["cp", "parafac2"]
+    method: Literal["cp", "parafac2", "cmf"]
     ranks: tuple[int, ...]
     engine: Literal["halfhalf", "cv"]
     repeats: int

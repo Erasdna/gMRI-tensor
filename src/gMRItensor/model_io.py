@@ -16,12 +16,16 @@ _OPTIONAL_ARRAYS = (
 )
 
 
+#: Methods saved with a ragged, per-subject evolving mode.
+_EVOLVING_METHODS = ("parafac2", "cmf")
+
+
 @dataclass(frozen=True)
 class SavedDecomposition:
     """A fit plus what is needed to interpret it.
 
-    CP has one shared `time_mode` over `timepoints`; PARAFAC2 has one
-    `evolving_states[i]` per subject over `timepoints[i]`. `labels` and
+    CP has one shared `time_mode` over `timepoints`; PARAFAC2 and CMF have
+    one `evolving_states[i]` per subject over `timepoints[i]`. `labels` and
     `label_index` identify `label_mode` rows, as returned by
     `load_tensor_from_parquet`. `scale_mean`/`scale_std` are the per-label
     statistics of the fitted data: `centered` says whether `scale_mean` was
@@ -30,7 +34,7 @@ class SavedDecomposition:
     on the template grid (`template_shape`, `template_affine`).
     """
 
-    method: Literal["cp", "parafac2"]
+    method: Literal["cp", "parafac2", "cmf"]
     rank: int
     error: float
     weights: np.ndarray
@@ -63,8 +67,8 @@ def _read_ragged(file: h5py.File, name: str) -> list[np.ndarray]:
 
 def save_decomposition(path: Path, saved: SavedDecomposition) -> None:
     """Write `saved` to `path`, replacing it only once fully written."""
-    if saved.method == "parafac2" and saved.evolving_states is None:
-        raise ValueError("A PARAFAC2 decomposition needs evolving_states")
+    if saved.method in _EVOLVING_METHODS and saved.evolving_states is None:
+        raise ValueError(f"A {saved.method} decomposition needs evolving_states")
     if saved.method == "cp" and saved.time_mode is None:
         raise ValueError("A CP decomposition needs time_mode")
 
@@ -86,7 +90,7 @@ def save_decomposition(path: Path, saved: SavedDecomposition) -> None:
                 data=np.asarray(saved.subjects, dtype=object),
                 dtype=h5py.string_dtype(),
             )
-            if saved.method == "parafac2":
+            if saved.method in _EVOLVING_METHODS:
                 _write_ragged(file, "timepoints", list(saved.timepoints))
                 _write_ragged(
                     file,
@@ -111,7 +115,7 @@ def load_decomposition(path: Path) -> SavedDecomposition:
             name: file[name][()] if name in file else None for name in _OPTIONAL_ARRAYS
         }
         subjects = np.asarray(file["subjects"].asstr()[()])
-        if method == "parafac2":
+        if method in _EVOLVING_METHODS:
             timepoints: np.ndarray | list[np.ndarray] = _read_ragged(file, "timepoints")
             evolving_states = _read_ragged(file, "evolving_states")
             time_mode = None

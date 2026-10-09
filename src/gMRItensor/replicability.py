@@ -3,7 +3,6 @@ from abc import abstractmethod
 from collections.abc import Hashable
 from collections.abc import Mapping
 from typing import Any
-from typing import Literal
 
 import numpy as np
 import torch
@@ -13,6 +12,8 @@ from sklearn.model_selection import StratifiedShuffleSplit
 from tlviz.factor_tools import factor_match_score
 
 from .decomposition import _resolve_options
+from .decomposition import CMFModel
+from .decomposition import Method
 from .decomposition import PARAFAC2Model
 from .jobs import collect
 from .jobs import CPModel
@@ -42,9 +43,21 @@ def _comparable_modes(factors: Factors) -> list[torch.Tensor]:
 
 
 def _weights_and_factors(
-    model: PARAFAC2Model | CPModel | None,
+    model: PARAFAC2Model | CMFModel | CPModel | None,
 ) -> tuple[torch.Tensor, Factors]:
-    """A fit as `(weights, factors)`; PARAFAC2's mode 1 is the ragged list."""
+    """A fit as `(weights, factors)`; PARAFAC2's and CMF's mode 1 is the
+    ragged list.
+
+    CMF's subject mode is derived from its time courses (see `CMFModel`), so
+    it is replaced by ones, which always match: scoring it would count the
+    time courses twice.
+    """
+    if isinstance(model, CMFModel):
+        return model.weights, [
+            torch.ones_like(model.subject_mode),
+            model.evolving_states,
+            model.label_mode,
+        ]
     if isinstance(model, PARAFAC2Model):
         return model.weights, [
             model.subject_mode,
@@ -69,10 +82,12 @@ def _align_pair(
     list sitting beside tensors -- so the selected `B_i` are concatenated
     into one `(sum_i J_i, rank)` matrix.
 
-    That stacking is exact rather than a convenience: the PARAFAC2 constraint
-    fixes `||B_i[:, r]||` independent of `i`, so the stacked column cosine
-    equals the mean per-subject cosine, and a subject with 2 timepoints
-    weighs the same as one with 40.
+    For PARAFAC2 that stacking is exact rather than a convenience: the
+    constraint fixes `||B_i[:, r]||` independent of `i`, so the stacked
+    column cosine equals the mean per-subject cosine, and a subject with 2
+    timepoints weighs the same as one with 40. CMF's `B_i` carry each
+    subject's amplitude instead, so there the stacked cosine weighs subjects
+    by their amplitude -- the comparison the model itself makes.
 
     Both fits are built here together so the per-subject block heights can be
     cross-checked. A subject-index misalignment is otherwise silent whenever
@@ -316,12 +331,12 @@ def evaluate_replicability_multiproc(
     replicability_engine: ReplicabilityEngine,
     tensor: torch.Tensor | list[torch.Tensor],
     rank: int,
-    method: Literal["CP", "PARAFAC2"] = "CP",
+    method: Method = "CP",
     stratification: ArrayLike | None = None,
     n_procs: int = 1,
     **CP_kwargs: Any,
 ) -> list[tuple[Any, ...]]:
-    """Evaluate replicability using repeated CP or PARAFAC2 decompositions.
+    """Evaluate replicability using repeated CP, PARAFAC2 or CMF fits.
 
     The centralised form of `plan_replicability -> run_tasks -> collect ->
     compute_fms`; a distributed run of the same steps gives identical scores.
@@ -330,9 +345,9 @@ def evaluate_replicability_multiproc(
         replicability_engine: Engine defining the replicability strategy
         tensor: Input to decompose. A regular tensor (samples × ...) for
             method="CP", or a list of per-subject slices (mode 1 may be
-            ragged) for method="PARAFAC2".
+            ragged) for method="PARAFAC2" or "CMF".
         rank: Number of components for the decomposition
-        method: "CP" or "PARAFAC2"
+        method: "CP", "PARAFAC2" or "CMF"
         stratification: Optional stratification labels for splitting
         n_procs: Number of parallel processes, spread over every
             (group, seed) fit. Must be 1 on CUDA.

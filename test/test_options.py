@@ -55,12 +55,17 @@ def test_non_negative_modes_are_normalised(modes: Any, expected: Any) -> None:
     assert FitOptions(non_negative_modes=modes).non_negative_modes == expected
 
 
+def test_fit_tolerance_defaults_to_the_solvers() -> None:
+    assert FitOptions().tolerance is None
+
+
 @pytest.mark.parametrize(
     "make, match",
     [
         (lambda: FitOptions(non_negative_modes=(3,)), "non_negative_modes"),
         (lambda: FitOptions(restarts=0), "restarts"),
         (lambda: FitOptions(tolerance=0.0), "tolerance"),
+        (lambda: FitOptions(tolerance=-1.0), "tolerance"),
         (lambda: FitOptions(extra={"nn_modes": (0,)}), "nn_modes"),
         (lambda: FitOptions(solver="other"), "solver"),  # type: ignore[arg-type]
         (lambda: TensorOptions(max_invalid_fraction=1.5), "max_invalid_fraction"),
@@ -76,6 +81,10 @@ def test_non_negative_modes_are_normalised(modes: Any, expected: Any) -> None:
         ),
         (
             lambda: _decomposition(method="cp", fit=FitOptions(solver="matcouply")),
+            "solver",
+        ),
+        (
+            lambda: _decomposition(method="cmf", fit=FitOptions(solver="tensorly")),
             "solver",
         ),
         (lambda: _decomposition(tensor=TensorOptions(center=True)), "center"),
