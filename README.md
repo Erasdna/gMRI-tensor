@@ -37,7 +37,7 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
     --method parafac2 --ranks 2 3 4
 gmri replicability run --input results/data/roi_signal.parquet --output-dir results/replicability \
     --method parafac2 --ranks 2 3 4 --engine halfhalf --repeats 20
-gmri plot decomposition --model results/parafac2/rank_3.h5 --subject-info subjects.csv \
+gmri plot decomposition --model results/parafac2/parafac2_rank_3.h5 --subject-info subjects.csv \
     --group-variable diagnosis --output-dir results --segmentation template_seg.nii.gz
 ```
 

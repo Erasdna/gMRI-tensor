@@ -31,7 +31,9 @@ class SavedDecomposition:
     statistics of the fitted data: `centered` says whether `scale_mean` was
     subtracted, and `scale_std` is None if the data was not divided by it.
     Voxel models also carry each `label_mode` row's `voxel_coords` (i, j, k)
-    on the template grid (`template_shape`, `template_affine`).
+    on the template grid (`template_shape`, `template_affine`), and
+    `template_path`, the segmentation preprocessing recorded as the template
+    (a record only; it is never read).
     """
 
     method: Literal["cp", "parafac2", "cmf"]
@@ -52,6 +54,7 @@ class SavedDecomposition:
     voxel_coords: np.ndarray | None = None
     template_shape: np.ndarray | None = None
     template_affine: np.ndarray | None = None
+    template_path: str | None = None
 
 
 def _write_ragged(file: h5py.File, name: str, arrays: list[np.ndarray]) -> None:
@@ -80,6 +83,8 @@ def save_decomposition(path: Path, saved: SavedDecomposition) -> None:
             file.attrs["rank"] = saved.rank
             file.attrs["error"] = saved.error
             file.attrs["centered"] = saved.centered
+            if saved.template_path is not None:
+                file.attrs["template_path"] = saved.template_path
             for name in _ARRAYS:
                 file.create_dataset(name, data=np.asarray(getattr(saved, name)))
             for name in _OPTIONAL_ARRAYS:
@@ -128,6 +133,11 @@ def load_decomposition(path: Path) -> SavedDecomposition:
             rank=int(file.attrs["rank"]),
             error=float(file.attrs["error"]),
             centered=bool(file.attrs.get("centered", False)),
+            template_path=(
+                str(file.attrs["template_path"])
+                if "template_path" in file.attrs
+                else None
+            ),
             subjects=subjects,
             timepoints=timepoints,
             time_mode=time_mode,

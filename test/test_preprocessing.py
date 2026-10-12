@@ -2,6 +2,7 @@ import json
 import warnings
 from collections import Counter
 from operator import itemgetter
+from pathlib import Path
 
 import nibabel as nib
 import numpy as np
@@ -1154,6 +1155,10 @@ def test_write_preprocessed_data_store_voxels(tmp_path, n_procs):
     coords_metadata = read_signal_metadata(paths.coords)
     assert json.loads(coords_metadata["shape"]) == [2, 2, 2]
     np.testing.assert_array_equal(json.loads(coords_metadata["affine"]), np.eye(4))
+    # Which file the template came from, for the record.
+    assert coords_metadata["template"] == str(
+        Path(args_list[0]["segmentation_path"]).resolve(),
+    )
     tensor, *_ = load_tensor_from_parquet(paths.voxels, "cp")
     assert tensor.shape == (2, 2, 6)
 

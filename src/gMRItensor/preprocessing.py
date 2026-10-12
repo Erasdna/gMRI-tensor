@@ -447,7 +447,9 @@ def read_signal_metadata(path: Path | str) -> dict[str, str]:
 
     `kind` (`roi_signal`, `voxels` or `coords`), `input_type`, `signal`
     (`delta_R1` or `ratio`) and `unit`; coords files add the template
-    `shape` and `affine` as JSON.
+    `shape` and `affine` as JSON, and `template`, the first scan's resolved
+    segmentation path. `template` is a record only: the common-template
+    check compares labels and voxel coordinates, not files.
     """
     metadata = pq.read_schema(path).metadata or {}
     return {
@@ -561,11 +563,13 @@ def _preprocess_worker(
 
 
 def _template_metadata(segmentation_path: Path) -> dict[str, str]:
-    """Shape and affine of the (canonical) template grid, as JSON."""
+    """Shape and affine of the (canonical) template grid, as JSON, and the
+    resolved path of the segmentation it was read from (for the record)."""
     image = cast(Nifti1Image, nib.as_closest_canonical(nib.load(segmentation_path)))
     return {
         "shape": json.dumps([int(n) for n in image.shape[:3]]),
         "affine": json.dumps(np.asarray(image.affine).tolist()),
+        "template": str(Path(segmentation_path).resolve()),
     }
 
 

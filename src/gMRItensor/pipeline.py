@@ -76,7 +76,7 @@ from gMRItensor.replicability import HalfHalfEngine
 from gMRItensor.replicability import ReplicabilityEngine
 from gMRItensor.roi_groups import add_concentration
 from gMRItensor.roi_groups import aggregate_roi_signal
-from gMRItensor.roi_groups import get_roi_presets
+from gMRItensor.roi_groups import is_csf
 from nibabel.nifti1 import Nifti1Image
 
 matplotlib.use("Agg")
@@ -332,7 +332,6 @@ def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult
                     fig,
                     figure_path(
                         options.output_dir,
-                        None,
                         roi,
                         statistic,
                         options.layout,
@@ -364,6 +363,7 @@ class DecompositionInput(NamedTuple):
     voxel_coords: np.ndarray | None = None
     template_shape: np.ndarray | None = None
     template_affine: np.ndarray | None = None
+    template_path: str | None = None
 
 
 def _roi_tensor_source(path: Path, statistic: str) -> pa.BufferReader:
@@ -387,8 +387,9 @@ def _voxel_template(
     path: Path,
     labels: np.ndarray,
     label_index: np.ndarray,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Coordinates of each tensor column, plus the template shape/affine."""
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, str | None]:
+    """Coordinates of each tensor column, plus the template shape/affine and
+    the recorded template path (None for files written before it was)."""
     coords_path = path.with_name(path.name.replace(".parquet", ".coords.parquet"))
     _require(coords_path, "preprocess --store-voxels")
     metadata = read_signal_metadata(coords_path)
@@ -399,6 +400,7 @@ def _voxel_template(
         voxel_coords,
         np.asarray(json.loads(metadata["shape"]), dtype=np.int64),
         np.asarray(json.loads(metadata["affine"]), dtype=np.float64),
+        metadata.get("template"),
     )
 
 
@@ -443,7 +445,7 @@ def load_decomposition_input(
         if isinstance(data, np.ndarray)
         else [torch.as_tensor(s) for s in data]
     )
-    template: tuple[Any, Any, Any] = (None, None, None)
+    template: tuple[Any, Any, Any, Any] = (None, None, None, None)
     if kind == "voxels":
         template = _voxel_template(path, labels, label_index)
     return DecompositionInput(
@@ -526,7 +528,7 @@ def _run_job_tasks(
     n_procs: int,
     options: dict[str, Any],
 ) -> None:
-    """Fit `tasks` rank by rank into `<store_dir>/rank_<r>/`."""
+    """Fit `tasks` rank by rank into `<store_dir>/<method>_rank_<r>/`."""
     options = dict(options)
     progress_bar = bool(options.pop("progress_bar", False))
     setup_backend()
@@ -536,7 +538,7 @@ def _run_job_tasks(
             data.data,
             rank,
             _method(method),
-            DirectoryStore(store_dir / f"rank_{rank}"),
+            DirectoryStore(store_dir / _model_name(method, rank)),
             n_procs=n_procs,
             progress_bar=progress_bar,
             **options,
@@ -553,7 +555,7 @@ def _collect_rank(
     """Gather one rank's restarts; refuse if any restart has no result yet."""
     summaries = collect(
         plan,
-        DirectoryStore(store_dir / f"rank_{rank}"),
+        DirectoryStore(store_dir / _model_name(method, rank)),
         method=_method(method),
         **options,
     )
@@ -582,7 +584,13 @@ def load_plan(output_dir: Path, expected: type) -> Any:
     path = Path(output_dir) / _PLAN_FILE
     if not path.exists():
         raise FileNotFoundError(f"{path} not found; run `plan` first")
-    options = options_from_json(json.loads(path.read_text()))
+    try:
+        options = options_from_json(json.loads(path.read_text()))
+    except (json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ValueError(
+            f"{path} is not a valid plan ({type(error).__name__}: {error}); "
+            "run `plan` again",
+        ) from None
     if not isinstance(options, expected):
         raise ValueError(
             f"{path} is a {type(options).__name__} plan, not {expected.__name__}",
@@ -615,6 +623,7 @@ def _saved_decomposition(
         "voxel_coords": data.voxel_coords,
         "template_shape": data.template_shape,
         "template_affine": data.template_affine,
+        "template_path": data.template_path,
     }
     if isinstance(model, (PARAFAC2Model, CMFModel)):
         return SavedDecomposition(
@@ -637,20 +646,30 @@ def _saved_decomposition(
     )
 
 
+def _model_name(method: str, rank: int) -> str:
+    """`<method>_rank_<r>`: the model file's stem, and everything named after
+    it (figures, the restart store), so methods never overwrite each other."""
+    return f"{method}_rank_{rank}"
+
+
 def _write_decompositions(
     options: DecompositionOptions,
     fits: list[SavedDecomposition],
 ) -> list[Path]:
-    """`rank_<r>.h5` per fit, `fits.csv` and the provenance record."""
+    """`<method>_rank_<r>.h5` per fit, `fits.csv` and the provenance record."""
     output_dir = Path(options.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for saved in fits:
-        path = output_dir / f"rank_{saved.rank}.h5"
+        path = output_dir / f"{_model_name(saved.method, saved.rank)}.h5"
         save_decomposition(path, saved)
         written.append(path)
     pd.DataFrame(
-        {"rank": [s.rank for s in fits], "error": [s.error for s in fits]},
+        {
+            "method": [s.method for s in fits],
+            "rank": [s.rank for s in fits],
+            "error": [s.error for s in fits],
+        },
     ).to_csv(output_dir / "fits.csv", index=False)
     write_provenance(output_dir, "decompose", options)
     return written
@@ -812,6 +831,7 @@ def _score_rows(
             common, fold_i, fold_j, fms = score
             rows.append(
                 {
+                    "method": options.method,
                     "rank": rank,
                     "fold_i": fold_i,
                     "fold_j": fold_j,
@@ -821,7 +841,14 @@ def _score_rows(
             )
         else:
             split, fms = score
-            rows.append({"rank": rank, "split": split, "fms": float(fms)})
+            rows.append(
+                {
+                    "method": options.method,
+                    "rank": rank,
+                    "split": split,
+                    "fms": float(fms),
+                },
+            )
     return rows
 
 
@@ -830,9 +857,9 @@ def _write_replicability(
     rows: list[dict[str, Any]],
 ) -> Path:
     columns = (
-        ["rank", "fold_i", "fold_j", "n_common", "fms"]
+        ["method", "rank", "fold_i", "fold_j", "n_common", "fms"]
         if options.engine == "cv"
-        else ["rank", "split", "fms"]
+        else ["method", "rank", "split", "fms"]
     )
     output_dir = Path(options.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -945,9 +972,28 @@ class _Spatial(NamedTuple):
     slices: tuple[int, int, int]
 
 
-def _canonical_data(path: Path) -> np.ndarray:
+def _canonical_image(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Voxel data and affine of `path`, in canonical (RAS) orientation."""
     image = cast(Nifti1Image, nib.as_closest_canonical(nib.load(path)))
-    return np.asarray(image.get_fdata())
+    return np.asarray(image.get_fdata()), np.asarray(image.affine)
+
+
+def _check_grid(
+    path: Path,
+    data: np.ndarray,
+    affine: np.ndarray,
+    shape: tuple[int, ...],
+    expected_affine: np.ndarray | None,
+    reference: str,
+) -> None:
+    """Raise unless `path` lies on the `shape`/`expected_affine` grid."""
+    same_affine = expected_affine is None or np.allclose(affine, expected_affine)
+    if tuple(data.shape[:3]) != tuple(shape) or not same_affine:
+        raise ValueError(
+            f"{path} is not on the grid of {reference}: shape "
+            f"{tuple(data.shape[:3])} vs {tuple(shape)}"
+            + ("" if same_affine else ", and a different affine"),
+        )
 
 
 def _spatial_inputs(
@@ -955,12 +1001,17 @@ def _spatial_inputs(
     options: DecompositionPlotOptions,
 ) -> _Spatial | None:
     """Voxel layout of `saved.label_mode`; None for an ROI model without a
-    segmentation to map onto."""
-    segmentation = (
-        np.rint(_canonical_data(options.segmentation)).astype(np.int64)
-        if options.segmentation is not None
-        else None
-    )
+    segmentation to map onto.
+
+    Every image given is checked against the grid it is drawn on: a voxel
+    model's template (its stored shape and affine), or an ROI model's
+    segmentation.
+    """
+    segmentation = segmentation_affine = None
+    if options.segmentation is not None:
+        segmentation_data, segmentation_affine = _canonical_image(options.segmentation)
+        segmentation = np.rint(segmentation_data).astype(np.int64)
+
     if saved.voxel_coords is None:
         if segmentation is None:
             return None
@@ -976,28 +1027,56 @@ def _spatial_inputs(
             segmentation,
         )
         voxel_labels = segmentation[tuple(index_list.T)]
-        shape = segmentation.shape
+        shape = tuple(segmentation.shape)
+        grid_affine = segmentation_affine
+        reference = f"the segmentation {options.segmentation}"
     else:
         mode, index_list = saved.label_mode, saved.voxel_coords
         voxel_labels = saved.labels
         shape = tuple(int(n) for n in np.asarray(saved.template_shape))
+        grid_affine = saved.template_affine
+        reference = "the model's template"
+        if saved.template_path:
+            reference += f", {saved.template_path},"
+        if segmentation is not None:
+            _check_grid(
+                Path(options.segmentation),  # type: ignore[arg-type]
+                segmentation,
+                segmentation_affine,  # type: ignore[arg-type]
+                shape,
+                grid_affine,
+                reference,
+            )
 
     if options.background is not None:
-        background = _canonical_data(options.background)
-        if background.shape[:3] != tuple(shape):
-            raise ValueError(
-                f"background {options.background} has shape {background.shape}, "
-                f"but the template is {tuple(shape)}",
-            )
+        background, background_affine = _canonical_image(options.background)
+        _check_grid(
+            Path(options.background),
+            background,
+            background_affine,
+            shape,
+            grid_affine,
+            reference,
+        )
     elif segmentation is not None:
         background = (segmentation > 0).astype(float)
     else:
         background = np.zeros(shape)
         background[tuple(index_list.T)] = 1.0
 
-    csf = np.isin(voxel_labels, get_roi_presets()["all_csf"])
     slices = options.slices or tuple(int(i) for i in np.rint(index_list.mean(axis=0)))
-    return _Spatial(mode, index_list, csf, background, slices)  # type: ignore[arg-type]
+    if not all(0 <= s < n for s, n in zip(slices, shape)):
+        raise ValueError(
+            f"slices {tuple(slices)} are outside the grid; each must be in "
+            f"0..{tuple(n - 1 for n in shape)}",
+        )
+    return _Spatial(
+        mode,
+        index_list,
+        is_csf(voxel_labels),
+        background,
+        slices,  # type: ignore[arg-type]
+    )
 
 
 def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:

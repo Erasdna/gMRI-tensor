@@ -1,3 +1,4 @@
+import dataclasses
 from pathlib import Path
 from typing import Any
 
@@ -268,9 +269,11 @@ def test_run_decomposition_from_roi_signal(
     written = run_decomposition(options)
 
     out = options.output_dir
-    assert written == [out / "rank_1.h5", out / "rank_2.h5"]
-    assert list(pd.read_csv(out / "fits.csv")["rank"]) == [1, 2]
-    saved = load_decomposition(out / "rank_2.h5")
+    assert written == [out / "parafac2_rank_1.h5", out / "parafac2_rank_2.h5"]
+    fits = pd.read_csv(out / "fits.csv")
+    assert list(fits["rank"]) == [1, 2]
+    assert list(fits["method"]) == ["parafac2", "parafac2"]
+    saved = load_decomposition(out / "parafac2_rank_2.h5")
     assert saved.method == "parafac2"
     assert saved.evolving_states is not None and len(saved.evolving_states) == 6
     assert saved.label_mode.shape == (5, 2)
@@ -326,7 +329,7 @@ def test_run_decomposition_from_voxels_keeps_coordinates(synthetic_study: Any) -
 
     run_decomposition(options)
 
-    saved = load_decomposition(options.output_dir / "rank_2.h5")
+    saved = load_decomposition(options.output_dir / "parafac2_rank_2.h5")
     assert saved.label_mode.shape == (6**3, 2)
     assert saved.voxel_coords is not None and saved.voxel_coords.shape == (6**3, 3)
     np.testing.assert_array_equal(saved.template_shape, [6, 6, 6])
@@ -361,7 +364,7 @@ def test_cp_wiring_and_center(
     assert tensor.shape == (6, 3, 5)
     np.testing.assert_allclose(tensor.mean(axis=(0, 1)), 0.0, atol=1e-5)
     assert kwargs["init_repeats"] == 4 and kwargs["non_negative"] is False
-    saved = load_decomposition(options.output_dir / "rank_3.h5")
+    saved = load_decomposition(options.output_dir / "cp_rank_3.h5")
     assert saved.time_mode is not None and saved.time_mode.shape == (3, 3)
     assert saved.centered is True and saved.scale_std is None
 
@@ -420,12 +423,15 @@ def test_distributed_decomposition_matches_centralised(synthetic_study: Any) -> 
         run_decomposition_job(distributed.output_dir, job)
     written = collect_decomposition(distributed.output_dir)
 
-    assert [path.name for path in written] == ["rank_1.h5", "rank_2.h5"]
+    assert [path.name for path in written] == [
+        "parafac2_rank_1.h5",
+        "parafac2_rank_2.h5",
+    ]
     pd.testing.assert_frame_equal(
         pd.read_csv(distributed.output_dir / "fits.csv"),
         pd.read_csv(central.output_dir / "fits.csv"),
     )
-    for name in ("rank_1.h5", "rank_2.h5"):
+    for name in ("parafac2_rank_1.h5", "parafac2_rank_2.h5"):
         got = load_decomposition(distributed.output_dir / name)
         expected = load_decomposition(central.output_dir / name)
         np.testing.assert_allclose(got.label_mode, expected.label_mode, rtol=1e-5)
@@ -475,7 +481,7 @@ def test_distributed_plan_is_independent_of_the_working_directory(
         run_decomposition_job(output_dir, job)
     written = collect_decomposition(output_dir)
 
-    assert written == [output_dir / "rank_1.h5"]
+    assert written == [output_dir / "parafac2_rank_1.h5"]
 
 
 # Replicability ------------------------------------------------------------
@@ -487,7 +493,8 @@ def test_run_replicability_halfhalf(synthetic_study: Any) -> None:
     path = run_replicability(replicability_options(synthetic_study))
 
     scores = pd.read_csv(path)
-    assert list(scores.columns) == ["rank", "split", "fms"]
+    assert list(scores.columns) == ["method", "rank", "split", "fms"]
+    assert set(scores["method"]) == {"parafac2"}
     assert list(scores["split"]) == [0, 1]
     assert scores["fms"].between(0, 1).all()
     assert (path.parent / "replicability.json").exists()
@@ -499,7 +506,14 @@ def test_run_replicability_cv_columns(synthetic_study: Any) -> None:
 
     scores = pd.read_csv(run_replicability(options))
 
-    assert list(scores.columns) == ["rank", "fold_i", "fold_j", "n_common", "fms"]
+    assert list(scores.columns) == [
+        "method",
+        "rank",
+        "fold_i",
+        "fold_j",
+        "n_common",
+        "fms",
+    ]
     assert len(scores) == 3
 
 
@@ -587,14 +601,14 @@ def test_plot_parafac2_roi_model_with_segmentation(synthetic_study: Any) -> None
 
     names = sorted(path.name for path in written)
     assert names == [
-        "rank_2__evolving_mode.png",
-        "rank_2__mode_grid.png",
-        "rank_2__spatial_csf.png",
-        "rank_2__spatial_parenchyma.png",
-        "rank_2__subject_mode.png",
+        "parafac2_rank_2__evolving_mode.png",
+        "parafac2_rank_2__mode_grid.png",
+        "parafac2_rank_2__spatial_csf.png",
+        "parafac2_rank_2__spatial_parenchyma.png",
+        "parafac2_rank_2__subject_mode.png",
     ]
     assert (
-        _figures(synthetic_study) / "rank_2__evolving_mode_significance.csv"
+        _figures(synthetic_study) / "parafac2_rank_2__evolving_mode_significance.csv"
     ).exists()
 
 
@@ -608,8 +622,8 @@ def test_plot_roi_model_without_segmentation(
     written = run_decomposition_plots(plot_options(synthetic_study, model))
 
     assert sorted(p.name for p in written) == [
-        "rank_2__evolving_mode.png",
-        "rank_2__subject_mode.png",
+        "parafac2_rank_2__evolving_mode.png",
+        "parafac2_rank_2__subject_mode.png",
     ]
     assert "segmentation" in capsys.readouterr().out
     with pytest.raises(ValueError, match="segmentation"):
@@ -641,10 +655,10 @@ def test_plot_cp_voxel_model_without_segmentation(
     )
 
     assert sorted(p.name for p in written) == [
-        "rank_2__mode_grid.png",
-        "rank_2__spatial_csf.png",
-        "rank_2__spatial_parenchyma.png",
-        "rank_2__time_mode.png",
+        "cp_rank_2__mode_grid.png",
+        "cp_rank_2__spatial_csf.png",
+        "cp_rank_2__spatial_parenchyma.png",
+        "cp_rank_2__time_mode.png",
     ]
     assert (synthetic_study.root / "results" / "plot_decomposition.json").exists()
 
@@ -675,8 +689,8 @@ def test_plot_roi_model_with_a_segmentation_without_csf(synthetic_study: Any) ->
     )
 
     assert sorted(p.name for p in written) == [
-        "rank_2__mode_grid.png",
-        "rank_2__spatial_parenchyma.png",
+        "parafac2_rank_2__mode_grid.png",
+        "parafac2_rank_2__spatial_parenchyma.png",
     ]
 
 
@@ -744,11 +758,11 @@ def test_cmf_end_to_end(synthetic_study: Any) -> None:
         ),
     )
     assert sorted(p.name for p in written) == [
-        "rank_2__evolving_mode.png",
-        "rank_2__mode_grid.png",
-        "rank_2__spatial_csf.png",
-        "rank_2__spatial_parenchyma.png",
-        "rank_2__subject_mode.png",
+        "cmf_rank_2__evolving_mode.png",
+        "cmf_rank_2__mode_grid.png",
+        "cmf_rank_2__spatial_csf.png",
+        "cmf_rank_2__spatial_parenchyma.png",
+        "cmf_rank_2__subject_mode.png",
     ]
 
     scores = pd.read_csv(
@@ -766,3 +780,96 @@ def test_cmf_rejects_the_tensorly_solver(synthetic_study: Any) -> None:
             method="cmf",
             fit=FitOptions(solver="tensorly"),
         )
+
+
+# Voxel templates -------------------------------------------------------------
+
+
+def _voxel_cp_model(study: Any, monkeypatch: pytest.MonkeyPatch) -> Path:
+    def fake_cp(tensor: torch.Tensor, rank: int, **kwargs: Any) -> tuple:
+        factors = [torch.rand(n, rank) for n in tensor.shape]
+        return torch.ones(rank), factors, torch.tensor(0.25)
+
+    monkeypatch.setattr(pipeline, "run_CP_decomposition_repeated", fake_cp)
+    preprocess(study, store_voxels=True)
+    options = decomposition_options(
+        study,
+        input=study.root / "results" / "data" / "voxels.parquet",
+        method="cp",
+        ranks=(2,),
+    )
+    (model,) = run_decomposition(options)
+    return model
+
+
+def test_voxel_model_records_its_template(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _voxel_cp_model(synthetic_study, monkeypatch)
+
+    segmentation = synthetic_study.root / "images" / "seg.nii"
+    assert load_decomposition(model).template_path == str(segmentation.resolve())
+    written = run_decomposition_plots(
+        plot_options(
+            synthetic_study,
+            model,
+            segmentation=segmentation,
+            parts=("spatial",),
+        ),
+    )
+    assert [p.name for p in written] == [
+        "cp_rank_2__spatial_parenchyma.png",
+        "cp_rank_2__spatial_csf.png",
+    ]
+
+
+def test_plot_images_must_be_on_the_template_grid(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    # Regression test: an image on another grid was drawn silently (or
+    # crashed with an IndexError) instead of being refused.
+    model = _voxel_cp_model(synthetic_study, monkeypatch)
+    image = nib.load(synthetic_study.root / "images" / "seg.nii")
+    small = tmp_path / "small.nii"
+    nib.save(nib.Nifti1Image(np.ones((5, 5, 5)), image.affine), small)
+    shifted_affine = image.affine.copy()
+    shifted_affine[0, 3] += 5.0
+    shifted = tmp_path / "shifted.nii"
+    nib.save(nib.Nifti1Image(np.asarray(image.get_fdata()), shifted_affine), shifted)
+
+    for overrides in ({"segmentation": small}, {"background": shifted}):
+        with pytest.raises(ValueError, match="grid"):
+            run_decomposition_plots(
+                plot_options(synthetic_study, model, parts=("spatial",), **overrides),
+            )
+    with pytest.raises(ValueError, match="slices"):
+        run_decomposition_plots(
+            plot_options(synthetic_study, model, parts=("spatial",), slices=(99, 0, 0)),
+        )
+
+
+def test_csf_is_offset_ventricles_and_label_24(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model = _voxel_cp_model(synthetic_study, monkeypatch)
+    saved = load_decomposition(model)
+    # 10002 (CSF beside white matter) is in no preset, but is CSF.
+    labels = np.select(
+        [saved.labels == 2, saved.labels == 41],
+        [10002, 24],
+        saved.labels,
+    )
+    relabelled = dataclasses.replace(saved, labels=labels)
+
+    spatial = pipeline._spatial_inputs(
+        relabelled,
+        plot_options(synthetic_study, model),
+    )
+
+    assert spatial is not None
+    # Labels 4 (a ventricle), 10002 and 24 are CSF; 10 and 49 are not.
+    np.testing.assert_array_equal(spatial.csf, np.isin(labels, [4, 10002, 24]))

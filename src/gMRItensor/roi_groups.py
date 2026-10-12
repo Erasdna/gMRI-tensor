@@ -70,36 +70,15 @@ def get_roi_presets(csf_offset: int = 10000) -> dict[str, tuple[int, ...]]:
     return presets
 
 
-def resolve_roi_groups(
-    presets: Sequence[str] = (),
-    custom: Mapping[str, Sequence[int]] | None = None,
-    csf_offset: int = 10000,
-) -> dict[str, np.ndarray]:
-    """Build `name -> int64 label ids` from preset names and custom regions.
+#: FreeSurfer's own CSF label, outside the ventricles.
+CSF_ID = 24
 
-    Presets come first, then custom regions, each in the given order.
-    Raises `ValueError` for an unknown preset, a name given more than once
-    (also across presets and custom) or a custom region without ids.
-    """
-    available = get_roi_presets(csf_offset)
-    groups: dict[str, np.ndarray] = {}
 
-    def add(name: str, ids: Sequence[int]) -> None:
-        if name in groups:
-            raise ValueError(f"ROI group '{name}' given more than once")
-        if len(ids) == 0:
-            raise ValueError(f"ROI group '{name}' has no label ids")
-        groups[name] = np.unique(np.asarray(ids, dtype=np.int64))
-
-    for name in presets:
-        if name not in available:
-            raise ValueError(
-                f"Unknown ROI preset '{name}', choose from {sorted(available)}",
-            )
-        add(name, available[name])
-    for name, ids in (custom or {}).items():
-        add(name, ids)
-    return groups
+def is_csf(labels: np.ndarray, csf_offset: int = 10000) -> np.ndarray:
+    """Which `labels` are CSF: a ventricle, FreeSurfer CSF (24), or any id
+    carrying `csf_offset`. Everything else is parenchyma."""
+    labels = np.asarray(labels)
+    return (labels >= csf_offset) | np.isin(labels, (*VENTRICLE_IDS, CSF_ID))
 
 
 def parse_region(spec: str, csf_offset: int = 10000) -> tuple[str, np.ndarray]:
@@ -118,6 +97,11 @@ def parse_region(spec: str, csf_offset: int = 10000) -> tuple[str, np.ndarray]:
     name = name.strip()
     if not name:
         raise ValueError(f"region {spec!r} has no name before '='")
+    if "/" in name or "\\" in name or name.startswith("."):
+        # The name becomes a figure file name.
+        raise ValueError(
+            f"region name {name!r} may not contain '/' or '\\' or start with '.'",
+        )
     ids: list[int] = []
     try:
         for part in id_text.split(","):

@@ -1489,6 +1489,13 @@ def test_CMF_normalize_moves_the_scale_into_the_time_courses():
         )
 
 
+def test_CMF_invalid_mode_names_the_method():
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    slices = make_cmf_slices(setup_backend())
+    with pytest.raises(ValueError, match="CMF has exactly three modes"):
+        compute_CMF_decomposition(slices, 2, nn_modes=(3,))
+
+
 @pytest.mark.parametrize("key", ["parafac2", "update_A", "tol", "non_negative"])
 def test_CMF_rejects_managed_options(key):
     slices = make_cmf_slices(torch.device("cpu"))

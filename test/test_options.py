@@ -60,6 +60,29 @@ def test_fit_tolerance_defaults_to_the_solvers() -> None:
 
 
 @pytest.mark.parametrize(
+    "key, flag",
+    [
+        ("init_repeats", "--restarts"),
+        ("max_iter", "--max-iter"),
+        ("tolerance", "--tolerance"),
+        ("restart_procs", "--restart-procs"),
+        ("rank", "--ranks"),
+    ],
+)
+def test_fit_options_cannot_override_the_flags(key: str, flag: str) -> None:
+    # Distributed and local runs would otherwise disagree: `plan` reads the
+    # flags, not `extra`.
+    with pytest.raises(ValueError, match=flag):
+        FitOptions(extra={key: 5})
+
+
+@pytest.mark.parametrize("method", ["cp", "parafac2", "cmf"])
+def test_unknown_fit_option_fails_before_fitting(method: str) -> None:
+    with pytest.raises(ValueError, match="bogus"):
+        _decomposition(method=method, fit=FitOptions(extra={"bogus": 1}))
+
+
+@pytest.mark.parametrize(
     "make, match",
     [
         (lambda: FitOptions(non_negative_modes=(3,)), "non_negative_modes"),

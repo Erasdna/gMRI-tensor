@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from gMRItensor import pipeline
+from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.options import DECOMPOSITION_PARTS
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
@@ -305,7 +306,8 @@ def _add_fit_command(
         description=(
             "Without --job: fit every rank in this process (all fit arguments "
             "needed). With --job N: fit job N's restarts using the plan.json in "
-            "--output-dir (only --output-dir and --job needed)."
+            "--output-dir (only --output-dir and --job; every other setting "
+            "comes from the plan)."
         ),
     )
     run.add_argument("--output-dir", type=Path, required=True, help="results directory")
@@ -318,6 +320,15 @@ def _add_fit_command(
     _add_fit_arguments(run, required=False)
     if replicability:
         _add_replicability_arguments(run, required=False)
+    # With --job every setting comes from plan.json, so these are refused.
+    run.set_defaults(
+        planned_flags=tuple(
+            flag
+            for action in run._actions
+            if action.dest not in ("help", "output_dir", "job")
+            for flag in action.option_strings
+        ),
+    )
     plan = actions.add_parser(
         "plan",
         help="save plan.json and print the number of --job jobs",
@@ -436,7 +447,7 @@ def _add_plot(commands: Any) -> None:
         "decomposition",
         help="mode grid, subject mode, time mode and spatial maps of one model",
         description=(
-            "Plot a saved rank_<r>.h5. Without part flags every part is drawn; "
+            "Plot a saved <method>_rank_<r>.h5. Without part flags every part is drawn; "
             "spatial parts of a per-ROI model need --segmentation."
         ),
     )
@@ -444,7 +455,7 @@ def _add_plot(commands: Any) -> None:
         "--model",
         type=Path,
         required=True,
-        help="rank_<r>.h5 from gmri decompose",
+        help="<method>_rank_<r>.h5 from gmri decompose",
     )
     decomposition.add_argument(
         "--subject-info",
@@ -620,6 +631,18 @@ def _run_preprocess(args: argparse.Namespace) -> None:
     )
 
 
+def _refuse_planned_flags(args: argparse.Namespace) -> None:
+    """Raise if `run --job` was given any setting that plan.json owns."""
+    given = [token.split("=", 1)[0] for token in args.argv if token.startswith("--")]
+    refused = [flag for flag in given if flag in args.planned_flags]
+    if refused:
+        raise ValueError(
+            f"{refused[0]} cannot be used with --job: a planned job takes its "
+            f"settings from {Path(args.output_dir) / 'plan.json'}; run `plan` "
+            "again to change them",
+        )
+
+
 def _run_fit_command(args: argparse.Namespace) -> None:
     decompose = args.command == "decompose"
     if args.action == "collect":
@@ -636,6 +659,7 @@ def _run_fit_command(args: argparse.Namespace) -> None:
         else:
             print(pipeline.plan_replicability_jobs(_replicability_options(args)))
     elif args.job is not None:
+        _refuse_planned_flags(args)
         (
             pipeline.run_decomposition_job
             if decompose
@@ -705,7 +729,9 @@ def _run_plot(args: argparse.Namespace) -> None:
 
 def main(argv: Sequence[str] | None = None) -> int:
     """Run `gmri ...`; 0 on success, 2 on a user error."""
+    argv = list(sys.argv[1:] if argv is None else argv)
     args = _parser().parse_args(argv)
+    args.argv = argv
     handlers: dict[str, Callable[[argparse.Namespace], None]] = {
         "preprocess": _run_preprocess,
         "decompose": _run_fit_command,
@@ -714,7 +740,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     }
     try:
         handlers[args.command](args)
-    except (FileNotFoundError, ValueError) as error:
+    except (FileNotFoundError, ValueError, ConvergenceError) as error:
         print(f"gmri {args.command}: error: {error}", file=sys.stderr)
         return 2
     return 0

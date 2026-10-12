@@ -298,25 +298,12 @@ def plot_roi_evolution_panels(
 
 def figure_path(
     output_dir: Path | str,
-    grid_name: str | None,
-    roi: str | None,
+    roi: str,
     statistic: str,
     layout: str,
-    page: int | None = None,
 ) -> Path:
-    """Path stem (no extension, see `save_figure`) of an ROI figure.
-
-    Individual figures (`grid_name=None`) are
-    `<output_dir>/figures/roi/single/<statistic>/<roi>__<layout>`; grids are
-    `<output_dir>/figures/roi/<grid_name>/<grid_name>__<statistic>__<layout>`
-    with `__p<page>` appended for paginated grids.
-    """
-    roi_dir = Path(output_dir) / "figures" / "roi"
-    if grid_name is None:
-        if roi is None:
-            raise ValueError("An individual figure needs a roi")
-        return roi_dir / "single" / statistic / f"{roi}__{layout}"
-    name = f"{grid_name}__{statistic}__{layout}"
-    if page is not None:
-        name += f"__p{page}"
-    return roi_dir / grid_name / name
+    """Path stem (no extension, see `save_figure`) of one ROI's figure:
+    `<output_dir>/figures/roi/single/<statistic>/<roi>__<layout>`."""
+    return (
+        Path(output_dir) / "figures" / "roi" / "single" / statistic / f"{roi}__{layout}"
+    )

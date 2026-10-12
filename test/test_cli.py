@@ -92,7 +92,7 @@ def test_cli_runs_every_command(
     assert (results / "roi_analysis" / "summary.csv").exists()
 
     assert _run(["decompose", "run", *_fit_args(results, "decomposition")]) == 0
-    model = results / "decomposition" / "rank_1.h5"
+    model = results / "decomposition" / "parafac2_rank_1.h5"
     assert model.exists()
 
     replicability = [
@@ -127,7 +127,9 @@ def test_cli_runs_every_command(
         50,
     ]
     assert _run(plot) == 0
-    assert (results / "figures" / "decomposition" / "rank_1__mode_grid.png").exists()
+    assert (
+        results / "figures" / "decomposition" / "parafac2_rank_1__mode_grid.png"
+    ).exists()
     assert _run([*plot, "--time"]) == 0
 
 
@@ -153,7 +155,7 @@ def test_cli_plan_run_collect(
         )
     assert _run([command, "collect", "--output-dir", results / command]) == 0
 
-    output = "rank_1.h5" if command == "decompose" else "replicability.csv"
+    output = "parafac2_rank_1.h5" if command == "decompose" else "replicability.csv"
     assert (results / command / output).exists()
 
 
@@ -183,7 +185,7 @@ def test_cli_cmf(synthetic_study: Any) -> None:
     args[args.index("parafac2")] = "cmf"
     assert _run(["decompose", "run", *args, "--tolerance", "1e-4"]) == 0
 
-    model = results / "cmf" / "rank_1.h5"
+    model = results / "cmf" / "cmf_rank_1.h5"
     plot = [
         "plot",
         "decomposition",
@@ -204,8 +206,60 @@ def test_cli_cmf(synthetic_study: Any) -> None:
     ]
     assert _run(plot) == 0
     assert (
-        results / "figures" / "decomposition" / "rank_1__evolving_mode.png"
+        results / "figures" / "decomposition" / "cmf_rank_1__evolving_mode.png"
     ).exists()
+
+
+def test_cli_planned_jobs_take_settings_only_from_the_plan(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _preprocess(synthetic_study)
+    assert _run(["decompose", "plan", *_fit_args(results, "planned")]) == 0
+    capsys.readouterr()
+
+    # Even a value equal to the default is refused: the plan decides.
+    extras: list[list[Any]] = [
+        ["--ranks", 2],
+        ["--restarts=50"],
+        ["--fit-option", "x=1"],
+    ]
+    for extra in extras:
+        code = _run(
+            [
+                "decompose",
+                "run",
+                "--output-dir",
+                results / "planned",
+                "--job",
+                0,
+                *extra,
+            ],
+        )
+        assert code == 2
+        err = capsys.readouterr().err
+        assert "cannot be used with --job" in err and "plan.json" in err
+
+
+def test_cli_convergence_failure_and_bad_plan_are_one_line(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _preprocess(synthetic_study)
+    args = _fit_args(results, "unconverged")
+    args[args.index("--max-iter") + 1] = 1
+    capsys.readouterr()
+
+    assert _run(["decompose", "run", *args]) == 2
+    err = capsys.readouterr().err.strip()
+    assert "No decomposition converged" in err and "\n" not in err
+    assert "Traceback" not in err
+
+    planned = results / "broken"
+    planned.mkdir()
+    (planned / "plan.json").write_text('{"type": "DecompositionOptions"')
+    assert _run(["decompose", "run", "--output-dir", planned, "--job", 0]) == 2
+    assert "not a valid plan" in capsys.readouterr().err
 
 
 def test_cli_plot_before_preprocess(

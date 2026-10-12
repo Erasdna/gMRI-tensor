@@ -23,7 +23,7 @@ matplotlib.use("Agg")
 plt.style.use(["science", "no-latex"])
 
 
-def _plot_time_column_cp(
+def plot_time_column_cp(
     ax: matplotlib.axes.Axes,
     scaled_time_mode: np.ndarray,
     time_points: list,
@@ -213,7 +213,7 @@ def plot_mode_grid(
             if component == 0:
                 time_ax.legend(frameon=True, framealpha=0.9)
         else:
-            _plot_time_column_cp(time_ax, scaled_time_mode, time_points, component)
+            plot_time_column_cp(time_ax, scaled_time_mode, time_points, component)
         time_ax.set_ylabel(f"Component {component+1}")
         if component == n_components - 1:
             time_ax.set_xlabel("Time after injection [h]")

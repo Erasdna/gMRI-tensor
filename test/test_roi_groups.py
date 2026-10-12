@@ -4,8 +4,8 @@ import pytest
 from gMRItensor.roi_groups import add_concentration
 from gMRItensor.roi_groups import aggregate_roi_signal
 from gMRItensor.roi_groups import get_roi_presets
+from gMRItensor.roi_groups import is_csf
 from gMRItensor.roi_groups import parse_region
-from gMRItensor.roi_groups import resolve_roi_groups
 
 VENTRICLE_IDS = (4, 5, 14, 15, 43, 44, 72)
 PARENCHYMA_PRESETS = (
@@ -92,42 +92,16 @@ def test_no_ventricle_id_in_parenchyma_presets():
         assert not set(presets[name]) & ventricle_ids, name
 
 
-def test_resolve_roi_groups_presets_and_custom():
-    groups = resolve_roi_groups(
-        presets=["thalamus", "brainstem_csf"],
-        custom={"my_region": [17, 10, 17]},
+def test_is_csf_offset_ventricles_and_label_24() -> None:
+    labels = np.array([4, 24, 17, 10002, 10017, 2, 43])
+    np.testing.assert_array_equal(
+        is_csf(labels),
+        [True, True, False, True, True, False, True],
     )
-    assert list(groups) == ["thalamus", "brainstem_csf", "my_region"]
-    np.testing.assert_array_equal(groups["thalamus"], [10, 49])
-    np.testing.assert_array_equal(groups["brainstem_csf"], [10016])
-    np.testing.assert_array_equal(groups["my_region"], [10, 17])
-    assert all(ids.dtype == np.int64 for ids in groups.values())
-
-
-def test_resolve_roi_groups_empty_by_default():
-    assert resolve_roi_groups() == {}
-
-
-def test_resolve_roi_groups_passes_csf_offset():
-    groups = resolve_roi_groups(presets=["brainstem_csf"], csf_offset=5000)
-    np.testing.assert_array_equal(groups["brainstem_csf"], [5016])
-
-
-@pytest.mark.parametrize(
-    "kwargs, match",
-    [
-        ({"presets": ["not_a_preset"]}, "Unknown ROI preset"),
-        ({"presets": ["thalamus", "thalamus"]}, "more than once"),
-        (
-            {"presets": ["thalamus"], "custom": {"thalamus": [10]}},
-            "more than once",
-        ),
-        ({"custom": {"empty": []}}, "no label ids"),
-    ],
-)
-def test_resolve_roi_groups_validation(kwargs, match):
-    with pytest.raises(ValueError, match=match):
-        resolve_roi_groups(**kwargs)
+    np.testing.assert_array_equal(
+        is_csf(np.array([5002, 17]), csf_offset=5000),
+        [True, False],
+    )
 
 
 def _roi_signal() -> pd.DataFrame:
@@ -159,7 +133,10 @@ def test_parse_region_presets_ids_and_ranges() -> None:
     np.testing.assert_array_equal(ids, [5016])
 
 
-@pytest.mark.parametrize("spec", ["nope", "=17", "x=", "x=a,b", "x=5-2"])
+@pytest.mark.parametrize(
+    "spec",
+    ["nope", "=17", "x=", "x=a,b", "x=5-2", "a/b=17", "a\\b=17", ".x=17", "..=17"],
+)
 def test_parse_region_rejects_bad_specs(spec: str) -> None:
     with pytest.raises(ValueError, match="region"):
         parse_region(spec)

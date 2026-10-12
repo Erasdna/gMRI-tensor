@@ -3,7 +3,7 @@ import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import scienceplots  # noqa: F401
-from gMRItensor.plotting.mode_grid import _plot_time_column_cp
+from gMRItensor.plotting.mode_grid import plot_time_column_cp
 from gMRItensor.plotting.roi_evolution import TIME_LABEL
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import resolve_page_width
@@ -39,7 +39,7 @@ def plot_time_mode(
         squeeze=False,
     )
     for component, ax in enumerate(axs[:, 0]):
-        _plot_time_column_cp(ax, scaled, list(time_points), component)
+        plot_time_column_cp(ax, scaled, list(time_points), component)
         ax.set_ylabel(f"Component {component + 1}")
     axs[-1, 0].set_xlabel(TIME_LABEL)
     return fig, axs[:, 0]

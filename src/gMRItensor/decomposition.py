@@ -362,6 +362,7 @@ def _resolve_nn_modes(
 
 def _nn_modes_to_non_negative(
     nn_modes: tuple[int, ...] | None,
+    method_label: str = "PARAFAC2",
 ) -> dict[int, bool] | None:
     """Translate `nn_modes` into matcouply's per-mode `non_negative` dict."""
     if not nn_modes:
@@ -369,7 +370,7 @@ def _nn_modes_to_non_negative(
     invalid = sorted(set(nn_modes) - {0, 1, 2})
     if invalid:
         raise ValueError(
-            f"nn_modes contains invalid mode index/indices {invalid}; PARAFAC2 "
+            f"nn_modes contains invalid mode index/indices {invalid}; {method_label} "
             "has exactly three modes, so valid entries are 0 (subject), "
             "1 (evolving/time) and 2 (label/region).",
         )
@@ -1155,7 +1156,7 @@ def compute_CMF_decomposition(
             n_iter_max=CMF_max_iter,
             tol=aoadmm_loss_tolerance,
             random_state=rng,
-            non_negative=_nn_modes_to_non_negative(nn_modes),
+            non_negative=_nn_modes_to_non_negative(nn_modes, "CMF"),
             verbose=CMF_verbose_level,
             update_A=False,
             return_errors=True,

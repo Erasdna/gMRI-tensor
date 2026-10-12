@@ -12,6 +12,7 @@ from typing import Any
 from typing import Literal
 
 import numpy as np
+from gMRItensor.decomposition import _resolve_options
 from gMRItensor.plotting.utils import JOURNAL_WIDTHS
 from gMRItensor.preprocessing import SIGNAL_TYPES
 from gMRItensor.roi_groups import get_roi_presets
@@ -30,7 +31,26 @@ CONCENTRATION_STATISTICS = STATISTICS[2:]
 #: The parts `gmri plot decomposition` can draw.
 DECOMPOSITION_PARTS = ("mode_grid", "subject_mode", "time", "spatial")
 #: Runner options set by `FitOptions` fields rather than `extra`.
-_MANAGED_FIT_OPTIONS = ("nn_modes", "non_negative", "solver")
+#: Runner options that have their own flag or are set by the pipeline, so
+#: `--fit-option` cannot override them (`plan` would not see the override).
+_MANAGED_FIT_OPTIONS: dict[str, str] = {
+    "init_repeats": "--restarts",
+    "max_iter": "--max-iter",
+    "tolerance": "--tolerance",
+    "restart_procs": "--restart-procs",
+    "nn_modes": "--non-negative-modes",
+    "non_negative": "--non-negative-modes",
+    "solver": "--solver",
+    "rank": "--ranks",
+    "device": "the pipeline (GMRITENSOR_USE_GPU)",
+    "return_diagnostics": "the pipeline",
+    "method": "--method",
+    "n_procs": "--n-procs",
+    "stratification": "--stratify-by",
+}
+
+#: `--method` values -> the restart machinery's method names.
+_RUNNER_METHODS = {"cp": "CP", "parafac2": "PARAFAC2", "cmf": "CMF"}
 
 
 def _check(condition: bool, message: str) -> None:
@@ -144,10 +164,10 @@ class FitOptions:
                 f"{modes}",
             )
             object.__setattr__(self, "non_negative_modes", normalised)
-        for key in _MANAGED_FIT_OPTIONS:
+        for key, owner in _MANAGED_FIT_OPTIONS.items():
             _check(
                 key not in self.extra,
-                f"set {key} with its own option, not as an extra fit option",
+                f"fit option {key} is set by {owner}, not as an extra fit option",
             )
 
 
@@ -188,6 +208,14 @@ def _check_fit(method: str, tensor: TensorOptions, fit: FitOptions) -> None:
         not tensor.center or modes is None,
         "center makes the data negative; it needs non_negative_modes none",
     )
+    # Unknown extra options fail here, before `plan` saves them.
+    try:
+        _resolve_options(_RUNNER_METHODS[method], dict(fit.extra))  # type: ignore
+    except TypeError as error:
+        keys = sorted(fit.extra)
+        raise ValueError(
+            f"unknown fit option for {method}: {error}; given {keys}",
+        ) from None
 
 
 @dataclass(frozen=True)

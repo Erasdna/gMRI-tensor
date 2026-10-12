@@ -167,19 +167,9 @@ def test_resolve_page_width():
 
 def test_figure_path(tmp_path):
     assert (
-        figure_path(tmp_path, None, "ventricles", "median", "rows")
+        figure_path(tmp_path, "ventricles", "median", "rows")
         == tmp_path / "figures" / "roi" / "single" / "median" / "ventricles__rows"
     )
-    assert (
-        figure_path(tmp_path, "csf", None, "total_amount", "panels")
-        == tmp_path / "figures" / "roi" / "csf" / "csf__total_amount__panels"
-    )
-    assert (
-        figure_path(tmp_path, "csf", None, "median", "panels", page=2)
-        == tmp_path / "figures" / "roi" / "csf" / "csf__median__panels__p2"
-    )
-    with pytest.raises(ValueError, match="roi"):
-        figure_path(tmp_path, None, None, "median", "rows")
 
 
 def test_save_figure_writes_all_formats_and_closes(tmp_path):

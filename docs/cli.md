@@ -6,9 +6,9 @@
 |---|---|---|
 | `gmri preprocess` | manifest CSV, NIfTI images | `<output-dir>/data/` |
 | `gmri plot statistics` | `roi_signal.parquet`, subject info CSV | `<output-dir>/roi_analysis/`, `<output-dir>/figures/roi/` |
-| `gmri decompose run\|plan\|collect` | `roi_signal.parquet` or `voxels.parquet` | `rank_<r>.h5`, `fits.csv` |
+| `gmri decompose run\|plan\|collect` | `roi_signal.parquet` or `voxels.parquet` | `<method>_rank_<r>.h5`, `fits.csv` |
 | `gmri replicability run\|plan\|collect` | the same, plus the subject info CSV for stratification | `replicability.csv` |
-| `gmri plot decomposition` | `rank_<r>.h5`, subject info CSV, optionally a segmentation | `<output-dir>/figures/decomposition/` |
+| `gmri plot decomposition` | `<method>_rank_<r>.h5`, subject info CSV, optionally a segmentation | `<output-dir>/figures/decomposition/` |
 
 - **Provenance:** every command records its settings and the package version in `<output-dir>/<command>.json`.
 - **Errors:** an invalid argument or a missing input stops the command before it writes anything. The command prints a one-line message and exits with code 2.
@@ -52,7 +52,7 @@ sub-01,24,sub-01/T1map_ses-00.nii.gz,sub-01/T1map_ses-24.nii.gz,sub-01/mask.nii.
 |---|---|
 | `data/roi_signal.parquet` | One row per subject × time point × label: `median`, `mean`, `n_voxels`, `n_valid` (finite voxels), `voxel_volume_mm3`. |
 | `data/voxels.parquet` | With `--store-voxels`: one row per scan × labeled voxel (`labels`, `label_index`, `values`). |
-| `data/voxels.coords.parquet` | Each voxel's `(labels, label_index)` key and `(i, j, k)` index. The template `shape` and `affine` are stored in the file metadata. |
+| `data/voxels.coords.parquet` | Each voxel's `(labels, label_index)` key and `(i, j, k)` index. The template `shape` and `affine` are stored in the file metadata, with `template`, the resolved path of the first scan's segmentation. That path is a record only: the template check compares labels and voxel coordinates, not files. |
 
 ## `gmri plot statistics`
 
@@ -156,8 +156,8 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
   - **Solver settings:** matcouply's own defaults throughout. Penalties and solver settings go through `--fit-option 'aoadmm_options={...}'`, e.g. `{"inner_n_iter_max": 20, "absolute_tol": 1e-6, "feasibility_tol": 1e-5, "inner_tol": 1e-5}` (the notebook's settings).
 
 **Outputs:**
-- `rank_<r>.h5`: the fitted factors, plus the subjects, time points, label ids and scaling needed to read them. Voxel models also store each voxel's template coordinates. Load a model with `gMRItensor.model_io.load_decomposition`.
-- `fits.csv`: `rank, error`.
+- `<method>_rank_<r>.h5` (e.g. `cmf_rank_3.h5`): the fitted factors, plus the subjects, time points, label ids and scaling needed to read them. Voxel models also store each voxel's template coordinates, the template's shape and affine, and the recorded template path. Load a model with `gMRItensor.model_io.load_decomposition`.
+- `fits.csv`: `method, rank, error`.
 
 ## `gmri replicability`
 
@@ -172,7 +172,7 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 | `--n-procs` | `1` | Parallel fits. Use 1 on a GPU. |
 | `--seed` | `0` | Seed of the splits; every rank uses the same splits. |
 
-The output is `replicability.csv`. It has columns `rank, split, fms` for `halfhalf`, or `rank, fold_i, fold_j, n_common, fms` for `cv`, where fms is the factor match score. Scaling and centering are applied to the full tensor before splitting.
+The output is `replicability.csv`. It has columns `method, rank, split, fms` for `halfhalf`, or `method, rank, fold_i, fold_j, n_common, fms` for `cv`, where fms is the factor match score. Scaling and centering are applied to the full tensor before splitting.
 
 ## Distributed restarts (SLURM)
 
@@ -191,7 +191,7 @@ with `job.sh` running
 gmri decompose run --output-dir results/parafac2 --job $SLURM_ARRAY_TASK_ID
 ```
 
-- **Settings:** `plan` saves all arguments to `<output-dir>/plan.json`, so `run --job` and `collect` need only `--output-dir`. All jobs therefore use the same settings.
+- **Settings:** `plan` saves all arguments to `<output-dir>/plan.json`, so `run --job` and `collect` need only `--output-dir`. All jobs therefore use the same settings: `run --job` refuses any other argument, and `--fit-option` cannot override a setting that has its own flag (such as `max_iter`). Run `plan` again to change the settings.
 - **Tasks:** each restart of each fit is one task, and a job runs `--tasks-per-job` of them, one after another or in parallel with `--restart-procs` (decompose) / `--n-procs` (replicability). Request `--cpus-per-task` to match.
 
 | Command | Tasks | Example, `--tasks-per-job 4` |
@@ -201,30 +201,30 @@ gmri decompose run --output-dir results/parafac2 --job $SLURM_ARRAY_TASK_ID
 | replicability, cv | `ranks × splits × repeats × restarts` | |
 
 - **Array size limits:** many clusters cap array size (`MaxArraySize`, often 1001). If `plan` prints more jobs than that, raise `--tasks-per-job`.
-- **Resuming:** results are kept in `<output-dir>/<store>/rank_<r>/`. A re-queued job skips restarts that are already there, so failed jobs can simply be resubmitted.
+- **Resuming:** results are kept in `<output-dir>/<store>/<method>_rank_<r>/`. A re-queued job skips restarts that are already there, so failed jobs can simply be resubmitted.
 - **Collecting:** `collect` refuses to write while restarts are missing, and says how many. It writes the same files as a single-process `run`.
 - **Starting over:** run `plan` again and delete the store directory.
 
 ## `gmri plot decomposition`
 
 ```bash
-gmri plot decomposition --model results/parafac2/rank_3.h5 --subject-info subjects.csv \
+gmri plot decomposition --model results/parafac2/parafac2_rank_3.h5 --subject-info subjects.csv \
     --group-variable diagnosis --output-dir results --segmentation template_seg.nii.gz \
     [--mode-grid] [--subject-mode] [--time] [--spatial] [--background template_T1.nii.gz] [--slices 90 110 80]
 ```
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `--model` | required | `rank_<r>.h5` from `gmri decompose`. |
+| `--model` | required | `<method>_rank_<r>.h5` from `gmri decompose`. Figures are named after it, e.g. `cmf_rank_3__mode_grid.png`. |
 | `--subject-info`, `--group-variable` | required | Subjects and the column to colour and compare by. |
 | `--output-dir` | required | Figures go to `figures/decomposition/<model>__<part>.<ext>`. |
-| `--mode-grid` | | Time, subject and spatial modes in one figure, with CSF and parenchyma shown separately. |
+| `--mode-grid` | | Time, subject and spatial modes in one figure, with CSF and parenchyma shown separately. A voxel is CSF if its label is ≥ 10000, a ventricle id or FreeSurfer's CSF (24); everything else is parenchyma. |
 | `--subject-mode` | | Group boxplot per component, plus a scatter against each `--covariates` column. |
 | `--time` | | CP: the shared time mode. PARAFAC2 and CMF: group ribbons and subject curves of the evolving mode; its group tests are saved as `<model>__evolving_mode_significance.csv`. |
 | `--spatial` | | The spatial mode on three slices, one figure for parenchyma and one for CSF. |
-| `--segmentation` | | Label volume in the decomposition's label space (one merged file, CSF ids + 10000). Needed for the spatial parts of a per-ROI model; per-voxel models carry their own coordinates. |
-| `--background` | segmentation mask | Image to draw the spatial maps on, on the template grid. |
-| `--slices I J K` | centre of mass | Slice indices. The mode grid uses `I` (sagittal). |
+| `--segmentation` | | Label volume in the decomposition's label space (one merged file, CSF ids + 10000). Needed for the spatial parts of a per-ROI model. Per-voxel models carry their own coordinates; a segmentation given for one must be on the model's template grid (shape and affine), or the command stops with an error. |
+| `--background` | segmentation mask | Image to draw the spatial maps on. It must be on the template grid (the segmentation's, for a per-ROI model), or the command stops with an error. |
+| `--slices I J K` | centre of mass | Slice indices, each within the grid. The mode grid uses `I` (sagittal). |
 | `--covariates` | none | Subject-info columns to scatter the subject mode against. |
 | `--alpha`, `--min-group-n` | `0.05`, `2` | Group tests of the evolving mode. |
 | `--page-width`, `--formats`, `--dpi` | `double`, `pdf png`, `300` | As for `plot statistics`. |
