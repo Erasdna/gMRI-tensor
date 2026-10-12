@@ -12,6 +12,7 @@ from gMRItensor.plotting.evolving_mode import evolving_factors_to_numpy
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.mode_grid import plot_mode_grid
 from gMRItensor.plotting.spatial_mode import _percentile_vlim
+from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
 from gMRItensor.plotting.spatial_mode import plot_spatial_mode
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
@@ -854,6 +855,26 @@ def test_plot_spatial_mode_share_colorbar_scaling():
 
     independent = component_0_clim(share_colorbar_scaling=False)
     assert independent["CSF"] != pytest.approx(independent["Parenchyma"])
+
+
+def test_overlay_is_aligned_with_the_background_voxels():
+    # Regression test: pcolormesh without coordinates puts cell edges at
+    # integers while imshow centres pixels on them, shifting the overlay by
+    # half a voxel and leaving a blank strip at the right and bottom.
+    fig, ax = plt.subplots()
+    background = np.zeros((4, 5))
+    signal = np.zeros((4, 5))
+    signal[1, 2] = 1.0
+
+    mesh = plot_enhancement_with_background(ax, background, signal, "plasma", 0, 1)
+
+    left, right, bottom, top = ax.images[0].get_extent()
+    edges = mesh.get_coordinates()
+    np.testing.assert_allclose(edges[0, :, 0], np.arange(left, right + 0.5))
+    np.testing.assert_allclose(edges[:, 0, 1], np.arange(top, bottom + 0.5))
+    assert ax.get_xlim() == (left, right)
+    assert sorted(ax.get_ylim()) == sorted((bottom, top))
+    plt.close(fig)
 
 
 def make_mode_grid_fixture(n_components=2, seed=0):

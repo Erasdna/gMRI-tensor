@@ -34,7 +34,12 @@ def plot_enhancement_with_background(
     else:
         masked_signal = np.ma.masked_values(signal, 0)
 
+    # Voxel edges at +-0.5, where imshow draws the background pixels;
+    # without them pcolormesh puts edges at integers, half a voxel off.
+    n_rows, n_cols = masked_signal.shape
     cax = ax.pcolormesh(
+        np.arange(n_cols + 1) - 0.5,
+        np.arange(n_rows + 1) - 0.5,
         masked_signal,
         cmap=cmap,
         alpha=0.995,
