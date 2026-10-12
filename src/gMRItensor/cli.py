@@ -488,7 +488,8 @@ def _add_plot(commands: Any) -> None:
     parts.add_argument(
         "--subject-mode",
         action="store_true",
-        help="group boxplots (and --covariates)",
+        help="boxplots by --group-variable and --categorical, scatters against "
+        "--numerical",
     )
     parts.add_argument(
         "--time",
@@ -518,10 +519,26 @@ def _add_plot(commands: Any) -> None:
         help="slice indices (default: centre of mass)",
     )
     decomposition.add_argument(
-        "--covariates",
+        "--categorical",
         nargs="+",
         default=[],
-        help="subject-info columns to scatter",
+        metavar="COLUMN",
+        help="subject-info columns to box-plot the subject mode by, besides "
+        "--group-variable (values are categories, also numeric codes)",
+    )
+    decomposition.add_argument(
+        "--numerical",
+        nargs="+",
+        default=[],
+        metavar="COLUMN",
+        help="numeric subject-info columns to scatter the subject mode against",
+    )
+    decomposition.add_argument(
+        "--min-panel-width",
+        type=float,
+        metavar="INCHES",
+        help="widen the subject-mode figure beyond --page-width so no panel is "
+        "narrower (default: fit --page-width)",
     )
     decomposition.add_argument(
         "--alpha",
@@ -822,7 +839,9 @@ def _run_plot(args: argparse.Namespace) -> None:
             segmentation=args.segmentation,
             background=args.background,
             slices=_slices(args.slices),
-            covariates=tuple(args.covariates),
+            categorical=tuple(args.categorical),
+            numerical=tuple(args.numerical),
+            min_panel_width=args.min_panel_width,
             alpha=args.alpha,
             min_group_n=args.min_group_n,
             page_width=_page_width(args.page_width),

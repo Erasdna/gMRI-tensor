@@ -5,6 +5,7 @@ ROI-level tracer analysis (faceted by ROI); `aggregate_subjects` builds the
 group-average maps.
 """
 from collections.abc import Mapping
+from collections.abc import Sequence
 from typing import Any
 from typing import Literal
 
@@ -13,6 +14,27 @@ import pandas as pd
 from scipy.stats import kruskal
 from scipy.stats import mannwhitneyu
 from statsmodels.stats.multitest import multipletests
+
+
+def require_columns(
+    available: Sequence[str],
+    requested: Mapping[str, str],
+    source: str,
+) -> None:
+    """Raise unless every `requested` column (name -> what asked for it, e.g.
+    a flag) is in `available`; the message lists the available columns."""
+    # str.format: add-trailing-comma breaks "(" inside an f-string.
+    missing = [
+        "'{}' ({})".format(column, role)
+        for column, role in requested.items()
+        if column not in available
+    ]
+    if missing:
+        noun = "column" if len(missing) == 1 else "columns"
+        raise ValueError(
+            f"{source} has no {noun} {', '.join(missing)}; available columns: "
+            + ", ".join(str(column) for column in available),
+        )
 
 
 def resolve_subject_groups(

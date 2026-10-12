@@ -133,6 +133,48 @@ def test_cli_runs_every_command(
     assert _run([*plot, "--time"]) == 0
 
 
+def test_cli_plot_subject_mode_variables(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _preprocess(synthetic_study)
+    assert _run(["decompose", "run", *_fit_args(results, "decomposition")]) == 0
+    plot = [
+        "plot",
+        "decomposition",
+        "--model",
+        results / "decomposition" / "parafac2_rank_1.h5",
+        "--subject-info",
+        synthetic_study.subject_info,
+        "--group-variable",
+        "diagnosis",
+        "--output-dir",
+        results,
+        "--subject-mode",
+        "--formats",
+        "png",
+        "--dpi",
+        50,
+    ]
+
+    variables = ["--categorical", "sex", "apoe", "--numerical", "age"]
+    assert _run([*plot, *variables, "--min-panel-width", 2]) == 0
+    figure = results / "figures" / "decomposition" / "parafac2_rank_1__subject_mode.png"
+    assert figure.exists()
+    provenance = (results / "plot_decomposition.json").read_text()
+    assert '"categorical": [\n      "sex",\n      "apoe"\n    ]' in provenance
+    assert '"min_panel_width": 2.0' in provenance
+
+    capsys.readouterr()
+    assert _run([*plot, "--categorical", "sexx"]) == 2
+    error = capsys.readouterr().err
+    assert "'sexx' (--categorical)" in error
+    assert "available columns: subjects, diagnosis, sex, apoe, age" in error
+
+    assert _run([*plot, "--numerical", "sex"]) == 2
+    assert "'sex' is not numeric" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("command", ["decompose", "replicability"])
 def test_cli_plan_run_collect(
     synthetic_study: Any,

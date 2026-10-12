@@ -211,7 +211,8 @@ gmri decompose run --output-dir results/parafac2 --job $SLURM_ARRAY_TASK_ID
 ```bash
 gmri plot decomposition --model results/parafac2/parafac2_rank_3.h5 --subject-info subjects.csv \
     --group-variable diagnosis --output-dir results --segmentation template_seg.nii.gz \
-    [--mode-grid] [--subject-mode] [--time] [--spatial] [--background template_T1.nii.gz] [--slices 90 110 80]
+    [--mode-grid] [--subject-mode] [--time] [--spatial] [--background template_T1.nii.gz] [--slices 90 110 80] \
+    [--categorical sex apoe] [--numerical age mmse]
 ```
 
 | Argument | Default | Meaning |
@@ -220,17 +221,22 @@ gmri plot decomposition --model results/parafac2/parafac2_rank_3.h5 --subject-in
 | `--subject-info`, `--group-variable` | required | Subjects and the column to colour and compare by. |
 | `--output-dir` | required | Figures go to `figures/decomposition/<model>__<part>.<ext>`. |
 | `--mode-grid` | | Time, subject and spatial modes in one figure, with CSF and parenchyma shown separately. A voxel is CSF if its label is ≥ 10000, a ventricle id or FreeSurfer's CSF (24); everything else is parenchyma. |
-| `--subject-mode` | | Group boxplot per component, plus a scatter against each `--covariates` column. |
+| `--subject-mode` | | One row per component. Boxplots by `--group-variable`, with an extra hollow `All` box of every subject, then by each `--categorical` column, drawn as light grey boxes with every subject as a dot in its group's colour (colour always means the `--group-variable` group); then a scatter against each `--numerical` column, with one fit line per group. Each row shares one y-axis. |
 | `--time` | | CP: the shared time mode. PARAFAC2 and CMF: group ribbons and subject curves of the evolving mode; its group tests are saved as `<model>__evolving_mode_significance.csv`. |
 | `--spatial` | | The spatial mode on three slices, one figure for parenchyma and one for CSF. |
 | `--segmentation` | | Label volume in the decomposition's label space (one merged file, CSF ids + 10000). Needed for the spatial parts of a per-ROI model. Per-voxel models carry their own coordinates; a segmentation given for one must be on the model's template grid (shape and affine), or the command stops with an error. |
 | `--background` | segmentation mask | Image to draw the spatial maps on. It must be on the template grid (the segmentation's, for a per-ROI model), or the command stops with an error. |
 | `--slices I J K` | centre of mass | Slice indices, each within the grid. The mode grid uses `I` (sagittal). |
-| `--covariates` | none | Subject-info columns to scatter the subject mode against. |
+| `--categorical` | none | Subject-info columns to box-plot the subject mode by. Every value is a category, numeric codes too (e.g. APOE 2/3/4). |
+| `--numerical` | none | Subject-info columns to scatter the subject mode against. A value that is not a number is an error. |
+| `--min-panel-width` | none | Inches. With many variables, the subject-mode panels get narrow; this widens that figure beyond `--page-width` until each panel is at least this wide, e.g. `2`. |
 | `--alpha`, `--min-group-n` | `0.05`, `2` | Group tests of the evolving mode. |
 | `--page-width`, `--formats`, `--dpi` | `double`, `pdf png`, `300` | As for `plot statistics`. |
 
 - **Part flags:** without any, every part is drawn.
+- **Subject variables:** every column named by `--group-variable`, `--categorical` or `--numerical` must be in the subject info; otherwise the command stops before loading the model and lists the available columns. A blank cell leaves that subject out of that variable's panels only; a blank `--group-variable` cell is an error.
+- **Group comparisons:** in each boxplot, every pair of categories gets a Mann–Whitney U test, and significant pairs are starred (no multiple-comparison correction). The `All` box shows which subjects are outliers for the whole dataset rather than within their group, and is never tested.
+- **Category order:** categories are sorted, so a group has the same colour in every figure.
 - **Missing segmentation:** if a per-ROI model is plotted without `--segmentation`, the spatial parts are skipped with a note. Asking for one explicitly without a segmentation is an error.
 
 ## `gmri plot group-maps`

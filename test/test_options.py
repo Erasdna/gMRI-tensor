@@ -6,6 +6,7 @@ import pytest
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
 from gMRItensor.options import FitOptions
+from gMRItensor.options import GroupMapPlotOptions
 from gMRItensor.options import options_from_json
 from gMRItensor.options import options_to_json
 from gMRItensor.options import PreprocessingOptions
@@ -141,9 +142,14 @@ def test_replicability_rules(tmp_path: Path) -> None:
         ReplicabilityOptions(**common, engine="halfhalf", repeats=1, stratify_by="x")
 
 
+def _subject_info(tmp_path: Path) -> Path:
+    path = tmp_path / "subjects.csv"
+    path.write_text("subjects,diagnosis,sex,age\nsub-01,PD,F,61\n")
+    return path
+
+
 def test_statistics_plot_options(tmp_path: Path) -> None:
-    subject_info = tmp_path / "subjects.csv"
-    subject_info.touch()
+    subject_info = _subject_info(tmp_path)
     common: dict[str, Any] = {
         "roi_signal": tmp_path / "roi_signal.parquet",
         "subject_info": subject_info,
@@ -174,8 +180,7 @@ def test_statistics_plot_options(tmp_path: Path) -> None:
 def test_decomposition_plot_options(tmp_path: Path) -> None:
     model = tmp_path / "rank_2.h5"
     model.touch()
-    subject_info = tmp_path / "subjects.csv"
-    subject_info.touch()
+    subject_info = _subject_info(tmp_path)
     common: dict[str, Any] = {
         "model": model,
         "subject_info": subject_info,
@@ -217,3 +222,93 @@ def test_options_json_round_trip() -> None:
         input=back.input,
         output_dir=back.output_dir,
     )
+
+
+def test_decomposition_plot_options_split_subject_variables(tmp_path: Path) -> None:
+    model = tmp_path / "pd_rank_2.h5"
+    model.touch()
+    common: dict[str, Any] = {
+        "model": model,
+        "subject_info": _subject_info(tmp_path),
+        "group_variable": "diagnosis",
+        "output_dir": tmp_path,
+    }
+
+    options = DecompositionPlotOptions(
+        **common,
+        categorical=("sex", "diagnosis"),
+        numerical=("age",),
+    )
+
+    assert options.categorical == ("sex", "diagnosis")
+    assert options.numerical == ("age",)
+    with pytest.raises(ValueError, match="min_panel_width"):
+        DecompositionPlotOptions(**common, min_panel_width=0.0)
+
+
+def _misspelled_column_cases(tmp_path: Path) -> list[tuple[Any, str]]:
+    subject_info = _subject_info(tmp_path)
+    model = tmp_path / "pd_rank_2.h5"
+    model.touch()
+    plot: dict[str, Any] = {
+        "model": model,
+        "subject_info": subject_info,
+        "group_variable": "diagnosis",
+        "output_dir": tmp_path,
+    }
+    misspelled_group: dict[str, Any] = {**plot, "group_variable": "diagnose"}
+    return [
+        (
+            lambda: DecompositionPlotOptions(**misspelled_group),
+            "'diagnose' (--group-variable)",
+        ),
+        (
+            lambda: DecompositionPlotOptions(**plot, categorical=("sexx",)),
+            "'sexx' (--categorical)",
+        ),
+        (
+            lambda: DecompositionPlotOptions(**plot, numerical=("agee",)),
+            "'agee' (--numerical)",
+        ),
+        (
+            lambda: StatisticsPlotOptions(
+                roi_signal=tmp_path / "roi_signal.parquet",
+                subject_info=subject_info,
+                group_variable="diagnose",
+                output_dir=tmp_path,
+            ),
+            "'diagnose' (--group-variable)",
+        ),
+        (
+            lambda: GroupMapPlotOptions(
+                input=tmp_path / "voxels.parquet",
+                subject_info=subject_info,
+                group_variable="diagnose",
+                output_dir=tmp_path,
+            ),
+            "'diagnose' (--group-variable)",
+        ),
+        (
+            lambda: ReplicabilityOptions(
+                input=Path("x.parquet"),
+                output_dir=Path("out"),
+                method="parafac2",
+                ranks=(2,),
+                engine="halfhalf",
+                repeats=1,
+                subject_info=subject_info,
+                stratify_by="diagnose",
+            ),
+            "'diagnose' (--stratify-by)",
+        ),
+    ]
+
+
+def test_misspelled_subject_columns_list_the_available_ones(tmp_path: Path) -> None:
+    for make, missing in _misspelled_column_cases(tmp_path):
+        with pytest.raises(ValueError) as error:
+            make()
+        message = str(error.value)
+        assert "subjects.csv" in message
+        assert missing in message
+        assert "available columns: subjects, diagnosis, sex, age" in message

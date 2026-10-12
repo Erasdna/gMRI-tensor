@@ -162,8 +162,8 @@ fig, axs, significance = plot_evolving_mode(
 )
 ```
 
-- `subject_info` has a `subjects` column plus the grouping and covariate columns.
-- `plot_subject_mode` draws one row per component: a boxplot by group with significance annotations, then a scatter against each of the `plotting_variables`.
+- `subject_info` has a `subjects` column plus the grouping and other subject columns.
+- `plot_subject_mode` draws one row per component: a boxplot by group (with a pooled `All` box) and by each of the `categorical_variables` (light grey boxes, subjects as group-coloured dots), with significance annotations, then a scatter against each of the `numerical_variables`.
 - `plot_subject_mode_correlation` draws a component-by-component matrix with group comparisons.
 - `plot_evolving_mode` draws per-group mean ± SEM ribbons and individual subject curves. Its per-time-point group comparisons are returned as a table, not drawn.
 - `plot_spatial_mode` overlays the spatial mode on brain slices, yielding one figure per region from `region_masks_from_segmentations`. `expand_roi_mode_to_voxels` broadcasts an ROI-level mode out to voxels.

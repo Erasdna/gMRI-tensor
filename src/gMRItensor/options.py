@@ -12,9 +12,11 @@ from typing import Any
 from typing import Literal
 
 import numpy as np
+import pandas as pd
 from gMRItensor.decomposition import _resolve_options
 from gMRItensor.group_statistics import Aggregate
 from gMRItensor.group_statistics import AGGREGATES
+from gMRItensor.group_statistics import require_columns
 from gMRItensor.plotting.utils import JOURNAL_WIDTHS
 from gMRItensor.preprocessing import SIGNAL_TYPES
 from gMRItensor.roi_groups import get_roi_presets
@@ -74,6 +76,14 @@ def _check_page_width(page_width: str | float) -> None:
 def _require_file(path: Path, name: str) -> None:
     if not Path(path).exists():
         raise FileNotFoundError(f"{name}: file not found: {path}")
+
+
+def _check_subject_columns(path: Path, requested: dict[str, str]) -> None:
+    """Raise unless the subject-info CSV has every `requested` column
+    (name -> its flag), reading only the header."""
+    _require_file(path, "subject_info")
+    columns = list(pd.read_csv(path, nrows=0).columns)
+    require_columns(columns, requested, str(path))
 
 
 @dataclass(frozen=True)
@@ -294,6 +304,11 @@ class ReplicabilityOptions:
             self.stratify_by is None or self.subject_info is not None,
             "stratify_by needs subject_info",
         )
+        if self.stratify_by is not None:
+            _check_subject_columns(
+                self.subject_info,  # type: ignore[arg-type]
+                {self.stratify_by: "--stratify-by"},
+            )
         _check(self.n_procs >= 1, f"n_procs must be >= 1, got {self.n_procs}")
         _check(
             self.statistic in ("median", "mean"),
@@ -364,7 +379,10 @@ class StatisticsPlotOptions:
         )
         _check_page_width(self.page_width)
         _check(self.dpi >= 1, f"dpi must be >= 1, got {self.dpi}")
-        _require_file(self.subject_info, "subject_info")
+        _check_subject_columns(
+            self.subject_info,
+            {self.group_variable: "--group-variable"},
+        )
 
     def region_groups(self) -> dict[str, np.ndarray]:
         """`name -> label ids` of the regions to plot (every preset by default)."""
@@ -387,7 +405,11 @@ class DecompositionPlotOptions:
     `parts` from `DECOMPOSITION_PARTS` (empty = all). Spatial parts of an
     ROI model need `segmentation`, a label volume in the decomposition's
     label space (CSF ids at +10000); `background` defaults to its mask and
-    `slices` (i, j, k) to the centre of mass.
+    `slices` (i, j, k) to the centre of mass. The subject mode is drawn as
+    boxplots by `group_variable` and each `categorical` column and as
+    scatters against each `numerical` column, all from `subject_info`;
+    with `min_panel_width` (inches) that figure grows beyond `page_width`
+    rather than squeezing its panels.
     """
 
     model: Path
@@ -398,7 +420,9 @@ class DecompositionPlotOptions:
     segmentation: Path | None = None
     background: Path | None = None
     slices: tuple[int, int, int] | None = None
-    covariates: tuple[str, ...] = ()
+    categorical: tuple[str, ...] = ()
+    numerical: tuple[str, ...] = ()
+    min_panel_width: float | None = None
     alpha: float = 0.05
     min_group_n: int = 2
     page_width: str | float = "double"
@@ -413,10 +437,21 @@ class DecompositionPlotOptions:
             f"slices must be three indices (i j k), got {self.slices}",
         )
         _check(0 < self.alpha < 1, f"alpha must be in (0, 1), got {self.alpha}")
+        _check(
+            self.min_panel_width is None or self.min_panel_width > 0,
+            f"min_panel_width must be > 0, got {self.min_panel_width}",
+        )
         _check_page_width(self.page_width)
         _check(self.dpi >= 1, f"dpi must be >= 1, got {self.dpi}")
         _require_file(self.model, "model")
-        _require_file(self.subject_info, "subject_info")
+        _check_subject_columns(
+            self.subject_info,
+            {
+                **{column: "--numerical" for column in self.numerical},
+                **{column: "--categorical" for column in self.categorical},
+                self.group_variable: "--group-variable",
+            },
+        )
         for name in ("segmentation", "background"):
             path = getattr(self, name)
             if path is not None:
@@ -470,7 +505,10 @@ class GroupMapPlotOptions:
         )
         _check_page_width(self.page_width)
         _check(self.dpi >= 1, f"dpi must be >= 1, got {self.dpi}")
-        _require_file(self.subject_info, "subject_info")
+        _check_subject_columns(
+            self.subject_info,
+            {self.group_variable: "--group-variable"},
+        )
         for name in ("segmentation", "background"):
             path = getattr(self, name)
             if path is not None:

@@ -193,12 +193,6 @@ def plot_mode_grid(
         subject_info,
         group_variable,
     )
-    # Match boxplot colors to the ribbon's, in the boxplot's category order.
-    boxplot_colors = (
-        [color_by_group[c] for c in df[group_variable].unique()]
-        if is_evolving
-        else None
-    )
 
     for component in range(n_components):
 
@@ -226,7 +220,6 @@ def plot_mode_grid(
             x_column=group_variable,
             y_column=f"comp_{component}",
             legend=False,
-            colors=boxplot_colors,
         )
 
         subject_ax.set_ylabel("")

@@ -1,10 +1,13 @@
 """Plotting functions for subject mode analysis."""
+from collections.abc import Sequence
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import scienceplots  # noqa: F401
 import seaborn as sns
+from gMRItensor.group_statistics import require_columns
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import get_color_palette
 from gMRItensor.plotting.utils import scale_mode
@@ -15,6 +18,28 @@ plt.style.use(["science", "no-latex"])
 matplotlib.use("Agg")
 
 
+POOLED_LABEL = "All"
+# Wrapped tick label: one line does not fit next to the groups' labels.
+_POOLED_TICK = "All"
+# Hollow: the pooled box is no group, so it takes no palette colour (the
+# palette includes a grey).
+POOLED_COLOR = "white"
+# Light grey for boxes of non-group variables: colour means group, and this
+# is far lighter than the palette's grey.
+CATEGORY_COLOR = "0.85"
+
+
+def _levels(values: pd.Series) -> list:
+    """Sorted non-missing unique values: the category order (and so the
+    colour order) of every categorical panel, as in `plot_evolving_mode`.
+    Numeric codes sort numerically."""
+    levels = list(values.dropna().unique())
+    try:
+        return sorted(levels)
+    except TypeError:  # mixed types
+        return sorted(levels, key=str)
+
+
 def make_subject_boxplot(
     ax: matplotlib.axes.Axes,
     df: pd.DataFrame,
@@ -22,31 +47,56 @@ def make_subject_boxplot(
     y_column: str,
     legend: bool = True,
     colors: list | None = None,
+    pooled: bool = False,
+    dot_hue: str | None = None,
 ) -> tuple[tuple[float, float], float | None]:
     """Boxplot `y_column` by `x_column`, with pairwise Mann-Whitney U tests.
 
-    Falls back to a tab10-based palette when `colors` is None. Returns
-    `(ylim, required_xlim)`, the latter being the x-axis upper limit needed
-    to keep the legend from overlapping the data, or None without a legend.
+    Categories are `_levels(df[x_column])`; rows missing either column are
+    left out. `colors` are in that order (default `get_color_palette`).
+    `pooled` appends a hollow box of every subject, labelled `POOLED_LABEL`:
+    it shows which values are outliers for the whole dataset rather than
+    within a group, and is never tested. `dot_hue` names another column
+    (the group variable): the boxes are then light grey, and every subject is
+    drawn as a dot in its `dot_hue` group's colour, so colour keeps meaning
+    that group in every panel. Returns `(ylim, required_xlim)`,
+    the latter being the x-axis upper limit needed to keep the legend from
+    overlapping the data, or None without a legend.
     """
-    # Integer x-positions keep the category spacing even.
-    categories = df[x_column].unique()
+    dot_levels = _levels(df[dot_hue]) if dot_hue is not None else []
+    df = df.dropna(subset=[x_column, y_column])
+    categories = _levels(df[x_column])
     n_categories = len(categories)
 
-    if colors is None:
+    if dot_hue is not None:
+        colors = [CATEGORY_COLOR] * n_categories
+    elif colors is None:
         colors = get_color_palette(n_categories)
-
-    df_plot = df.copy()
-    category_to_position = {cat: i for i, cat in enumerate(categories)}
-    df_plot["_x_position"] = df_plot[x_column].map(category_to_position)
+    labels = [str(category) for category in categories]
+    position = {category: i for i, category in enumerate(categories)}
+    # Integer x-positions keep the category spacing even.
+    df_plot = df.assign(
+        _x_position=df[x_column].map(position),
+        _hue=df[x_column].map(dict(zip(categories, labels))),
+    )
+    hue_order = list(labels)
+    palette = list(colors[:n_categories])
+    if pooled:
+        df_plot = pd.concat(
+            [df_plot, df.assign(_x_position=n_categories, _hue=POOLED_LABEL)],
+            ignore_index=True,
+        )
+        hue_order.append(POOLED_LABEL)
+        palette.append(POOLED_COLOR)
 
     plot = sns.boxplot(
         data=df_plot,
         x="_x_position",
         y=y_column,
-        hue=x_column,
+        hue="_hue",
+        hue_order=hue_order,
         ax=ax,
-        palette=colors,
+        palette=palette,
         width=0.25,
         legend=False,
         boxprops=dict(alpha=0.7),
@@ -54,8 +104,22 @@ def make_subject_boxplot(
         linewidth=1.5,
         saturation=1,
     )
+    if dot_hue is not None:
+        sns.stripplot(
+            data=df_plot,
+            x="_x_position",
+            y=y_column,
+            hue=dot_hue,
+            hue_order=dot_levels,
+            palette=get_color_palette(len(dot_levels)),
+            jitter=0.08,
+            size=3,
+            legend=False,
+            ax=ax,
+        )
 
     if n_categories >= 2:
+        # Group positions only: the pooled box is never compared.
         pairs = [
             (i, j) for i in range(n_categories) for j in range(i + 1, n_categories)
         ]
@@ -74,6 +138,7 @@ def make_subject_boxplot(
         )
         annotator.apply_and_annotate()
 
+    n_boxes = len(hue_order)
     required_xlim = None
     if legend:
         handles = [
@@ -82,7 +147,7 @@ def make_subject_boxplot(
         ]
         leg = ax.legend(
             handles,
-            categories,
+            labels,
             loc="upper right",
             frameon=True,
             framealpha=0.9,
@@ -96,15 +161,15 @@ def make_subject_boxplot(
         legend_width = legend_bbox_data.x1 - legend_bbox_data.x0
 
         # 0.2 buffer + half the box width + the legend.
-        rightmost_tick = n_categories - 1
+        rightmost_tick = n_boxes - 1
         required_xlim = rightmost_tick + 0.2 + 0.125 + legend_width
 
-    ax.set_xticks(range(n_categories))
-    ax.set_xticklabels(categories)
+    ax.set_xticks(range(n_boxes))
+    ax.set_xticklabels([*labels, _POOLED_TICK] if pooled else labels)
     ax.set_xlabel(x_column)
 
     if required_xlim is None:
-        ax.set_xlim(-0.25, (n_categories - 1) + 0.25)
+        ax.set_xlim(-0.25, (n_boxes - 1) + 0.25)
     return ax.get_ylim(), required_xlim
 
 
@@ -119,12 +184,15 @@ def make_variable_correlation(
 ) -> None:
     """Scatter `y_column` against `x_column`, with a fit line per category.
 
-    The legend carries each category's R2 and p-value.
+    Rows missing any of the three columns are left out. Categories are
+    `_levels(df[category])`, coloured in that order. A category with fewer
+    than 3 points or a constant x gets no fit line. The legend carries each
+    fit's R2 and p-value.
     """
-
+    df = df.dropna(subset=[x_column, y_column, category])
+    categories = _levels(df[category])
     if colors is None:
-        n_categories = df[category].nunique()
-        colors = get_color_palette(n_categories)
+        colors = get_color_palette(len(categories))
 
     line_plots = []
     legends = []
@@ -135,15 +203,19 @@ def make_variable_correlation(
         x=x_column,
         y=y_column,
         hue=category,
-        palette=colors,
+        hue_order=categories,
+        palette=list(colors[: len(categories)]),
         legend=legend,
         ax=ax,
         alpha=1,
+        s=15,
     )
-    for k, cat in enumerate(df[category].unique()):
+    for k, cat in enumerate(categories):
         cat_df = df.loc[df[category] == cat]
         xs = cat_df[x_column]
         ys = cat_df[y_column]
+        if len(cat_df) < 3 or xs.nunique() < 2:
+            continue
 
         fit = linregress(xs, ys)
 
@@ -156,12 +228,13 @@ def make_variable_correlation(
         )
         line_plots.append(line)
         pvalue_list.append(fit.pvalue)
-        legends.append(rf"$R^2={fit.rvalue**2:.2f}$, $p={fit.pvalue:.1g} $")
+        legends.append(rf"$R^2$={fit.rvalue**2:.2f}, $p$={fit.pvalue:.1g}")
 
-    if legend:
+    if legend and line_plots:
         leg = ax.legend(
             line_plots,
             legends,
+            fontsize="x-small",
         )
         for p_val, text in zip(pvalue_list, leg.get_texts()):
             try:
@@ -185,12 +258,15 @@ def _prepare_plotting_dataframe(
     subjects: list[str],
     subject_info: pd.DataFrame,
     group_variable: str,
-    additional_variables: list[str] | None = None,
+    categorical: Sequence[str] = (),
+    numerical: Sequence[str] = (),
 ) -> pd.DataFrame:
     """Merge a scaled `(n_subjects, n_components)` subject mode with metadata.
 
-    `additional_variables` names further `subject_info` columns to validate.
-    Raises `ValueError` if the inputs do not line up.
+    `categorical` and `numerical` name further `subject_info` columns; the
+    numerical ones are converted to numbers. Blank cells stay missing (each
+    panel leaves them out), except in `group_variable`. Raises `ValueError`
+    if the inputs do not line up.
     """
     if subject_mode.shape[0] != len(subjects):
         raise ValueError(
@@ -199,17 +275,12 @@ def _prepare_plotting_dataframe(
         )""",
         )
 
-    required_columns = [group_variable]
-    if additional_variables is not None:
-        required_columns.extend(additional_variables)
-
-    missing_columns = [
-        col for col in required_columns if col not in subject_info.columns
-    ]
-    if missing_columns:
-        raise ValueError(
-            f"The following columns are missing from subject_info: {missing_columns}",
-        )
+    requested = {
+        **{column: "numerical" for column in numerical},
+        **{column: "categorical" for column in categorical},
+        group_variable: "group_variable",
+    }
+    require_columns(list(subject_info.columns), requested, "subject_info")
 
     if "subjects" not in subject_info.columns:
         raise ValueError("subject_info must contain a 'subjects' column")
@@ -233,6 +304,24 @@ def _prepare_plotting_dataframe(
         raise ValueError(
             f"{missing_count} subject(s) from the subjects list were not found in subject_info",
         )
+
+    no_group = plotting_df.loc[plotting_df[group_variable].isna(), "subjects"]
+    if not no_group.empty:
+        raise ValueError(
+            f"group_variable '{group_variable}' is missing for subject(s) "
+            f"{list(no_group)}",
+        )
+
+    for column in numerical:
+        values = pd.to_numeric(plotting_df[column], errors="coerce")
+        bad = plotting_df[column].notna() & values.isna()
+        if bad.any():
+            first = plotting_df.loc[bad].iloc[0]
+            raise ValueError(
+                f"numerical variable '{column}' is not numeric: "
+                f"{first[column]!r} for subject {first['subjects']}",
+            )
+        plotting_df[column] = values
 
     n_groups = plotting_df[group_variable].nunique()
     if n_groups < 2:
@@ -277,27 +366,46 @@ def plot_subject_mode(
     subjects: list[str],
     subject_info: pd.DataFrame,
     group_variable: str,
-    plotting_variables: list[str],
+    numerical_variables: Sequence[str] = (),
+    categorical_variables: Sequence[str] = (),
     page_width: float = 7.0,
-    width_to_height_ratio: float = 1.618,
+    width_to_height_ratio: float | None = None,
+    min_panel_width: float | None = None,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
-    """Plot subject mode components against group and continuous variables.
+    """Plot subject mode components against categorical and numerical variables.
 
-    One row per component: column 0 is a boxplot by `group_variable`,
-    followed by one scatter column per entry in `plotting_variables`. See
-    `compute_figsize` for the sizing arguments. Raises `ValueError` if the
-    inputs do not line up.
+    One row per component, one shared y-range per row. Boxplots come first:
+    by `group_variable` (plus a pooled box of every subject), then by each
+    of `categorical_variables`. Then one scatter column per entry in
+    `numerical_variables`, coloured and fitted per `group_variable` group.
+    A subject with a blank cell is left out of that variable's panels only.
+    See `compute_figsize` for the sizing arguments; `width_to_height_ratio`
+    defaults to 1.618 for up to two columns and 1.0 (square panels) beyond,
+    where the panels get too flat for their labels. With `min_panel_width`
+    (inches), a figure whose panels would be narrower is widened beyond
+    `page_width` to that width per panel. Raises `ValueError` if the inputs
+    do not line up.
     """
+    categorical = list(
+        dict.fromkeys(c for c in categorical_variables if c != group_variable),
+    )
+    numerical = list(numerical_variables)
     plotting_df = _prepare_plotting_dataframe(
         subject_mode,
         subjects,
         subject_info,
         group_variable,
-        plotting_variables,
+        categorical,
+        numerical,
     )
 
+    boxplot_variables = [group_variable, *categorical]
     n_components = subject_mode.shape[1]
-    n_columns = 1 + len(plotting_variables)
+    n_columns = len(boxplot_variables) + len(numerical)
+    if width_to_height_ratio is None:
+        width_to_height_ratio = 1.618 if n_columns <= 2 else 1.0
+    if min_panel_width is not None:
+        page_width = max(page_width, n_columns * min_panel_width)
     figsize = compute_figsize(
         n_components,
         n_columns,
@@ -308,55 +416,52 @@ def plot_subject_mode(
     fig, axs = plt.subplots(
         n_components,
         n_columns,
-        width_ratios=[1] + [1] * len(plotting_variables),
         figsize=figsize,
         layout="compressed",
+        sharey="row",
         squeeze=False,
     )
 
-    # First pass: draw, collecting the limits each row needs.
-    ylims_list = []
-    xlim_list = []
-
     for i, ax in enumerate(axs):
-        ylims, required_xlim = make_subject_boxplot(
-            ax[0],
-            plotting_df,
-            x_column=group_variable,
-            y_column=f"comp_{i}",
-            legend=True,  # Show legend on every row
-        )
-        ylims_list.append(ylims)
-        if required_xlim is not None:
-            xlim_list.append(required_xlim)
-
-        ax[0].set_ylabel(rf"Component {i+1}")
-        ax[0].set_xlabel("")
-
-        if i == 0:
-            ax[0].set_title(f"Subject mode v {group_variable}")
-
-        for j, var in enumerate(plotting_variables):
-            make_variable_correlation(
-                ax[1 + j],
+        y_column = f"comp_{i}"
+        row_ylims = []
+        for j, variable in enumerate(boxplot_variables):
+            # The tick labels name the categories: no legend needed.
+            # Colour means group: other variables get hollow boxes with
+            # group-coloured subject dots.
+            ylims, _ = make_subject_boxplot(
+                ax[j],
                 plotting_df,
-                x_column=var,
-                y_column=f"comp_{i}",
+                x_column=variable,
+                y_column=y_column,
+                legend=False,
+                pooled=j == 0,
+                dot_hue=None if j == 0 else group_variable,
+            )
+            row_ylims.append(ylims)
+            ax[j].set_xlabel(variable if i == n_components - 1 else "")
+
+        for j, variable in enumerate(numerical, start=len(boxplot_variables)):
+            make_variable_correlation(
+                ax[j],
+                plotting_df,
+                x_column=variable,
+                y_column=y_column,
                 category=group_variable,
                 legend=True,
             )
-            if i == 0:
-                ax[j + 1].set_title(f"Subject mode v {var}")
-
             if i == n_components - 1:
-                ax[j + 1].set_xlabel(var)
+                ax[j].set_xlabel(variable)
 
-    _finalize_boxplot_axes(
-        axs,
-        ylims_list,
-        xlim_list,
-        boxplot_columns=[0] * n_components,
-    )
+        # Boxplot ranges include the significance annotations.
+        row_ylim = (min(lo for lo, _ in row_ylims), max(hi for _, hi in row_ylims))
+        for axx in ax:
+            axx.set_ylim(*row_ylim)
+            axx.set_ylabel("")
+        ax[0].set_ylabel(rf"Component {i+1}")
+
+    for j, variable in enumerate([*boxplot_variables, *numerical]):
+        axs[0, j].set_title(variable)
 
     return fig, axs
 
@@ -396,6 +501,7 @@ def plot_subject_mode_correlation(
         width_ratios=[1] * n_components,
         figsize=figsize,
         layout="compressed",
+        sharey="row",
         squeeze=False,
     )
 

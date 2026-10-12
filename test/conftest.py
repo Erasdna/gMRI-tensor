@@ -21,6 +21,9 @@ class SyntheticStudy(NamedTuple):
 def synthetic_study(tmp_path: Path) -> SyntheticStudy:
     """6 subjects (3 PD, 3 Control) x 3 time points of 6^3 T1 maps [ms].
 
+    The subject info also has `sex` (F/M), `apoe` (numeric codes 2/3/4) and
+    `age`, blank for sub-00.
+
     Baseline T1 is ~1500 ms; enhancement peaks at 24 h with ΔR1 ~1e-4/ms,
     stronger in the ventricles (label 4) and more so for PD, so
     concentrations are finite and nonzero. Manifest paths are relative to
@@ -39,7 +42,15 @@ def synthetic_study(tmp_path: Path) -> SyntheticStudy:
     for s in range(6):
         subject = f"sub-{s:02d}"
         group = "PD" if s < 3 else "Control"
-        subject_rows.append({"subjects": subject, "diagnosis": group})
+        subject_rows.append(
+            {
+                "subjects": subject,
+                "diagnosis": group,
+                "sex": "FM"[s % 2],
+                "apoe": (2, 3, 4)[s % 3],
+                "age": "" if s == 0 else 55 + 3 * s,  # one blank cell
+            },
+        )
         baseline = 1500.0 + rng.normal(0, 10, shape)
         nib.save(nib.Nifti1Image(baseline, affine), images / f"{subject}_base.nii")
         for t in TIME_POINTS:

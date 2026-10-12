@@ -14,7 +14,9 @@ from gMRItensor.plotting.mode_grid import plot_mode_grid
 from gMRItensor.plotting.spatial_mode import _percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
 from gMRItensor.plotting.spatial_mode import plot_spatial_mode
+from gMRItensor.plotting.subject_mode import _levels
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
+from gMRItensor.plotting.subject_mode import CATEGORY_COLOR
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
 from gMRItensor.plotting.subject_mode import make_variable_correlation
 from gMRItensor.plotting.subject_mode import plot_subject_mode
@@ -27,6 +29,7 @@ from gMRItensor.plotting.utils import merge_segmentations
 from gMRItensor.plotting.utils import region_masks_from_segmentations
 from gMRItensor.plotting.utils import scale_mode
 from gMRItensor.plotting.utils import scatter_to_volume
+from matplotlib.colors import to_rgb
 
 matplotlib.use("Agg")
 
@@ -156,6 +159,78 @@ def test_prepare_plotting_dataframe_single_group():
         _prepare_plotting_dataframe(subject_mode, subjects, subject_info, "group")
 
 
+def make_subject_variables(n_per_group: int = 6):
+    """`make_subject_info` plus a string, a numeric-coded categorical and a
+    numerical variable, with one blank cell in the numerical one."""
+    subject_info, subjects = make_subject_info(n_per_group)
+    n = len(subjects)
+    subject_info["sex"] = ["F", "M"] * (n // 2)
+    subject_info["apoe"] = [4, 3, 2] * (n // 3)
+    subject_info["mmse"] = np.linspace(20, 30, n)
+    subject_info.loc[0, "mmse"] = np.nan
+    return subject_info, subjects
+
+
+def test_prepare_plotting_dataframe_lists_the_available_columns():
+    subject_info, subjects = make_subject_variables()
+    subject_mode = np.ones((len(subjects), 2))
+    with pytest.raises(ValueError) as error:
+        _prepare_plotting_dataframe(
+            subject_mode,
+            subjects,
+            subject_info,
+            "group",
+            categorical=("sexx",),
+        )
+    assert "'sexx'" in str(error.value)
+    assert "available columns: subjects, group, age, sex, apoe, mmse" in str(
+        error.value,
+    )
+
+
+def test_prepare_plotting_dataframe_rejects_a_missing_group_value():
+    subject_info, subjects = make_subject_info()
+    subject_info.loc[3, "group"] = np.nan
+    with pytest.raises(ValueError, match="sub-03"):
+        _prepare_plotting_dataframe(
+            np.ones((len(subjects), 2)),
+            subjects,
+            subject_info,
+            "group",
+        )
+
+
+def test_prepare_plotting_dataframe_rejects_a_non_numeric_numerical_column():
+    subject_info, subjects = make_subject_variables()
+    with pytest.raises(ValueError, match="'sex'.*'F'"):
+        _prepare_plotting_dataframe(
+            np.ones((len(subjects), 2)),
+            subjects,
+            subject_info,
+            "group",
+            numerical=("sex",),
+        )
+
+
+def test_prepare_plotting_dataframe_keeps_blank_numerical_cells():
+    subject_info, subjects = make_subject_variables()
+    df = _prepare_plotting_dataframe(
+        np.ones((len(subjects), 2)),
+        subjects,
+        subject_info,
+        "group",
+        categorical=("apoe",),
+        numerical=("mmse",),
+    )
+    assert len(df) == len(subjects)
+    assert df["mmse"].isna().sum() == 1
+
+
+def test_levels_sort_numeric_codes_numerically():
+    assert _levels(pd.Series([10, 2, 3, np.nan, 2])) == [2, 3, 10]
+    assert _levels(pd.Series(["PD", "Control", None])) == ["Control", "PD"]
+
+
 # --- gMRItensor.plotting.subject_mode: make_subject_boxplot / make_variable_correlation ---
 
 
@@ -200,6 +275,73 @@ def test_make_subject_boxplot_no_legend():
     plt.close(fig)
 
 
+def _box_colors(ax) -> list[tuple[float, float, float]]:
+    return [to_rgb(patch.get_facecolor()) for patch in ax.patches]
+
+
+def test_make_subject_boxplot_sorts_groups_and_appends_all_groups():
+    df = make_boxplot_df().iloc[::-1]  # "B" appears first
+    fig, ax = plt.subplots()
+
+    make_subject_boxplot(ax, df, "group", "value", legend=False, pooled=True)
+
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["A", "B", "All"]
+    colors = _box_colors(ax)
+    assert len(colors) == 3
+    assert colors[:2] == [to_rgb(c) for c in get_color_palette(2)]
+    assert colors[2] == to_rgb("white")
+    plt.close(fig)
+
+
+def test_all_groups_box_is_not_compared():
+    rng = np.random.default_rng(0)
+    df = pd.DataFrame(
+        {
+            "group": ["A"] * 10 + ["B"] * 10,
+            "value": np.r_[rng.normal(0, 1, 10), rng.normal(10, 1, 10)],
+        },
+    )
+    fig, ax = plt.subplots()
+
+    make_subject_boxplot(ax, df, "group", "value", legend=False, pooled=True)
+
+    # A vs B is significant; A or B vs the pooled box would be too.
+    stars = [t for t in ax.texts if "*" in t.get_text()]
+    assert len(stars) == 1
+    plt.close(fig)
+
+
+def test_make_subject_boxplot_drops_missing_categories_per_panel():
+    df = make_boxplot_df()
+    df.loc[0, "group"] = np.nan
+    fig, ax = plt.subplots()
+
+    make_subject_boxplot(ax, df, "group", "value", legend=False)
+
+    assert [t.get_text() for t in ax.get_xticklabels()] == ["A", "B"]
+    plt.close(fig)
+
+
+def test_make_variable_correlation_drops_missing_values_and_skips_flat_groups():
+    df = pd.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, np.nan, 5.0, 5.0, 5.0, 5.0],
+            "y": [1.0, 2.0, 2.5, 4.0, 1.0, 2.0, 3.0, 4.0],
+            "group": ["A"] * 4 + ["B"] * 4,
+        },
+    )
+    fig, ax = plt.subplots()
+
+    make_variable_correlation(ax, df, "x", "y", "group")
+
+    assert len(ax.collections[0].get_offsets()) == 7
+    # A has a fit line; B has a constant x, so no fit and no error. (Seaborn
+    # adds empty legend-proxy lines, hence counting lines with data.)
+    fits = [line for line in ax.get_lines() if len(line.get_xdata())]
+    assert len(fits) == 1
+    plt.close(fig)
+
+
 def test_make_variable_correlation():
     rng = np.random.default_rng(2)
     n = 20
@@ -231,9 +373,123 @@ def test_plot_subject_mode():
         subjects,
         subject_info,
         group_variable="group",
-        plotting_variables=["age"],
+        numerical_variables=["age"],
     )
     assert axs.shape == (n_components, 2)
+    plt.close(fig)
+
+
+def test_plot_subject_mode_with_categorical_and_numerical_variables():
+    subject_info, subjects = make_subject_variables()
+    subject_mode = np.random.default_rng(3).normal(size=(len(subjects), 2))
+
+    fig, axs = plot_subject_mode(
+        subject_mode,
+        subjects,
+        subject_info,
+        group_variable="group",
+        numerical_variables=["age", "mmse"],
+        categorical_variables=["sex", "group", "apoe"],
+    )
+
+    assert axs.shape == (2, 5)  # group, sex, apoe | age, mmse
+    # Column names as x-labels on the bottom row only, as for the scatters.
+    assert [ax.get_xlabel() for ax in axs[-1]] == [
+        "group",
+        "sex",
+        "apoe",
+        "age",
+        "mmse",
+    ]
+    assert all(ax.get_xlabel() == "" for ax in axs[0])
+    ticks = [[t.get_text() for t in ax.get_xticklabels()] for ax in axs[0, :3]]
+    assert ticks == [["A", "B", "All"], ["F", "M"], ["2", "3", "4"]]
+    for row in axs:
+        assert len({ax.get_ylim() for ax in row}) == 1
+    # One subject has no mmse: one point fewer in that panel only.
+    assert len(axs[0, 3].collections[0].get_offsets()) == len(subjects)
+    assert len(axs[0, 4].collections[0].get_offsets()) == len(subjects) - 1
+    plt.close(fig)
+
+
+def test_subject_mode_figures_share_the_y_axis_per_row():
+    subject_info, subjects = make_subject_variables()
+    subject_mode = np.random.default_rng(3).normal(size=(len(subjects), 2))
+    figures = [
+        plot_subject_mode(
+            subject_mode,
+            subjects,
+            subject_info,
+            "group",
+            numerical_variables=["age"],
+            categorical_variables=["sex"],
+        ),
+        plot_subject_mode_correlation(subject_mode, subjects, subject_info, "group"),
+    ]
+    for fig, axs in figures:
+        fig.canvas.draw()
+        for row in axs:
+            assert all(ax.get_shared_y_axes().joined(row[0], ax) for ax in row)
+            assert row[0].yaxis.get_ticklabels()[0].get_visible()
+            for ax in row[1:]:
+                assert not any(t.get_visible() for t in ax.yaxis.get_ticklabels())
+        plt.close(fig)
+
+
+def test_only_the_group_variable_gets_colours():
+    subject_info, subjects = make_subject_variables()
+    subject_mode = np.random.default_rng(3).normal(size=(len(subjects), 1))
+
+    fig, axs = plot_subject_mode(
+        subject_mode,
+        subjects,
+        subject_info,
+        "group",
+        categorical_variables=["sex", "apoe"],
+    )
+
+    palette = [to_rgb(c) for c in get_color_palette(2)]
+    white = to_rgb("white")
+    assert _box_colors(axs[0, 0]) == [*palette, white]
+    for ax in axs[0, 1:]:
+        # Light grey boxes; every subject as a dot in its group's colour.
+        assert set(_box_colors(ax)) == {to_rgb(CATEGORY_COLOR)}
+        assert to_rgb(CATEGORY_COLOR) not in {*palette, white}
+        dots = [c for c in ax.collections if len(c.get_offsets())]
+        assert sum(len(c.get_offsets()) for c in dots) == len(subjects)
+        dot_colors = {tuple(to_rgb(f)) for c in dots for f in c.get_facecolors()}
+        assert dot_colors == set(palette)
+    plt.close(fig)
+
+
+@pytest.mark.parametrize(
+    ("numerical", "min_panel_width", "width"),
+    [
+        (["age", "mmse"], None, 7.0),  # 5 columns squeezed into the page
+        (["age", "mmse"], 2.0, 10.0),  # widened to 5 x 2"
+        ([], 2.0, 7.0),  # 3 columns already get 7/3" > 2"
+    ],
+)
+def test_plot_subject_mode_min_panel_width(
+    numerical: list[str],
+    min_panel_width: float | None,
+    width: float,
+) -> None:
+    subject_info, subjects = make_subject_variables()
+    subject_mode = np.random.default_rng(3).normal(size=(len(subjects), 2))
+
+    fig, _ = plot_subject_mode(
+        subject_mode,
+        subjects,
+        subject_info,
+        "group",
+        numerical_variables=numerical,
+        categorical_variables=["sex", "apoe"],
+        page_width=7.0,
+        min_panel_width=min_panel_width,
+    )
+
+    assert fig.get_size_inches()[0] == pytest.approx(width)
     plt.close(fig)
 
 
@@ -264,7 +520,7 @@ def test_plot_subject_mode_single_component():
         subjects,
         subject_info,
         group_variable="group",
-        plotting_variables=["age"],
+        numerical_variables=["age"],
     )
     assert axs.shape == (n_components, 2)
     plt.close(fig)
@@ -1111,6 +1367,25 @@ def test_plot_evolving_mode_time_axis_label():
     plt.close(fig)
 
 
+def test_plot_mode_grid_boxes_match_the_ribbon_colours():
+    kwargs = make_mode_grid_fixture()
+    subject_info = kwargs["subject_info"]
+    subject_info["group"] = subject_info["group"].map({"A": "B", "B": "A"})
+    rng = np.random.default_rng(0)
+    n_subjects = len(kwargs["subjects"])
+    kwargs["time_mode"] = [rng.random((4, 2)) for _ in range(n_subjects)]
+    kwargs["time_points"] = [np.arange(4)] * n_subjects
+
+    fig, axs = plot_mode_grid(**kwargs)
+
+    palette = [to_rgb(c) for c in get_color_palette(2)]
+    assert [t.get_text() for t in axs[0, 1].get_xticklabels()] == ["A", "B"]
+    assert _box_colors(axs[0, 1]) == palette
+    ribbons = {line.get_label(): to_rgb(line.get_color()) for line in axs[0, 0].lines}
+    assert [ribbons["A"], ribbons["B"]] == palette
+    plt.close(fig)
+
+
 def test_plot_mode_grid_subject_xlabel_uses_group_variable():
     kwargs = make_mode_grid_fixture()
     kwargs["subject_info"] = kwargs["subject_info"].rename(columns={"group": "cohort"})
@@ -1205,7 +1480,7 @@ def test_plot_subject_mode_keeps_compressed_layout():
         subjects,
         subject_info,
         group_variable="group",
-        plotting_variables=["age"],
+        numerical_variables=["age"],
     )
     engine = fig.get_layout_engine()
     assert isinstance(engine, matplotlib.layout_engine.ConstrainedLayoutEngine)

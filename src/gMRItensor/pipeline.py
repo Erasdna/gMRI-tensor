@@ -1181,8 +1181,10 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
             subjects,
             subject_info,
             options.group_variable,
-            list(options.covariates),
+            numerical_variables=list(options.numerical),
+            categorical_variables=list(options.categorical),
             page_width=page_width,
+            min_panel_width=options.min_panel_width,
         )
         save(fig, "subject_mode")
     if "time" in parts:
