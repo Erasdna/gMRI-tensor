@@ -1,10 +1,12 @@
 """Group comparisons of long-format values over time (no plotting).
 
 Shared by the decomposition's evolving mode (faceted by component) and the
-ROI-level tracer analysis (faceted by ROI).
+ROI-level tracer analysis (faceted by ROI); `aggregate_subjects` builds the
+group-average maps.
 """
 from collections.abc import Mapping
 from typing import Any
+from typing import Literal
 
 import numpy as np
 import pandas as pd
@@ -32,6 +34,55 @@ def resolve_subject_groups(
     if missing:
         raise ValueError(f"Subject(s) not found in subject_info: {missing}")
     return [subject_to_group.loc[s] for s in subjects]
+
+
+Aggregate = Literal["trimmed", "mean", "median"]
+AGGREGATES: tuple[str, ...] = ("trimmed", "mean", "median")
+
+
+def aggregate_subjects(
+    values: np.ndarray,
+    method: Aggregate = "trimmed",
+    trim: int = 2,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Aggregate `(n_subjects, n_columns)` values over subjects, per column.
+
+    Non-finite values are missing and ignored. `trimmed` is the mean after
+    dropping the `trim` highest and lowest finite values of a column; a
+    column with fewer than `2 * trim + 1` finite values gets its median
+    instead (the limit of trimming). A column without finite values is NaN.
+
+    Returns `(aggregate, n)`, `n` the finite values per column.
+    """
+    if method not in AGGREGATES:
+        raise ValueError(f"method must be one of {AGGREGATES}, got {method!r}")
+    if trim < 0:
+        raise ValueError(f"trim must be >= 0, got {trim}")
+    values = np.where(np.isfinite(values), values, np.nan).astype(float)
+    finite = np.isfinite(values)
+    n = finite.sum(axis=0)
+    has_values = n > 0
+    aggregate = np.full(values.shape[1], np.nan)
+    if not has_values.any():
+        return aggregate, n
+    present = values[:, has_values]
+    n_present = n[has_values]
+    if method == "mean":
+        aggregate[has_values] = np.nansum(present, axis=0) / n_present
+    elif method == "median":
+        aggregate[has_values] = np.nanmedian(present, axis=0)
+    else:
+        ordered = np.sort(present, axis=0)  # NaN sorts last
+        rank = np.arange(len(ordered))[:, None]
+        kept = (rank >= trim) & (rank < n_present - trim)
+        n_kept = n_present - 2 * trim
+        trimmed = np.where(kept, ordered, 0.0).sum(axis=0) / np.maximum(n_kept, 1)
+        aggregate[has_values] = np.where(
+            n_kept >= 1,
+            trimmed,
+            np.nanmedian(present, axis=0),
+        )
+    return aggregate, n
 
 
 def summarize_groups_over_time(

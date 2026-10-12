@@ -9,6 +9,7 @@
 | `gmri decompose run\|plan\|collect` | `roi_signal.parquet` or `voxels.parquet` | `<method>_rank_<r>.h5`, `fits.csv` |
 | `gmri replicability run\|plan\|collect` | the same, plus the subject info CSV for stratification | `replicability.csv` |
 | `gmri plot decomposition` | `<method>_rank_<r>.h5`, subject info CSV, optionally a segmentation | `<output-dir>/figures/decomposition/` |
+| `gmri plot group-maps` | `roi_signal.parquet` (plus a segmentation) or `voxels.parquet`, subject info CSV | `<output-dir>/figures/group_maps/` |
 
 - **Provenance:** every command records its settings and the package version in `<output-dir>/<command>.json`.
 - **Errors:** an invalid argument or a missing input stops the command before it writes anything. The command prints a one-line message and exits with code 2.
@@ -232,6 +233,32 @@ gmri plot decomposition --model results/parafac2/parafac2_rank_3.h5 --subject-in
 - **Part flags:** without any, every part is drawn.
 - **Missing segmentation:** if a per-ROI model is plotted without `--segmentation`, the spatial parts are skipped with a note. Asking for one explicitly without a segmentation is an error.
 
+## `gmri plot group-maps`
+
+```bash
+gmri plot group-maps --input results/data/voxels.parquet --subject-info subjects.csv \
+    --group-variable diagnosis --output-dir results \
+    [--aggregate trimmed|mean|median] [--trim 2] [--timepoints 6 24] [--background template_T1.nii.gz] [--slices 90 110 80]
+```
+
+At every time point, each group's subjects are aggregated per ROI or voxel. The maps are drawn like `plot decomposition --spatial`: one figure per time point and region (parenchyma, CSF), with one row per group.
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `--input` | required | `voxels.parquet` for per-voxel maps, or `roi_signal.parquet` for per-ROI maps painted onto `--segmentation`. |
+| `--subject-info`, `--group-variable` | required | Subjects and the column that defines the groups. |
+| `--output-dir` | required | Figures go to `figures/group_maps/<input>__<aggregate>__t<time point>__<region>.<ext>`. |
+| `--aggregate` | `trimmed` | Across the subjects of a group: `trimmed` (the mean after dropping the `--trim` highest and lowest values), `mean` or `median`. Non-finite values are ignored. |
+| `--trim` | `2` | Values dropped at each end for `trimmed`. With fewer than `2 × trim + 1` values, the median is used instead. |
+| `--statistic` | `median` | Per-ROI statistic to aggregate (`roi_signal` input only). |
+| `--segmentation` | | Label volume in `roi_signal`'s label space. Required for per-ROI input. For voxel input, it must be on the template grid. |
+| `--background`, `--slices I J K` | segmentation mask, centre of mass | As for `plot decomposition`. |
+| `--timepoints` | all | Time points to draw. Each must be in the input. |
+| `--page-width`, `--formats`, `--dpi` | `double`, `pdf png`, `300` | As for `plot statistics`. |
+
+- **Rows:** labelled `<group> (n=<subjects scanned at that time point>)`. A group with no scan at a time point keeps an empty row, so the rows match across figures.
+- **Colours:** one range per region, the 5th–95th percentile of every group and time point, so the figures of a region are comparable.
+
 ## Custom figures from scripts
 
 Figure grids and other layouts are built in Python from the saved tables:
@@ -248,5 +275,6 @@ save_figure(fig, "results/figures/overview")
 ```
 
 - **ROI rows layout:** `plot_roi_evolution_rows` draws several ROIs as rows. It also takes the per-scan values (`roi_statistics.parquet`) for the subject curves.
+- **Group-average maps:** `gMRItensor.pipeline.group_averages` returns the aggregated values without plotting.
 - **Decomposition figures:** use `gMRItensor.model_io.load_decomposition` with `plot_mode_grid`, `plot_subject_mode`, `plot_evolving_mode`, `gMRItensor.plotting.time_mode.plot_time_mode` and `plot_spatial_mode`.
 - **Building blocks:** `gMRItensor.pipeline` exposes each step for scripts, e.g. `run_statistics_plots(StatisticsPlotOptions(...))`.

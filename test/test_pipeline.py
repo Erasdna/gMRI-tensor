@@ -14,6 +14,7 @@ from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
 from gMRItensor.options import DistributedOptions
 from gMRItensor.options import FitOptions
+from gMRItensor.options import GroupMapPlotOptions
 from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import StatisticsPlotOptions
@@ -21,12 +22,14 @@ from gMRItensor.options import TensorOptions
 from gMRItensor.pipeline import collect_decomposition
 from gMRItensor.pipeline import collect_replicability
 from gMRItensor.pipeline import format_significance_summary
+from gMRItensor.pipeline import group_averages
 from gMRItensor.pipeline import plan_decomposition
 from gMRItensor.pipeline import plan_replicability_jobs
 from gMRItensor.pipeline import read_manifest
 from gMRItensor.pipeline import run_decomposition
 from gMRItensor.pipeline import run_decomposition_job
 from gMRItensor.pipeline import run_decomposition_plots
+from gMRItensor.pipeline import run_group_map_plots
 from gMRItensor.pipeline import run_preprocessing
 from gMRItensor.pipeline import run_replicability
 from gMRItensor.pipeline import run_replicability_job
@@ -707,6 +710,117 @@ def test_plot_roi_model_rejects_a_segmentation_in_another_label_space(
         )
 
 
+# Group-average maps --------------------------------------------------------
+
+
+def group_map_options(study: Any, **overrides: Any) -> GroupMapPlotOptions:
+    values: dict[str, Any] = {
+        "input": study.root / "results" / "data" / "voxels.parquet",
+        "subject_info": study.subject_info,
+        "group_variable": "diagnosis",
+        "output_dir": study.root / "results",
+        "formats": ("png",),
+        "dpi": 50,
+        **overrides,
+    }
+    return GroupMapPlotOptions(**values)
+
+
+def test_group_averages_of_voxels_match_a_direct_mean(synthetic_study: Any) -> None:
+    results = preprocess(synthetic_study, store_voxels=True)
+
+    averages = group_averages(group_map_options(synthetic_study, aggregate="mean"))
+
+    assert averages.timepoints == [0, 6, 24]
+    assert averages.groups == ["Control", "PD"]
+    np.testing.assert_array_equal(averages.n_subjects, np.full((3, 2), 3))
+    voxels = pd.read_parquet(results / "data" / "voxels.parquet")
+    pd_subjects = [f"sub-{s:02d}" for s in range(3)]
+    first = voxels[
+        (voxels["labels"] == averages.labels[0])
+        & (voxels["label_index"] == averages.label_index[0])
+        & (voxels["time_point"] == 24)
+        & voxels["subject"].isin(pd_subjects)
+    ]
+    assert averages.values[0, 2, 1] == pytest.approx(first["values"].mean())
+    assert averages.voxel_coords is not None
+    assert averages.values.shape == (len(averages.voxel_coords), 3, 2)
+
+
+def test_group_averages_of_rois_trimmed_falls_back_to_the_median(
+    synthetic_study: Any,
+) -> None:
+    results = preprocess(synthetic_study)
+    options = group_map_options(
+        synthetic_study,
+        input=results / "data" / "roi_signal.parquet",
+        statistic="mean",
+        timepoints=(6, 24),
+    )
+
+    averages = group_averages(options)
+
+    # Three subjects per group: too few to trim two at each end.
+    roi = pd.read_parquet(results / "data" / "roi_signal.parquet")
+    roi["group"] = np.where(roi["subject"] < "sub-03", "PD", "Control")
+    expected = roi.groupby(["label", "time_point", "group"])["mean"].median()
+    assert averages.timepoints == [6, 24]
+    assert averages.voxel_coords is None
+    for column, label in enumerate(averages.labels):
+        for t, timepoint in enumerate(averages.timepoints):
+            for g, group in enumerate(averages.groups):
+                assert averages.values[column, t, g] == pytest.approx(
+                    expected[(label, timepoint, group)],
+                )
+
+
+def test_run_group_map_plots_from_voxels(synthetic_study: Any) -> None:
+    preprocess(synthetic_study, store_voxels=True)
+
+    written = run_group_map_plots(group_map_options(synthetic_study))
+
+    assert sorted(p.name for p in written) == sorted(
+        f"voxels__trimmed__t{t}__{region}.png"
+        for t in (0, 6, 24)
+        for region in ("csf", "parenchyma")
+    )
+    assert all(p.parent.name == "group_maps" for p in written)
+    assert (synthetic_study.root / "results" / "plot_group_maps.json").exists()
+
+
+def test_run_group_map_plots_from_rois_needs_a_segmentation(
+    synthetic_study: Any,
+) -> None:
+    results = preprocess(synthetic_study)
+    roi_signal = results / "data" / "roi_signal.parquet"
+
+    with pytest.raises(ValueError, match="segmentation"):
+        run_group_map_plots(group_map_options(synthetic_study, input=roi_signal))
+    assert not (results / "figures" / "group_maps").exists()
+
+    written = run_group_map_plots(
+        group_map_options(
+            synthetic_study,
+            input=roi_signal,
+            aggregate="median",
+            segmentation=synthetic_study.root / "images" / "seg.nii",
+            timepoints=(24,),
+        ),
+    )
+
+    assert sorted(p.name for p in written) == [
+        "roi_signal__median__t24__csf.png",
+        "roi_signal__median__t24__parenchyma.png",
+    ]
+
+
+def test_group_averages_reject_an_unknown_time_point(synthetic_study: Any) -> None:
+    preprocess(synthetic_study, store_voxels=True)
+
+    with pytest.raises(ValueError, match="time point"):
+        group_averages(group_map_options(synthetic_study, timepoints=(12,)))
+
+
 # CMF ------------------------------------------------------------------------
 
 CMF_FIT = FitOptions(restarts=2, max_iter=300, tolerance=1e-4)
@@ -866,8 +980,11 @@ def test_csf_is_offset_ventricles_and_label_24(
     relabelled = dataclasses.replace(saved, labels=labels)
 
     spatial = pipeline._spatial_inputs(
-        relabelled,
-        plot_options(synthetic_study, model),
+        relabelled.label_mode,
+        pipeline._model_label_space(relabelled),
+        None,
+        None,
+        None,
     )
 
     assert spatial is not None

@@ -877,6 +877,40 @@ def test_overlay_is_aligned_with_the_background_voxels():
     plt.close(fig)
 
 
+def test_plot_spatial_mode_raw_values_with_fixed_range_and_row_labels():
+    voxel_mode, index_list, region_masks, background = make_roi_mode_fixture()
+    voxel_mode = voxel_mode.copy()
+    voxel_mode[:, 1] = np.nan  # e.g. a group without subjects at this time point
+
+    results = list(
+        plot_spatial_mode(
+            voxel_mode,
+            index_list,
+            {"CSF": region_masks["CSF"]},
+            background,
+            slices=[2, 2, 2],
+            page_width=5.0,
+            scale=False,
+            row_labels=["PD (n=3)", "Control (n=0)"],
+            colorbar_label="Median ΔR1 (1/s)",
+            vlims={"CSF": (-1.0, 7.0)},
+        ),
+    )
+
+    ((fig, axs, _),) = results
+    mesh = axs[0][2].collections[-1]
+    assert mesh.get_clim() == (-1.0, 7.0)
+    drawn = mesh.get_array().compressed()
+    assert set(np.round(drawn, 6)) <= set(np.round(voxel_mode[:, 0], 6))
+    assert axs[1][2].collections[-1].get_array().count() == 0
+    assert [axs[row][0].get_ylabel() for row in range(2)] == [
+        "PD (n=3)",
+        "Control (n=0)",
+    ]
+    assert "Median ΔR1 (1/s)" in [ax.get_ylabel() for ax in fig.axes]
+    plt.close(fig)
+
+
 def make_mode_grid_fixture(n_components=2, seed=0):
     voxel_mode, index_list, region_masks, background = make_roi_mode_fixture(
         n_components=n_components,

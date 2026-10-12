@@ -29,6 +29,7 @@ from gMRItensor.decomposition import run_CMF_decomposition_repeated
 from gMRItensor.decomposition import run_CP_decomposition_repeated
 from gMRItensor.decomposition import run_PARAFAC2_decomposition_repeated
 from gMRItensor.decomposition import setup_backend
+from gMRItensor.group_statistics import aggregate_subjects
 from gMRItensor.group_statistics import compare_groups_over_time
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import significance_summary
@@ -47,6 +48,7 @@ from gMRItensor.options import CONCENTRATION_STATISTICS
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
 from gMRItensor.options import FitOptions
+from gMRItensor.options import GroupMapPlotOptions
 from gMRItensor.options import options_from_json
 from gMRItensor.options import options_to_json
 from gMRItensor.options import PreprocessingOptions
@@ -996,51 +998,82 @@ def _check_grid(
         )
 
 
-def _spatial_inputs(
-    saved: SavedDecomposition,
-    options: DecompositionPlotOptions,
-) -> _Spatial | None:
-    """Voxel layout of `saved.label_mode`; None for an ROI model without a
-    segmentation to map onto.
+class _LabelSpace(NamedTuple):
+    """Where the rows of a label-space array sit: one label id per row and,
+    for voxel data, each row's template coordinates and the template grid.
+    `owner` names the data in messages (`model`, `input`)."""
 
-    Every image given is checked against the grid it is drawn on: a voxel
-    model's template (its stored shape and affine), or an ROI model's
-    segmentation.
+    labels: np.ndarray
+    voxel_coords: np.ndarray | None
+    template_shape: np.ndarray | None
+    template_affine: np.ndarray | None
+    template_path: str | None
+    owner: str
+
+
+def _model_label_space(saved: SavedDecomposition) -> _LabelSpace:
+    return _LabelSpace(
+        saved.labels,
+        saved.voxel_coords,
+        saved.template_shape,
+        saved.template_affine,
+        saved.template_path,
+        "model",
+    )
+
+
+def _spatial_inputs(
+    label_mode: np.ndarray,
+    space: _LabelSpace,
+    segmentation_path: Path | None,
+    background_path: Path | None,
+    slices: tuple[int, int, int] | None,
+    fill_value: float = 0.0,
+) -> _Spatial | None:
+    """Voxel layout of `label_mode` (one row per `space.labels` entry); None
+    for ROI data without a segmentation to map onto. Segmented voxels whose
+    label is not in `space.labels` get `fill_value`.
+
+    Every image given is checked against the grid it is drawn on: voxel
+    data's template (its stored shape and affine), or the segmentation of
+    ROI data.
     """
+    owner = space.owner
     segmentation = segmentation_affine = None
-    if options.segmentation is not None:
-        segmentation_data, segmentation_affine = _canonical_image(options.segmentation)
+    if segmentation_path is not None:
+        segmentation_data, segmentation_affine = _canonical_image(segmentation_path)
         segmentation = np.rint(segmentation_data).astype(np.int64)
 
-    if saved.voxel_coords is None:
+    if space.voxel_coords is None:
         if segmentation is None:
             return None
-        if not np.isin(saved.labels, segmentation).any():
-            first = list(saved.labels[:5])
+        if not np.isin(space.labels, segmentation).any():
+            first = list(space.labels[:5])
             raise ValueError(
-                f"{options.segmentation} contains none of the model's labels "
-                f"{first}...; it must be in the decomposition's label space",
+                f"{segmentation_path} contains none of the {owner}'s labels "
+                f"{first}...; it must be in the {owner}'s label space",
             )
         mode, index_list = expand_roi_mode_to_voxels(
-            saved.label_mode,
-            saved.labels,
+            label_mode,
+            space.labels,
             segmentation,
+            fill_value=fill_value,
         )
         voxel_labels = segmentation[tuple(index_list.T)]
         shape = tuple(segmentation.shape)
         grid_affine = segmentation_affine
-        reference = f"the segmentation {options.segmentation}"
+        reference = f"the segmentation {segmentation_path}"
     else:
-        mode, index_list = saved.label_mode, saved.voxel_coords
-        voxel_labels = saved.labels
-        shape = tuple(int(n) for n in np.asarray(saved.template_shape))
-        grid_affine = saved.template_affine
-        reference = "the model's template"
-        if saved.template_path:
-            reference += f", {saved.template_path},"
+        mode, index_list = label_mode, space.voxel_coords
+        voxel_labels = space.labels
+        shape = tuple(int(n) for n in np.asarray(space.template_shape))
+        grid_affine = space.template_affine
+        reference = f"the {owner}'s template"
+        if space.template_path:
+            reference += f", {space.template_path},"
         if segmentation is not None:
             _check_grid(
-                Path(options.segmentation),  # type: ignore[arg-type]
+                Path(segmentation_path),  # type: ignore[arg-type]
                 segmentation,
                 segmentation_affine,  # type: ignore[arg-type]
                 shape,
@@ -1048,10 +1081,10 @@ def _spatial_inputs(
                 reference,
             )
 
-    if options.background is not None:
-        background, background_affine = _canonical_image(options.background)
+    if background_path is not None:
+        background, background_affine = _canonical_image(background_path)
         _check_grid(
-            Path(options.background),
+            Path(background_path),
             background,
             background_affine,
             shape,
@@ -1064,10 +1097,10 @@ def _spatial_inputs(
         background = np.zeros(shape)
         background[tuple(index_list.T)] = 1.0
 
-    slices = options.slices or tuple(int(i) for i in np.rint(index_list.mean(axis=0)))
-    if not all(0 <= s < n for s, n in zip(slices, shape)):
+    shown = slices or tuple(int(i) for i in np.rint(index_list.mean(axis=0)))
+    if not all(0 <= s < n for s, n in zip(shown, shape)):
         raise ValueError(
-            f"slices {tuple(slices)} are outside the grid; each must be in "
+            f"slices {tuple(shown)} are outside the grid; each must be in "
             f"0..{tuple(n - 1 for n in shape)}",
         )
     return _Spatial(
@@ -1075,7 +1108,7 @@ def _spatial_inputs(
         index_list,
         is_csf(voxel_labels),
         background,
-        slices,  # type: ignore[arg-type]
+        shown,  # type: ignore[arg-type]
     )
 
 
@@ -1097,7 +1130,13 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
 
     spatial = None
     if {"mode_grid", "spatial"} & set(parts):
-        spatial = _spatial_inputs(saved, options)
+        spatial = _spatial_inputs(
+            saved.label_mode,
+            _model_label_space(saved),
+            options.segmentation,
+            options.background,
+            options.slices,
+        )
         if spatial is None:
             message = (
                 "the spatial parts (mode_grid, spatial) of an ROI model need "
@@ -1182,4 +1221,240 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
         ):
             save(fig, f"spatial_{name}")
     write_provenance(Path(options.output_dir), "plot_decomposition", options)
+    return written
+
+
+# --------------------------------------------------------------------------
+# Group-average maps
+
+
+class GroupAverages(NamedTuple):
+    """`group_averages` output: each group's subject aggregate per column
+    (a label of `roi_signal`, or a voxel) and time point.
+
+    `values` is `(n_columns, n_timepoints, n_groups)`, NaN where a group has
+    no finite value; `n_subjects` `(n_timepoints, n_groups)` counts the
+    subjects scanned at that time point. Voxel input also has each column's
+    template coordinates and the template grid.
+    """
+
+    values: np.ndarray
+    n_subjects: np.ndarray
+    timepoints: list[int]
+    groups: list[str]
+    labels: np.ndarray
+    label_index: np.ndarray
+    signal: str
+    voxel_coords: np.ndarray | None = None
+    template_shape: np.ndarray | None = None
+    template_affine: np.ndarray | None = None
+    template_path: str | None = None
+
+
+_SIGNAL_LABELS = {"delta_R1": "ΔR1 (1/s)", "ratio": "Signal ratio"}
+
+
+def _selected_timepoints(
+    available: Sequence[int],
+    requested: Sequence[int],
+    path: Path,
+) -> list[int]:
+    if not requested:
+        return sorted(available)
+    missing = sorted(set(requested) - set(available))
+    if missing:
+        raise ValueError(
+            f"time point(s) {missing} not in {path}; it has {sorted(available)}",
+        )
+    return sorted(set(requested))
+
+
+def group_averages(options: GroupMapPlotOptions) -> GroupAverages:
+    """Aggregate each group's subjects per column, at each time point.
+
+    Columns are the labels of `roi_signal.parquet` (its `options.statistic`)
+    or the voxels of `voxels.parquet`, read one time point at a time.
+    Subjects are aggregated with `aggregate_subjects(options.aggregate,
+    options.trim)`; groups are the sorted `options.group_variable` values.
+    """
+    path = Path(options.input)
+    _require(path, "preprocess")
+    metadata = read_signal_metadata(path)
+    kind = metadata.get("kind")
+    template: tuple[Any, ...] = (None, None, None, None)
+    if kind == "roi_signal":
+        roi = pd.read_parquet(
+            path,
+            columns=["subject", "time_point", "label", options.statistic],
+        )
+        roi = roi.rename(columns={"label": "labels", options.statistic: "values"})
+        labels = np.sort(roi["labels"].unique())
+        label_index = np.zeros(len(labels), dtype=np.int64)
+
+        def read_scans(timepoint: int) -> pd.DataFrame:
+            scans = roi[roi["time_point"] == timepoint]
+            return scans.assign(label_index=0)
+
+    elif kind == "voxels":
+        coords_path = path.with_name(path.name.replace(".parquet", ".coords.parquet"))
+        _require(coords_path, "preprocess --store-voxels")
+        keys = pd.read_parquet(coords_path, columns=["labels", "label_index"])
+        labels = keys["labels"].to_numpy(dtype=np.int64)
+        label_index = keys["label_index"].to_numpy(dtype=np.int64)
+        template = _voxel_template(path, labels, label_index)
+
+        def read_scans(timepoint: int) -> pd.DataFrame:
+            return pq.read_table(
+                path,
+                columns=["subject", "labels", "label_index", "values"],
+                filters=[("time_point", "==", timepoint)],
+            ).to_pandas()
+
+    else:
+        raise ValueError(
+            f"{path} is neither roi_signal.parquet nor voxels.parquet from "
+            "`gmri preprocess`",
+        )
+
+    scans_index = (
+        pq.read_table(path, columns=["subject", "time_point"])
+        .to_pandas()
+        .drop_duplicates()
+    )
+    subjects = sorted(scans_index["subject"].unique())
+    subject_groups = dict(
+        zip(
+            subjects,
+            resolve_subject_groups(
+                subjects,
+                _read_subject_info(options.subject_info),
+                options.group_variable,
+            ),
+        ),
+    )
+    groups = sorted(set(subject_groups.values()))
+    timepoints = _selected_timepoints(
+        [int(t) for t in scans_index["time_point"].unique()],
+        options.timepoints,
+        path,
+    )
+
+    columns = pd.MultiIndex.from_arrays([labels, label_index])
+    values = np.full((len(columns), len(timepoints), len(groups)), np.nan)
+    n_subjects = np.zeros((len(timepoints), len(groups)), dtype=np.int64)
+    for t, timepoint in enumerate(timepoints):
+        scans = read_scans(timepoint)
+        scan_groups = scans["subject"].map(subject_groups)
+        for g, group in enumerate(groups):
+            group_scans = scans[scan_groups == group]
+            present = pd.Index(sorted(group_scans["subject"].unique()))
+            n_subjects[t, g] = len(present)
+            if present.empty:
+                continue
+            rows = present.get_indexer(group_scans["subject"])
+            cols = columns.get_indexer(
+                pd.MultiIndex.from_arrays(
+                    [group_scans["labels"], group_scans["label_index"]],
+                ),
+            )
+            known = cols >= 0
+            matrix = np.full((len(present), len(columns)), np.nan)
+            matrix[rows[known], cols[known]] = group_scans["values"].to_numpy()[known]
+            values[:, t, g], _ = aggregate_subjects(
+                matrix,
+                options.aggregate,
+                options.trim,
+            )
+
+    return GroupAverages(
+        values,
+        n_subjects,
+        timepoints,
+        [str(group) for group in groups],
+        labels,
+        label_index,
+        metadata.get("signal", "delta_R1"),
+        *template,
+    )
+
+
+def _value_range(values: np.ndarray) -> tuple[float, float]:
+    """5th-95th percentile of the finite, nonzero `values` ((0, 1) if none)."""
+    shown = values[np.isfinite(values) & (values != 0)]
+    if shown.size == 0:
+        return 0.0, 1.0
+    low, high = np.percentile(shown, [5, 95])
+    return float(low), float(high)
+
+
+def run_group_map_plots(options: GroupMapPlotOptions) -> list[Path]:
+    """`gmri plot group-maps`: one figure per time point and region.
+
+    Each figure draws every group's average map (`group_averages`) as one
+    row of `plot_spatial_mode`, with parenchyma and CSF in separate figures.
+    A region's colour range is shared by all groups and time points, so
+    the figures are comparable. Saved to `<output_dir>/figures/group_maps/
+    <input>__<aggregate>__t<time point>__<region>.<ext>`.
+    """
+    averages = group_averages(options)
+    n_columns, n_timepoints, n_groups = averages.values.shape
+    spatial = _spatial_inputs(
+        averages.values.reshape(n_columns, n_timepoints * n_groups),
+        _LabelSpace(
+            averages.labels,
+            averages.voxel_coords,
+            averages.template_shape,
+            averages.template_affine,
+            averages.template_path,
+            "input",
+        ),
+        options.segmentation,
+        options.background,
+        options.slices,
+        fill_value=np.nan,
+    )
+    if spatial is None:
+        raise ValueError(
+            f"{options.input} is per-ROI: group maps need --segmentation, a "
+            "label volume in its label space",
+        )
+    maps = spatial.mode.reshape(-1, n_timepoints, n_groups)
+    regions = {
+        name: mask
+        for name, mask in (("parenchyma", ~spatial.csf), ("csf", spatial.csf))
+        if mask.any()
+    }
+    vlims = {name: _value_range(maps[mask]) for name, mask in regions.items()}
+    colorbar_label = _SIGNAL_LABELS.get(averages.signal, averages.signal)
+    out_dir = Path(options.output_dir) / "figures" / "group_maps"
+    stem = f"{Path(options.input).stem}__{options.aggregate}"
+
+    written: list[Path] = []
+    for t, timepoint in enumerate(averages.timepoints):
+        # str.format: add-trailing-comma breaks "(n=" inside an f-string.
+        row_labels = [
+            "{} (n={})".format(group, n)
+            for group, n in zip(averages.groups, averages.n_subjects[t])
+        ]
+        for fig, _, name in plot_spatial_mode(
+            maps[:, t, :],
+            spatial.index_list,
+            regions,
+            spatial.background,
+            list(spatial.slices),
+            page_width=resolve_page_width(options.page_width),
+            scale=False,
+            row_labels=row_labels,
+            colorbar_label=colorbar_label,
+            vlims=vlims,
+        ):
+            written.extend(
+                save_figure(
+                    fig,
+                    out_dir / f"{stem}__t{timepoint}__{name}",
+                    options.formats,
+                    options.dpi,
+                ),
+            )
+    write_provenance(Path(options.output_dir), "plot_group_maps", options)
     return written

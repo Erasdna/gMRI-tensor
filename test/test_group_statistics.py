@@ -1,7 +1,11 @@
+import warnings
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import pytest
+from gMRItensor.group_statistics import Aggregate
+from gMRItensor.group_statistics import aggregate_subjects
 from gMRItensor.group_statistics import compare_groups_over_time
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import significance_summary
@@ -187,3 +191,64 @@ def test_significance_summary_names_significant_rois_and_higher_group():
     assert rows.loc["ventricles", "higher_group"] == "B"
     assert rows.loc["ventricles", "n_tested"] == 4
     assert rows.loc["wm", "significant_timepoints"] == ""
+
+
+def test_aggregate_subjects_trimmed_drops_the_extremes_and_nans() -> None:
+    column = [100.0, 1.0, 2.0, 3.0, np.nan, 4.0, 5.0, -50.0]
+    values = np.array([column, [1.0] * 8]).T  # (8 subjects, 2 columns)
+
+    aggregate, n = aggregate_subjects(values, "trimmed", trim=2)
+
+    # 7 finite values; dropping two at each end leaves 2, 3, 4.
+    np.testing.assert_allclose(aggregate, [3.0, 1.0])
+    np.testing.assert_array_equal(n, [7, 8])
+
+
+def test_aggregate_subjects_trimmed_falls_back_to_the_median() -> None:
+    values = np.array([[1.0], [2.0], [10.0], [np.nan]])
+
+    aggregate, n = aggregate_subjects(values, "trimmed", trim=2)
+
+    np.testing.assert_allclose(aggregate, [2.0])
+    np.testing.assert_array_equal(n, [3])
+
+
+def test_aggregate_subjects_trim_zero_is_the_mean() -> None:
+    values = np.array([[1.0, 4.0], [2.0, np.nan], [6.0, 8.0]])
+
+    trimmed, _ = aggregate_subjects(values, "trimmed", trim=0)
+    mean, _ = aggregate_subjects(values, "mean")
+
+    np.testing.assert_allclose(trimmed, [3.0, 6.0])
+    np.testing.assert_allclose(mean, [3.0, 6.0])
+
+
+@pytest.mark.parametrize("method", ["trimmed", "mean", "median"])
+def test_aggregate_subjects_matches_numpy_and_leaves_empty_columns_nan(
+    method: Aggregate,
+) -> None:
+    rng = np.random.default_rng(0)
+    values = rng.normal(size=(9, 4))
+    values[rng.random(values.shape) < 0.2] = np.nan
+    values[:, -1] = np.nan
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        aggregate, n = aggregate_subjects(values, method, trim=2)
+
+    for column in range(3):
+        finite = np.sort(values[np.isfinite(values[:, column]), column])
+        expected = {
+            "trimmed": finite[2:-2].mean() if len(finite) >= 5 else np.median(finite),
+            "mean": finite.mean(),
+            "median": np.median(finite),
+        }[method]
+        assert aggregate[column] == pytest.approx(expected)
+    assert np.isnan(aggregate[-1]) and n[-1] == 0
+
+
+def test_aggregate_subjects_rejects_bad_arguments() -> None:
+    with pytest.raises(ValueError, match="method"):
+        aggregate_subjects(np.ones((3, 1)), "mode")  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="trim"):
+        aggregate_subjects(np.ones((3, 1)), "trimmed", trim=-1)

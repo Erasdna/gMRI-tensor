@@ -1,3 +1,6 @@
+from collections.abc import Mapping
+from collections.abc import Sequence
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -150,6 +153,10 @@ def plot_spatial_mode(
     page_width: float = 7.0,
     width_to_height_ratio: float = 1.618,
     share_colorbar_scaling: bool = False,
+    scale: bool = True,
+    row_labels: Sequence[str] | None = None,
+    colorbar_label: str = SPATIAL_COLORBAR_LABEL,
+    vlims: Mapping[str, tuple[float, float]] | None = None,
 ):
     """Plot spatial mode components mapped onto brain slices.
 
@@ -179,6 +186,16 @@ def plot_spatial_mode(
         comparable across regions. If False (default), each region is scaled
         from its own values only -- not comparable, but uses each region's
         color range fully.
+    scale : bool, optional
+        Scale each column to unit norm (`scale_mode`, default). False draws
+        the values as given, e.g. group-average maps; NaN entries are blank.
+    row_labels : sequence of str, optional
+        One y-label per column of `spatial_mode` (default `Component k`).
+    colorbar_label : str, optional
+        Label of every colorbar.
+    vlims : mapping, optional
+        Fixed `(vmin, vmax)` per region name for every row, overriding the
+        percentile ranges.
 
     Yields
     ------
@@ -187,7 +204,7 @@ def plot_spatial_mode(
     """
     assert spatial_mode.shape[0] == index_list.shape[0]
 
-    scaled_spatial_mode = scale_mode(spatial_mode)
+    scaled_spatial_mode = scale_mode(spatial_mode) if scale else spatial_mode
 
     background_shape = background.shape
     width_ratios = [
@@ -233,7 +250,9 @@ def plot_spatial_mode(
                 background_shape,
                 mask=ids_mask,
             )
-            if shared_vlims is not None:
+            if vlims is not None and name in vlims:
+                vmin, vmax = vlims[name]
+            elif shared_vlims is not None:
                 vmin, vmax = shared_vlims[component]
             else:
                 vmin, vmax = _percentile_vlim(spatial_component)
@@ -246,9 +265,13 @@ def plot_spatial_mode(
                 slices,
                 vmin=vmin,
                 vmax=vmax,
-                label=SPATIAL_COLORBAR_LABEL,
+                label=colorbar_label,
                 mask=voxel_mask,
             )
-            big_ax[component][0].set_ylabel(f"Component {component+1}")
+            big_ax[component][0].set_ylabel(
+                row_labels[component]
+                if row_labels is not None
+                else f"Component {component+1}",
+            )
 
         yield big_fig, big_ax, name

@@ -3,7 +3,7 @@
     gmri preprocess    --manifest scans.csv --output-dir results --input-type T1map
     gmri decompose     run | plan | collect   (run --job N for one distributed job)
     gmri replicability run | plan | collect
-    gmri plot          statistics | decomposition
+    gmri plot          statistics | decomposition | group-maps
 
 Each command calls one `gMRItensor.pipeline` stage with its
 `gMRItensor.options` dataclass, so scripts can do the same.
@@ -18,11 +18,13 @@ from typing import Any
 
 from gMRItensor import pipeline
 from gMRItensor.decomposition import ConvergenceError
+from gMRItensor.group_statistics import AGGREGATES
 from gMRItensor.options import DECOMPOSITION_PARTS
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
 from gMRItensor.options import DistributedOptions
 from gMRItensor.options import FitOptions
+from gMRItensor.options import GroupMapPlotOptions
 from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import STATISTICS
@@ -360,7 +362,10 @@ def _add_fit_command(
 
 
 def _add_plot(commands: Any) -> None:
-    parser = commands.add_parser("plot", help="ROI statistics or decomposition figures")
+    parser = commands.add_parser(
+        "plot",
+        help="ROI statistics, decomposition or group-average figures",
+    )
     kinds = parser.add_subparsers(dest="action", required=True)
     statistics = kinds.add_parser(
         "statistics",
@@ -532,6 +537,88 @@ def _add_plot(commands: Any) -> None:
     )
     _output_options(decomposition)
 
+    group_maps = kinds.add_parser(
+        "group-maps",
+        help="each group's average map per time point, on brain slices",
+        description=(
+            "Aggregate each group's subjects per ROI or voxel at every time point "
+            "and draw one figure per time point and region (parenchyma, CSF), one "
+            "row per group. Per-ROI input needs --segmentation."
+        ),
+    )
+    group_maps.add_argument(
+        "--input",
+        type=Path,
+        required=True,
+        help="roi_signal.parquet (per ROI) or voxels.parquet (per voxel)",
+    )
+    group_maps.add_argument(
+        "--subject-info",
+        type=Path,
+        required=True,
+        help="CSV with a subjects column",
+    )
+    group_maps.add_argument(
+        "--group-variable",
+        required=True,
+        help="subject-info column that defines the groups",
+    )
+    group_maps.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="results directory",
+    )
+    group_maps.add_argument(
+        "--aggregate",
+        choices=AGGREGATES,
+        default="trimmed",
+        help="across subjects: trimmed mean, mean or median; non-finite values "
+        "are ignored (default: trimmed)",
+    )
+    group_maps.add_argument(
+        "--trim",
+        type=int,
+        default=2,
+        help="values dropped at each end for the trimmed mean; fewer than "
+        "2*trim+1 values give the median (default: 2)",
+    )
+    group_maps.add_argument(
+        "--statistic",
+        choices=("median", "mean"),
+        default="median",
+        help="per-ROI statistic (roi_signal input) (default: median)",
+    )
+    group_maps.add_argument(
+        "--segmentation",
+        type=Path,
+        help="label volume in roi_signal's label space (CSF ids +10000)",
+    )
+    group_maps.add_argument(
+        "--background",
+        type=Path,
+        help="image to draw on (default: segmentation mask)",
+    )
+    group_maps.add_argument(
+        "--slices",
+        type=int,
+        nargs=3,
+        metavar=("I", "J", "K"),
+        help="slice indices (default: centre of mass)",
+    )
+    group_maps.add_argument(
+        "--timepoints",
+        type=int,
+        nargs="+",
+        default=[],
+        help="time points to draw (default: all)",
+    )
+    _output_options(group_maps)
+
+
+def _slices(values: list[int] | None) -> tuple[int, int, int] | None:
+    return (values[0], values[1], values[2]) if values else None
+
 
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -701,6 +788,29 @@ def _run_plot(args: argparse.Namespace) -> None:
             f"Tables: {options.output_dir / 'roi_analysis'}; {len(result.figures)} figure file(s).",
         )
         return
+    if args.action == "group-maps":
+        written = pipeline.run_group_map_plots(
+            GroupMapPlotOptions(
+                input=args.input,
+                subject_info=args.subject_info,
+                group_variable=args.group_variable,
+                output_dir=args.output_dir,
+                aggregate=args.aggregate,
+                trim=args.trim,
+                statistic=args.statistic,
+                segmentation=args.segmentation,
+                background=args.background,
+                slices=_slices(args.slices),
+                timepoints=tuple(args.timepoints),
+                page_width=_page_width(args.page_width),
+                formats=tuple(args.formats),
+                dpi=args.dpi,
+            ),
+        )
+        print(
+            f"{len(written)} figure file(s) in {args.output_dir / 'figures' / 'group_maps'}.",
+        )
+        return
     parts = tuple(part for part in DECOMPOSITION_PARTS if getattr(args, part))
     written = pipeline.run_decomposition_plots(
         DecompositionPlotOptions(
@@ -711,9 +821,7 @@ def _run_plot(args: argparse.Namespace) -> None:
             parts=parts,
             segmentation=args.segmentation,
             background=args.background,
-            slices=(args.slices[0], args.slices[1], args.slices[2])
-            if args.slices
-            else None,
+            slices=_slices(args.slices),
             covariates=tuple(args.covariates),
             alpha=args.alpha,
             min_group_n=args.min_group_n,

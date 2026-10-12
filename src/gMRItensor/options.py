@@ -13,6 +13,8 @@ from typing import Literal
 
 import numpy as np
 from gMRItensor.decomposition import _resolve_options
+from gMRItensor.group_statistics import Aggregate
+from gMRItensor.group_statistics import AGGREGATES
 from gMRItensor.plotting.utils import JOURNAL_WIDTHS
 from gMRItensor.preprocessing import SIGNAL_TYPES
 from gMRItensor.roi_groups import get_roi_presets
@@ -424,6 +426,55 @@ class DecompositionPlotOptions:
         """The parts to draw, in `DECOMPOSITION_PARTS` order."""
         chosen = self.parts or DECOMPOSITION_PARTS
         return tuple(part for part in DECOMPOSITION_PARTS if part in chosen)
+
+
+@dataclass(frozen=True)
+class GroupMapPlotOptions:
+    """`gmri plot group-maps`: per time point, each group's average map.
+
+    `input` is `roi_signal.parquet` (its per-label `statistic`, drawn on
+    `segmentation`, which is then required) or `voxels.parquet`. Subjects
+    are aggregated per ROI/voxel with `aggregate` (`trimmed` drops the
+    `trim` highest and lowest values). `timepoints` limits the figures
+    (empty = all); `background` and `slices` as in `DecompositionPlotOptions`.
+    """
+
+    input: Path
+    subject_info: Path
+    group_variable: str
+    output_dir: Path
+    aggregate: Aggregate = "trimmed"
+    trim: int = 2
+    statistic: Literal["median", "mean"] = "median"
+    segmentation: Path | None = None
+    background: Path | None = None
+    slices: tuple[int, int, int] | None = None
+    timepoints: tuple[int, ...] = ()
+    page_width: str | float = "double"
+    formats: tuple[str, ...] = ("pdf", "png")
+    dpi: int = 300
+
+    def __post_init__(self) -> None:
+        _check(
+            self.aggregate in AGGREGATES,
+            f"aggregate must be one of {AGGREGATES}, got {self.aggregate!r}",
+        )
+        _check(self.trim >= 0, f"trim must be >= 0, got {self.trim}")
+        _check(
+            self.statistic in ("median", "mean"),
+            f"statistic must be median or mean, got {self.statistic!r}",
+        )
+        _check(
+            self.slices is None or len(self.slices) == 3,
+            f"slices must be three indices (i j k), got {self.slices}",
+        )
+        _check_page_width(self.page_width)
+        _check(self.dpi >= 1, f"dpi must be >= 1, got {self.dpi}")
+        _require_file(self.subject_info, "subject_info")
+        for name in ("segmentation", "background"):
+            path = getattr(self, name)
+            if path is not None:
+                _require_file(path, name)
 
 
 _PLANNED = {

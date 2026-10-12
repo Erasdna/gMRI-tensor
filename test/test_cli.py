@@ -285,6 +285,90 @@ def test_cli_plot_before_preprocess(
     assert "gmri preprocess" in capsys.readouterr().err
 
 
+def _group_map_args(study: Any, data: str, *extra: Any) -> list[Any]:
+    return [
+        "plot",
+        "group-maps",
+        "--input",
+        study.root / "results" / "data" / data,
+        "--subject-info",
+        study.subject_info,
+        "--group-variable",
+        "diagnosis",
+        "--output-dir",
+        study.root / "results",
+        "--formats",
+        "png",
+        "--dpi",
+        50,
+        *extra,
+    ]
+
+
+def test_cli_plot_group_maps(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _preprocess(synthetic_study, "--store-voxels")
+
+    code = _run(
+        _group_map_args(
+            synthetic_study,
+            "voxels.parquet",
+            "--aggregate",
+            "mean",
+            "--timepoints",
+            6,
+            24,
+            "--slices",
+            2,
+            3,
+            3,
+        ),
+    )
+
+    assert code == 0
+    figures = results / "figures" / "group_maps"
+    assert sorted(p.name for p in figures.iterdir()) == [
+        "voxels__mean__t24__csf.png",
+        "voxels__mean__t24__parenchyma.png",
+        "voxels__mean__t6__csf.png",
+        "voxels__mean__t6__parenchyma.png",
+    ]
+    assert "4 figure file(s)" in capsys.readouterr().out
+
+    code = _run(
+        _group_map_args(
+            synthetic_study,
+            "roi_signal.parquet",
+            "--statistic",
+            "mean",
+            "--trim",
+            1,
+            "--segmentation",
+            synthetic_study.root / "images" / "seg.nii",
+        ),
+    )
+    assert code == 0
+    assert len(list(figures.glob("roi_signal__trimmed__t*__*.png"))) == 6
+
+
+def test_cli_plot_group_maps_errors(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    assert _run(_group_map_args(synthetic_study, "voxels.parquet")) == 2
+    assert "gmri preprocess" in capsys.readouterr().err
+
+    _preprocess(synthetic_study)
+    assert _run(_group_map_args(synthetic_study, "roi_signal.parquet")) == 2
+    assert "--segmentation" in capsys.readouterr().err
+    assert (
+        _run(_group_map_args(synthetic_study, "roi_signal.parquet", "--trim", -1)) == 2
+    )
+    assert "trim" in capsys.readouterr().err
+
+
 def test_cli_parses_fit_options_and_modes() -> None:
     from gMRItensor.cli import _fit_option
     from gMRItensor.cli import _non_negative_modes
