@@ -7,6 +7,7 @@ the `gmri` command line or from a script.
 import dataclasses
 import json
 import math
+import warnings
 from collections.abc import Hashable
 from collections.abc import Sequence
 from itertools import groupby
@@ -23,11 +24,9 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 from gMRItensor.decomposition import CMFModel
+from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.decomposition import Method
 from gMRItensor.decomposition import PARAFAC2Model
-from gMRItensor.decomposition import run_CMF_decomposition_repeated
-from gMRItensor.decomposition import run_CP_decomposition_repeated
-from gMRItensor.decomposition import run_PARAFAC2_decomposition_repeated
 from gMRItensor.decomposition import setup_backend
 from gMRItensor.group_statistics import aggregate_subjects
 from gMRItensor.group_statistics import compare_groups_over_time
@@ -35,11 +34,13 @@ from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import significance_summary
 from gMRItensor.group_statistics import summarize_groups_over_time
 from gMRItensor.jobs import collect
+from gMRItensor.jobs import Data
 from gMRItensor.jobs import DirectoryStore
 from gMRItensor.jobs import FitTask
 from gMRItensor.jobs import GroupSummary
 from gMRItensor.jobs import plan_replicability
 from gMRItensor.jobs import plan_restarts
+from gMRItensor.jobs import RestartResult
 from gMRItensor.jobs import run_tasks
 from gMRItensor.model_io import load_decomposition
 from gMRItensor.model_io import save_decomposition
@@ -57,6 +58,7 @@ from gMRItensor.options import StatisticsPlotOptions
 from gMRItensor.options import TensorOptions
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.mode_grid import plot_mode_grid
+from gMRItensor.plotting.reproducibility import plot_reproducibility
 from gMRItensor.plotting.roi_evolution import figure_path
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_panels
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_rows
@@ -76,6 +78,8 @@ from gMRItensor.replicability import CrossValidationEngine
 from gMRItensor.replicability import evaluate_replicability_multiproc
 from gMRItensor.replicability import HalfHalfEngine
 from gMRItensor.replicability import ReplicabilityEngine
+from gMRItensor.reproducibility import read_reproducibility
+from gMRItensor.reproducibility import write_reproducibility
 from gMRItensor.roi_groups import add_concentration
 from gMRItensor.roi_groups import aggregate_roi_signal
 from gMRItensor.roi_groups import is_csf
@@ -505,6 +509,13 @@ def _fit_options(fit: FitOptions, method: str) -> dict[str, Any]:
 _RankTask = tuple[int, FitTask]
 
 
+def _on_device(data: Data, device: torch.device) -> Data:
+    """`data` (a tensor, or each slice of a slice list) on `device`."""
+    if isinstance(data, torch.Tensor):
+        return data.to(device)
+    return [s.to(device) for s in data]
+
+
 def _n_jobs(plan: Sequence[_RankTask], tasks_per_job: int) -> int:
     return math.ceil(len(plan) / tasks_per_job)
 
@@ -529,20 +540,26 @@ def _run_job_tasks(
     store_dir: Path,
     n_procs: int,
     options: dict[str, Any],
+    resume: bool = True,
 ) -> None:
-    """Fit `tasks` rank by rank into `<store_dir>/<method>_rank_<r>/`."""
+    """Fit `tasks` rank by rank into `<store_dir>/<method>_rank_<r>/`.
+
+    `resume=False` refits tasks the store already holds (see `run_tasks`).
+    The fits run on `setup_backend()`'s device (`GMRITENSOR_USE_GPU`).
+    """
     options = dict(options)
     progress_bar = bool(options.pop("progress_bar", False))
-    setup_backend()
+    tensor = _on_device(data.data, setup_backend())
     for rank, rank_tasks in groupby(tasks, key=lambda item: item[0]):
         run_tasks(
             [task for _, task in rank_tasks],
-            data.data,
+            tensor,
             rank,
             _method(method),
             DirectoryStore(store_dir / _model_name(method, rank)),
             n_procs=n_procs,
             progress_bar=progress_bar,
+            resume=resume,
             **options,
         )
 
@@ -691,41 +708,28 @@ def _decomposition_input(
 def run_decomposition(options: DecompositionOptions) -> list[Path]:
     """`gmri decompose run`: one fit per rank, in this process.
 
-    Writes `rank_<r>.h5`, `fits.csv` and `decompose.json`; returns the model
-    paths in `ranks` order.
+    Every restart is saved to the store, as a distributed run saves them,
+    and refitted even if the store already holds it. Writes
+    `<method>_rank_<r>.h5`, `fits.csv`, `decompose.json` and each rank's
+    reproducibility files (see `_finish_rank`); returns the model paths in
+    `ranks` order.
     """
     data = _decomposition_input(options)
-    device = setup_backend()
-    fit_kwargs = {
-        "restart_procs": options.fit.restart_procs,
-        "device": device,
-        **_fit_options(options.fit, options.method),
-    }
-    fits = []
-    for rank in options.ranks:
-        if options.method == "cp":
-            weights, factors, error = run_CP_decomposition_repeated(
-                data.data,
-                rank,
-                **fit_kwargs,
-            )
-            model: PARAFAC2Model | CMFModel | tuple[Any, list[Any]] = (
-                weights,
-                factors,
-            )
-        elif options.method == "cmf":
-            model, error = run_CMF_decomposition_repeated(
-                data.data,
-                rank,
-                **fit_kwargs,
-            )
-        else:
-            model, error = run_PARAFAC2_decomposition_repeated(
-                data.data,
-                rank,
-                **fit_kwargs,
-            )
-        fits.append(_saved_decomposition(rank, model, error, data))
+    fit_kwargs = _fit_options(options.fit, options.method)
+    plan = plan_restarts(len(data.subjects), options.fit.restarts)
+    _run_job_tasks(
+        [(rank, task) for rank in options.ranks for task in plan],
+        data,
+        options.method,
+        options.store_dir,
+        options.fit.restart_procs,
+        fit_kwargs,
+        resume=False,
+    )
+    fits = [
+        _finish_rank(plan, options.store_dir, rank, options.method, fit_kwargs, data)
+        for rank in options.ranks
+    ]
     return _write_decompositions(options, fits)
 
 
@@ -775,21 +779,73 @@ def collect_decomposition(output_dir: Path) -> list[Path]:
     options = load_plan(output_dir, DecompositionOptions)
     data = _decomposition_input(options)
     fit_kwargs = _fit_options(options.fit, options.method)
-    fits = []
-    for rank in options.ranks:
-        plan = plan_restarts(len(data.subjects), options.fit.restarts)
-        summary = _collect_rank(
-            plan,
-            options.store_dir,
-            rank,
-            options.method,
-            fit_kwargs,
-        )
-        best = summary["full"].best
-        if best is None or best.model is None or best.error is None:
-            raise ValueError(f"rank {rank}: no restart converged")
-        fits.append(_saved_decomposition(rank, best.model, best.error, data))
+    plan = plan_restarts(len(data.subjects), options.fit.restarts)
+    fits = [
+        _finish_rank(plan, options.store_dir, rank, options.method, fit_kwargs, data)
+        for rank in options.ranks
+    ]
     return _write_decompositions(options, fits)
+
+
+REPRODUCIBILITY_STEM = "reproducibility"
+
+
+def _finish_rank(
+    plan: Sequence[FitTask],
+    store_dir: Path,
+    rank: int,
+    method: str,
+    fit_kwargs: dict[str, Any],
+    data: DecompositionInput,
+) -> SavedDecomposition:
+    """One rank's best restart, after writing its reproducibility files.
+
+    Next to the restarts, in `<store_dir>/<method>_rank_<r>/`:
+    `reproducibility.csv` (pairwise FMS between the successful restarts,
+    sorted by error) and its figure, `reproducibility.{pdf,png}`.
+
+    Raises
+    ------
+    ConvergenceError
+        If no restart converged; the last failure is chained.
+    """
+    with warnings.catch_warnings():
+        # Raised as a ConvergenceError below instead, on one line.
+        warnings.filterwarnings("ignore", message=r"Group .* restarts converged")
+        summary = _collect_rank(plan, store_dir, rank, method, fit_kwargs)["full"]
+    best = summary.best
+    if best is None or best.model is None or best.error is None:
+        raise ConvergenceError(
+            f"No decomposition converged within {len(plan)} restarts at rank "
+            f"{rank}{summary.tally.failure_summary()}",
+        ) from summary.tally.last_failure
+
+    # _collect_rank refuses missing restarts, so every task has a result.
+    rank_dir = store_dir / _model_name(method, rank)
+    store = DirectoryStore(rank_dir)
+    results = [cast(RestartResult, store.load(task)) for task in plan]
+    csv = write_reproducibility(results, rank_dir)
+    fig, _ = plot_reproducibility(*read_reproducibility(csv))
+    save_figure(fig, rank_dir / REPRODUCIBILITY_STEM)
+    return _saved_decomposition(rank, best.model, best.error, data)
+
+
+def run_reproducibility_plot(
+    csv: Path,
+    output: Path | None = None,
+    page_width: str | float = "single",
+    formats: Sequence[str] = ("pdf", "png"),
+    dpi: int = 300,
+) -> list[Path]:
+    """`gmri plot reproducibility`: redraw a saved `reproducibility.csv`.
+
+    The figure goes to `output` (a path stem), by default next to the CSV.
+    """
+    csv = Path(csv)
+    _require(csv, "decompose run")
+    fig, _ = plot_reproducibility(*read_reproducibility(csv), page_width=page_width)
+    stem = csv.with_suffix("") if output is None else Path(output)
+    return save_figure(fig, stem, formats=formats, dpi=dpi)
 
 
 # --------------------------------------------------------------------------
@@ -875,16 +931,17 @@ def run_replicability(options: ReplicabilityOptions) -> Path:
     """`gmri replicability run`: factor match scores per rank, in this process.
 
     The (optionally scaled) tensor is split by the engine; each rank gets a
-    fresh engine with `seed`, so ranks see the same splits.
+    fresh engine with `seed`, so ranks see the same splits. The fits run on
+    `setup_backend()`'s device (`GMRITENSOR_USE_GPU`).
     """
     data = _decomposition_input(options)
     stratification = _stratification(options, data.subjects)
-    setup_backend()
+    tensor = _on_device(data.data, setup_backend())
     rows = []
     for rank in options.ranks:
         scores = evaluate_replicability_multiproc(
             _engine(options),
-            data.data,
+            tensor,
             rank,
             method=_method(options.method),
             stratification=stratification,

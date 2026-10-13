@@ -401,13 +401,15 @@ def run_tasks(
     n_procs: int = 1,
     transform: Transform | None = None,
     progress_bar: bool = True,
+    resume: bool = True,
     **kwargs: Any,
 ) -> None:
     """Fit `tasks` and save every result, failures included, to `store`.
 
-    Tasks already in `store` are skipped, so a re-queued job resumes rather
-    than refitting. Each group's subset is built (and `transform`ed) once, in
-    this process, as the tasks reach it.
+    With `resume` (the default), tasks already in `store` are skipped, so a
+    re-queued job resumes rather than refitting. Without it every task is
+    refitted and overwrites what the store held. Each group's subset is
+    built (and `transform`ed) once, in this process, as the tasks reach it.
 
     `kwargs` are `run_*_decomposition_repeated` options -- see `fit_task`.
     `n_procs >= 2` spreads the tasks over a spawned process pool, each worker
@@ -432,7 +434,7 @@ def run_tasks(
             "compute_device) to use multiple processes.",
         )
 
-    pending = [task for task in tasks if store.load(task) is None]
+    pending = [task for task in tasks if not resume or store.load(task) is None]
     compute_kwargs = _compute_kwargs(method, rank, resolved)
     memory_efficient = resolved["use_memory_efficient_khatri_rao"]
     task_args = (

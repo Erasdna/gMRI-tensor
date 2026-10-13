@@ -11,6 +11,7 @@ from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
 from gMRItensor.plotting.evolving_mode import evolving_factors_to_numpy
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.mode_grid import plot_mode_grid
+from gMRItensor.plotting.reproducibility import plot_reproducibility
 from gMRItensor.plotting.spatial_mode import _percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
 from gMRItensor.plotting.spatial_mode import plot_spatial_mode
@@ -1485,4 +1486,52 @@ def test_plot_subject_mode_keeps_compressed_layout():
     engine = fig.get_layout_engine()
     assert isinstance(engine, matplotlib.layout_engine.ConstrainedLayoutEngine)
     assert engine._compress
+    plt.close(fig)
+
+
+def make_reproducibility_fixture(n: int = 10) -> tuple[pd.DataFrame, pd.Series]:
+    """A mock FMS matrix: the four lowest-error restarts share a minimum."""
+    rng = np.random.default_rng(0)
+    fms = rng.uniform(0.3, 0.7, (n, n))
+    fms[:4, :4] = rng.uniform(0.95, 1.0, (4, 4))
+    fms = (fms + fms.T) / 2
+    np.fill_diagonal(fms, 1.0)
+    seeds = pd.Index(rng.permutation(n), name="seed")
+    errors = pd.Series(np.sort(rng.uniform(0.1, 0.2, n)), index=seeds)
+    return pd.DataFrame(fms, index=seeds, columns=seeds), errors
+
+
+def test_plot_reproducibility():
+    fms, errors = make_reproducibility_fixture()
+    fig, (error_ax, fms_ax, colorbar_ax) = plot_reproducibility(fms, errors)
+    image = fms_ax.get_images()[0]
+    pairs = fms.to_numpy()[~np.eye(len(fms), dtype=bool)]
+    assert image.get_clim() == (pairs.min(), pairs.max())  # adapts to the data
+    np.testing.assert_allclose(image.get_array(), fms.to_numpy())
+    ticks = [str(i) for i in range(1, len(fms) + 1)]  # order, not seeds
+    assert [t.get_text() for t in fms_ax.get_xticklabels()] == ticks
+    assert [t.get_text() for t in fms_ax.get_yticklabels()] == ticks
+    np.testing.assert_allclose(error_ax.get_lines()[0].get_ydata(), errors)
+    assert colorbar_ax.get_ylabel() == "FMS"
+    plt.close(fig)
+
+
+def test_plot_reproducibility_fixed_range():
+    fms, errors = make_reproducibility_fixture()
+    fig, (_, fms_ax, _) = plot_reproducibility(fms, errors, vmin=0.0, vmax=1.0)
+    assert fms_ax.get_images()[0].get_clim() == (0.0, 1.0)
+    plt.close(fig)
+
+
+def test_plot_reproducibility_single_restart():
+    fms = pd.DataFrame([[1.0]], index=[3], columns=[3])
+    fig, (_, fms_ax, _) = plot_reproducibility(fms, pd.Series([0.1], index=[3]))
+    assert fms_ax.get_images()[0].get_clim() == (0.0, 1.0)  # no pairs to adapt to
+    plt.close(fig)
+
+
+def test_plot_reproducibility_thins_tick_labels():
+    fms, errors = make_reproducibility_fixture(50)
+    fig, (_, fms_ax, _) = plot_reproducibility(fms, errors)
+    assert len(fms_ax.get_xticks()) <= 20
     plt.close(fig)

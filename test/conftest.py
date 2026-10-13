@@ -17,6 +17,13 @@ class SyntheticStudy(NamedTuple):
     subject_info: Path
 
 
+@pytest.fixture(autouse=True)
+def cpu_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fit on the CPU unless a test opts in, and undo any test's own
+    `GMRITENSOR_USE_GPU` change, so the flag never leaks between tests."""
+    monkeypatch.setenv("GMRITENSOR_USE_GPU", "FALSE")
+
+
 @pytest.fixture
 def synthetic_study(tmp_path: Path) -> SyntheticStudy:
     """6 subjects (3 PD, 3 Control) x 3 time points of 6^3 T1 maps [ms].

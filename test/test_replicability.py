@@ -1,11 +1,13 @@
 import math
 import os
 
+import numpy as np
 import pytest
 import torch
 from gMRItensor import CMFModel
 from gMRItensor import setup_backend
 from gMRItensor.replicability import _weights_and_factors
+from gMRItensor.replicability import compute_FMS
 from gMRItensor.replicability import CrossValidationEngine
 from gMRItensor.replicability import evaluate_replicability_multiproc
 from gMRItensor.replicability import HalfHalfEngine
@@ -216,6 +218,37 @@ def test_cmf_subject_mode_is_not_scored():
     assert torch.equal(subject_mode, torch.ones(3, 2))
     assert evolving is model.evolving_states
     assert label_mode is model.label_mode
+
+
+def _cp_fit(seed: int = 0) -> tuple[np.ndarray, list[np.ndarray]]:
+    rng = np.random.default_rng(seed)
+    return np.ones(3), [rng.random((n, 3)) for n in (6, 5, 4)]
+
+
+def test_compute_fms_is_one_for_identical_fits():
+    fit = _cp_fit()
+    assert compute_FMS(fit, fit) == pytest.approx(1.0)
+
+
+def test_compute_fms_ignores_permutation_and_scaling():
+    weights, factors = _cp_fit()
+    order = [2, 0, 1]
+    scaled = [factor[:, order] * 3.0 for factor in factors]
+    assert compute_FMS((weights, factors), (weights * 5, scaled)) == pytest.approx(
+        1.0,
+    )
+
+
+def test_compute_fms_skip_mode_ignores_that_mode():
+    weights, factors = _cp_fit(0)
+    _, other = _cp_fit(1)
+    mixed = [other[0], factors[1], factors[2]]
+    assert compute_FMS((weights, factors), (weights, mixed)) < 0.99
+    assert compute_FMS(
+        (weights, factors),
+        (weights, mixed),
+        skip_mode=0,
+    ) == pytest.approx(1.0)
 
 
 if __name__ == "__main__":

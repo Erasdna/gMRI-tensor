@@ -6,10 +6,11 @@
 |---|---|---|
 | `gmri preprocess` | manifest CSV, NIfTI images | `<output-dir>/data/` |
 | `gmri plot statistics` | `roi_signal.parquet`, subject info CSV | `<output-dir>/roi_analysis/`, `<output-dir>/figures/roi/` |
-| `gmri decompose run\|plan\|collect` | `roi_signal.parquet` or `voxels.parquet` | `<method>_rank_<r>.h5`, `fits.csv` |
+| `gmri decompose run\|plan\|collect` | `roi_signal.parquet` or `voxels.parquet` | `<method>_rank_<r>.h5`, `fits.csv`, the restarts and their reproducibility in `<store>/<method>_rank_<r>/` |
 | `gmri replicability run\|plan\|collect` | the same, plus the subject info CSV for stratification | `replicability.csv` |
 | `gmri plot decomposition` | `<method>_rank_<r>.h5`, subject info CSV, optionally a segmentation | `<output-dir>/figures/decomposition/` |
 | `gmri plot group-maps` | `roi_signal.parquet` (plus a segmentation) or `voxels.parquet`, subject info CSV | `<output-dir>/figures/group_maps/` |
+| `gmri plot reproducibility` | a `reproducibility.csv` | the figure, next to the CSV or at `--output` |
 
 - **Provenance:** every command records its settings and the package version in `<output-dir>/<command>.json`.
 - **Errors:** an invalid argument or a missing input stops the command before it writes anything. The command prints a one-line message and exits with code 2.
@@ -159,6 +160,12 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 **Outputs:**
 - `<method>_rank_<r>.h5` (e.g. `cmf_rank_3.h5`): the fitted factors, plus the subjects, time points, label ids and scaling needed to read them. Voxel models also store each voxel's template coordinates, the template's shape and affine, and the recorded template path. Load a model with `gMRItensor.model_io.load_decomposition`.
 - `fits.csv`: `method, rank, error`.
+- `<store>/<method>_rank_<r>/full/seed_<NNNN>.pt`: every restart, failures included. Both `run` and `collect` keep them. A `run` without `--job` refits every restart and overwrites what the store held.
+- `<store>/<method>_rank_<r>/reproducibility.csv` and `reproducibility.{pdf,png}`: how consistently the restarts reach the same minimum.
+  - **Contents:** the factor match score between every pair of converged restarts. Rows are sorted by reconstruction error, and the columns are `seed, error`, then one column per seed in the same order.
+  - **What to look for:** if the low-error restarts found the same minimum, they form a block of FMS close to 1 in the top-left corner.
+  - **Scoring:** all modes are compared and weights are ignored. CMF's derived subject mode is not scored, as in replicability.
+  - **Redraw:** use `gmri plot reproducibility`.
 
 ## `gmri replicability`
 
@@ -174,6 +181,14 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 | `--seed` | `0` | Seed of the splits; every rank uses the same splits. |
 
 The output is `replicability.csv`. It has columns `method, rank, split, fms` for `halfhalf`, or `method, rank, fold_i, fold_j, n_common, fms` for `cv`, where fms is the factor match score. Scaling and centering are applied to the full tensor before splitting.
+
+## GPU
+
+Set `GMRITENSOR_USE_GPU=TRUE` to fit on the GPU. It applies to `decompose run` and `replicability run`, with or without `--job`, and to every method.
+- **How:** if CUDA is available, the input tensor is moved to the GPU once it has been built, and every restart fits there. Without CUDA the fits stay on the CPU, using `CPUS_PER_TASK` threads (1 if unset).
+- **Memory:** the whole input tensor must fit in GPU memory.
+- **Parallelism:** fits run one after another on the GPU, so keep `--restart-procs` / `--n-procs` at 1; larger values are refused.
+- **Precision:** TF32 matrix products are enabled on the GPU, so float32 fits (CP, tensorly PARAFAC2) differ slightly from CPU fits. matcouply fits run in float64.
 
 ## Distributed restarts (SLURM)
 
@@ -202,7 +217,7 @@ gmri decompose run --output-dir results/parafac2 --job $SLURM_ARRAY_TASK_ID
 | replicability, cv | `ranks × splits × repeats × restarts` | |
 
 - **Array size limits:** many clusters cap array size (`MaxArraySize`, often 1001). If `plan` prints more jobs than that, raise `--tasks-per-job`.
-- **Resuming:** results are kept in `<output-dir>/<store>/<method>_rank_<r>/`. A re-queued job skips restarts that are already there, so failed jobs can simply be resubmitted.
+- **Resuming:** results are kept in `<output-dir>/<store>/<method>_rank_<r>/`. A re-queued job skips restarts that are already there, so failed jobs can simply be resubmitted. A single-process `run` uses the same store, but refits every restart.
 - **Collecting:** `collect` refuses to write while restarts are missing, and says how many. It writes the same files as a single-process `run`.
 - **Starting over:** run `plan` again and delete the store directory.
 
@@ -264,6 +279,15 @@ At every time point, each group's subjects are aggregated per ROI or voxel. The 
 
 - **Rows:** labelled `<group> (n=<subjects scanned at that time point>)`. A group with no scan at a time point keeps an empty row, so the rows match across figures.
 - **Colours:** one range per region, the 5th–95th percentile of every group and time point, so the figures of a region are comparable.
+
+## `gmri plot reproducibility`
+
+```bash
+gmri plot reproducibility results/parafac2/restarts/parafac2_rank_3/reproducibility.csv \
+    [--output figures/reproducibility_rank_3] [--page-width single] [--formats pdf png] [--dpi 300]
+```
+
+Redraws a `reproducibility.csv` written by `decompose run` or `collect`. The figure is the FMS matrix, sorted by reconstruction error, with each restart's error above it. The colour range spans the FMS between distinct restarts, not 0–1, so differences stay visible when every score is close to 1. Read the colourbar before comparing figures. In Python, `plot_reproducibility(..., vmin=0, vmax=1)` fixes the range. It is saved next to the CSV unless `--output` (a path without extension) is given. `--page-width`, `--formats` and `--dpi` work as for `plot statistics`. In Python, the equivalent is `plot_reproducibility(*read_reproducibility(csv))`.
 
 ## Custom figures from scripts
 

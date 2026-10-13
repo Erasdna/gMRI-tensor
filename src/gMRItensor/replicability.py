@@ -118,6 +118,34 @@ def _align_pair(
     return selected_i, selected_j
 
 
+#: A fit ready for scoring: `(weights, factors)` with regular factor matrices.
+ComparableFit = tuple[Any, list[Any]]
+
+
+def compute_FMS(
+    fit_i: ComparableFit,
+    fit_j: ComparableFit,
+    skip_mode: int | None = None,
+) -> float:
+    """Factor match score between two fits that are already comparable.
+
+    The caller organises the inputs: the same subjects in the same order
+    and regular (not ragged) factor matrices, as the replicability engines
+    and `reproducibility.restart_fms_matrix` prepare them. numpy arrays
+    always work; torch tensors only once `setup_backend` has made torch
+    TensorLy's backend. Weights are ignored, so only the components' shapes
+    are compared.
+    """
+    return float(
+        factor_match_score(
+            fit_i,
+            fit_j,
+            skip_mode=skip_mode,
+            consider_weights=False,
+        ),
+    )
+
+
 class ReplicabilityEngine(ABC):
     """Base class for replicability analysis engines."""
 
@@ -237,11 +265,10 @@ class HalfHalfEngine(ReplicabilityEngine):
             weights_0, factors_0 = _weights_and_factors(best_0.model)
             weights_1, factors_1 = _weights_and_factors(best_1.model)
 
-            score = factor_match_score(
+            score = compute_FMS(
                 (weights_0, _comparable_modes(factors_0)),
                 (weights_1, _comparable_modes(factors_1)),
                 skip_mode=0,
-                consider_weights=False,
             )
             fms_results.append((s, score))
         return fms_results
@@ -317,10 +344,9 @@ class CrossValidationEngine(ReplicabilityEngine):
                         [id_map_j[s] for s in common_subjects],
                     )
 
-                    score = factor_match_score(
+                    score = compute_FMS(
                         (weights_i, fac_i_aligned),
                         (weights_j, fac_j_aligned),
-                        consider_weights=False,
                     )
                     fms_results.append((common_subjects, i, j, score))
 

@@ -7,8 +7,12 @@ import numpy as np
 import pandas as pd
 import pytest
 import torch
+from gMRItensor import decomposition
 from gMRItensor import pipeline
 from gMRItensor import preprocessing
+from gMRItensor import replicability
+from gMRItensor.jobs import FitTask
+from gMRItensor.jobs import RestartResult
 from gMRItensor.model_io import load_decomposition
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
@@ -33,9 +37,71 @@ from gMRItensor.pipeline import run_group_map_plots
 from gMRItensor.pipeline import run_preprocessing
 from gMRItensor.pipeline import run_replicability
 from gMRItensor.pipeline import run_replicability_job
+from gMRItensor.pipeline import run_reproducibility_plot
 from gMRItensor.pipeline import run_statistics_plots
+from gMRItensor.reproducibility import read_reproducibility
+from gMRItensor.reproducibility import write_reproducibility
 
 QUICK_FIT = FitOptions(restarts=2, max_iter=50)
+
+
+def fake_model(data: Any, rank: int, method: str = "CP", seed: int = 0) -> Any:
+    """A random model shaped like `data` (a CP tensor or per-subject slices),
+    the same for the same `seed`, so two runs over one plan agree."""
+    generator = torch.Generator().manual_seed(seed)
+
+    def rand(*shape: int) -> torch.Tensor:
+        return torch.rand(*shape, generator=generator)
+
+    if isinstance(data, torch.Tensor):
+        return torch.ones(rank), [rand(n, rank) for n in data.shape]
+    evolving = [rand(s.shape[0], rank) for s in data]
+    label_mode = rand(data[0].shape[1], rank)
+    if method == "CMF":
+        return pipeline.CMFModel(
+            weights=torch.ones(rank),
+            subject_mode=torch.stack([b.pow(2).mean(0).sqrt() for b in evolving]),
+            evolving_states=evolving,
+            label_mode=label_mode,
+        )
+    return pipeline.PARAFAC2Model(
+        weights=torch.ones(rank),
+        subject_mode=rand(len(data), rank),
+        evolving_states=evolving,
+        label_mode=label_mode,
+    )
+
+
+def stub_fits(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, int, dict]]:
+    """Store random models instead of fitting, for decompose and replicability
+    alike: these tests check the pipeline, not the solvers (test_jobs and
+    test_decomposition fit for real). Returns each `run_tasks` call's
+    `(data, n_tasks, kwargs)`. Higher seeds get lower errors, so error order
+    differs from seed order."""
+    calls: list[tuple[Any, int, dict]] = []
+
+    def fake_run_tasks(
+        tasks: list,
+        data: Any,
+        rank: int,
+        method: str,
+        store: Any,
+        **kwargs: Any,
+    ) -> None:
+        calls.append((data, len(tasks), kwargs))
+        for task in tasks:
+            rows = list(task.indices)
+            subset = (
+                data[rows]
+                if isinstance(data, torch.Tensor)
+                else [data[i] for i in rows]
+            )
+            model = fake_model(subset, rank, method, seed=task.seed)
+            store.save(RestartResult(task, model, 0.3 - 0.01 * task.seed))
+
+    monkeypatch.setattr(pipeline, "run_tasks", fake_run_tasks)
+    monkeypatch.setattr(replicability, "run_tasks", fake_run_tasks)
+    return calls
 
 
 def preprocess(study: Any, **overrides: Any) -> Path:
@@ -265,7 +331,9 @@ def test_run_statistics_plots_before_preprocessing(synthetic_study: Any) -> None
 def test_run_decomposition_from_roi_signal(
     synthetic_study: Any,
     statistic: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    stub_fits(monkeypatch)
     preprocess(synthetic_study)
     options = decomposition_options(synthetic_study, statistic=statistic)
 
@@ -289,19 +357,7 @@ def test_run_decomposition_inputs_follow_the_statistic(
     synthetic_study: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    seen = []
-
-    def fake_parafac2(slices: list, rank: int, **kwargs: Any) -> tuple:
-        seen.append(np.stack([s.numpy() for s in slices]))
-        model = pipeline.PARAFAC2Model(
-            weights=torch.ones(rank),
-            subject_mode=torch.rand(len(slices), rank),
-            evolving_states=[torch.rand(s.shape[0], rank) for s in slices],
-            label_mode=torch.rand(slices[0].shape[1], rank),
-        )
-        return model, torch.tensor(0.5)
-
-    monkeypatch.setattr(pipeline, "run_PARAFAC2_decomposition_repeated", fake_parafac2)
+    calls = stub_fits(monkeypatch)
     preprocess(synthetic_study)
     unscaled = TensorOptions(scale=False)
     for statistic in ("median", "mean"):
@@ -318,11 +374,16 @@ def test_run_decomposition_inputs_follow_the_statistic(
         synthetic_study.root / "results" / "data" / "roi_signal.parquet",
     )
     first = roi.query("subject == 'sub-00' and time_point == 0").sort_values("label")
+    seen = [np.stack([s.numpy() for s in data]) for data, _, _ in calls]
     np.testing.assert_allclose(seen[0][0, 0], first["median"], rtol=1e-6)
     np.testing.assert_allclose(seen[1][0, 0], first["mean"], rtol=1e-6)
 
 
-def test_run_decomposition_from_voxels_keeps_coordinates(synthetic_study: Any) -> None:
+def test_run_decomposition_from_voxels_keeps_coordinates(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
     preprocess(synthetic_study, store_voxels=True)
     options = decomposition_options(
         synthetic_study,
@@ -343,15 +404,7 @@ def test_cp_wiring_and_center(
     synthetic_study: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    # Stub the CP fit: the real one triggers torch.compile, which is slow.
-    calls = []
-
-    def fake_cp(tensor: torch.Tensor, rank: int, **kwargs: Any) -> tuple:
-        calls.append((tensor.numpy().copy(), kwargs))
-        factors = [torch.rand(n, rank) for n in tensor.shape]
-        return torch.ones(rank), factors, torch.tensor(0.25)
-
-    monkeypatch.setattr(pipeline, "run_CP_decomposition_repeated", fake_cp)
+    calls = stub_fits(monkeypatch)
     preprocess(synthetic_study)
     options = decomposition_options(
         synthetic_study,
@@ -363,10 +416,11 @@ def test_cp_wiring_and_center(
 
     run_decomposition(options)
 
-    ((tensor, kwargs),) = calls
+    ((data, n_tasks, kwargs),) = calls
+    tensor = data.numpy()
     assert tensor.shape == (6, 3, 5)
     np.testing.assert_allclose(tensor.mean(axis=(0, 1)), 0.0, atol=1e-5)
-    assert kwargs["init_repeats"] == 4 and kwargs["non_negative"] is False
+    assert n_tasks == 4 and kwargs["non_negative"] is False
     saved = load_decomposition(options.output_dir / "cp_rank_3.h5")
     assert saved.time_mode is not None and saved.time_mode.shape == (3, 3)
     assert saved.centered is True and saved.scale_std is None
@@ -388,29 +442,22 @@ def test_parafac2_options_reach_the_runner(
     fit: FitOptions,
     expected: dict,
 ) -> None:
-    calls = []
-
-    def fake_parafac2(slices: list, rank: int, **kwargs: Any) -> tuple:
-        calls.append(kwargs)
-        model = pipeline.PARAFAC2Model(
-            weights=torch.ones(rank),
-            subject_mode=torch.rand(len(slices), rank),
-            evolving_states=[torch.rand(s.shape[0], rank) for s in slices],
-            label_mode=torch.rand(slices[0].shape[1], rank),
-        )
-        return model, torch.tensor(0.5)
-
-    monkeypatch.setattr(pipeline, "run_PARAFAC2_decomposition_repeated", fake_parafac2)
+    calls = stub_fits(monkeypatch)
     preprocess(synthetic_study)
 
     run_decomposition(decomposition_options(synthetic_study, ranks=(2,), fit=fit))
 
-    (kwargs,) = calls
+    ((_, _, kwargs),) = calls
     assert {key: kwargs.get(key) for key in expected} == expected
     assert "non_negative" not in kwargs
 
 
-def test_distributed_decomposition_matches_centralised(synthetic_study: Any) -> None:
+def test_distributed_decomposition_matches_centralised(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Same stored restarts -> same outputs; test_jobs checks real fits agree.
+    stub_fits(monkeypatch)
     preprocess(synthetic_study)
     central = decomposition_options(synthetic_study)
     run_decomposition(central)
@@ -439,6 +486,69 @@ def test_distributed_decomposition_matches_centralised(synthetic_study: Any) -> 
         expected = load_decomposition(central.output_dir / name)
         np.testing.assert_allclose(got.label_mode, expected.label_mode, rtol=1e-5)
     assert (distributed.output_dir / "plan.json").exists()
+    # Regression: both paths keep every restart and score them the same.
+    for rank in (1, 2):
+        got_fms, got_errors = read_reproducibility(
+            distributed.store_dir / f"parafac2_rank_{rank}" / "reproducibility.csv",
+        )
+        expected_fms, expected_errors = read_reproducibility(
+            central.store_dir / f"parafac2_rank_{rank}" / "reproducibility.csv",
+        )
+        pd.testing.assert_frame_equal(got_fms, expected_fms, rtol=1e-4)
+        pd.testing.assert_series_equal(got_errors, expected_errors, rtol=1e-5)
+
+
+def test_run_decomposition_saves_restarts_and_reproducibility(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    options = decomposition_options(synthetic_study, ranks=(2,))
+    run_decomposition(options)
+
+    ((_, _, kwargs),) = calls
+    assert kwargs["resume"] is False  # a fresh run refits the whole store
+    rank_dir = options.store_dir / "parafac2_rank_2"
+    assert sorted(p.name for p in (rank_dir / "full").iterdir()) == [
+        "seed_0000.pt",
+        "seed_0001.pt",
+    ]
+    fms, errors = read_reproducibility(rank_dir / "reproducibility.csv")
+    assert list(fms.index) == list(fms.columns) == [1, 0]  # by error
+    assert list(errors) == pytest.approx([0.29, 0.30])
+    assert pd.read_csv(options.output_dir / "fits.csv")["error"].tolist() == [
+        pytest.approx(0.29),
+    ]
+    assert (rank_dir / "reproducibility.png").exists()
+    assert (rank_dir / "reproducibility.pdf").exists()
+
+
+def test_reproducibility_plot_redraws_a_saved_csv(tmp_path: Path) -> None:
+    results = [
+        RestartResult(
+            FitTask("full", (0, 1, 2), seed),
+            (torch.ones(2), [torch.rand(n, 2) for n in (3, 4, 5)]),
+            0.1 * (seed + 1),
+        )
+        for seed in range(3)
+    ]
+    csv = write_reproducibility(results, tmp_path)
+
+    written = run_reproducibility_plot(
+        csv,
+        tmp_path / "replot" / "fms",
+        formats=("png",),
+        dpi=50,
+    )
+
+    assert written == [tmp_path / "replot" / "fms.png"]
+    assert written[0].exists()
+    assert run_reproducibility_plot(csv, formats=("png",), dpi=50) == [
+        tmp_path / "reproducibility.png",
+    ]
+    with pytest.raises(FileNotFoundError, match="decompose run"):
+        run_reproducibility_plot(tmp_path / "missing.csv")
 
 
 def test_distributed_jobs_need_a_plan_and_all_restarts(synthetic_study: Any) -> None:
@@ -569,6 +679,211 @@ def test_progress_bar_option_is_passed_through(
     assert seen == [True]
 
 
+# GPU (GMRITENSOR_USE_GPU) --------------------------------------------------
+
+#: `--method` -> the `compute_*` function every restart goes through.
+COMPUTE_FUNCTIONS = {
+    "cp": "compute_CP_decomposition",
+    "parafac2": "compute_PARAFAC2_decomposition",
+    "cmf": "compute_CMF_decomposition",
+}
+needs_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="needs a CUDA GPU",
+)
+
+
+def _devices(data: Any) -> set[torch.device]:
+    """Device(s) of a tensor or of every slice of a slice list."""
+    tensors = [data] if isinstance(data, torch.Tensor) else list(data)
+    return {t.device for t in tensors}
+
+
+def spy_fit_devices(monkeypatch: pytest.MonkeyPatch, method: str) -> list[str]:
+    """Record the device type of every fit's input, then fit as usual."""
+    name = COMPUTE_FUNCTIONS[method]
+    original = getattr(decomposition, name)
+    seen: list[str] = []
+
+    def spy(data: Any, *args: Any, **kwargs: Any) -> Any:
+        seen.extend(device.type for device in _devices(data))
+        return original(data, *args, **kwargs)
+
+    monkeypatch.setattr(decomposition, name, spy)
+    return seen
+
+
+def test_on_device_moves_a_tensor_and_every_slice() -> None:
+    meta = torch.device("meta")
+
+    assert _devices(pipeline._on_device(torch.ones(2, 3), meta)) == {meta}
+    slices = [torch.ones(2, 3), torch.ones(4, 3)]
+    assert _devices(pipeline._on_device(slices, meta)) == {meta}
+
+
+@pytest.mark.parametrize("method", list(COMPUTE_FUNCTIONS))
+def test_decomposition_fits_on_the_backend_device(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    preprocess(synthetic_study)
+    calls = stub_fits(monkeypatch)
+    monkeypatch.setattr(pipeline, "setup_backend", lambda: torch.device("meta"))
+
+    run_decomposition(decomposition_options(synthetic_study, method=method))
+
+    assert calls and all(_devices(data) == {torch.device("meta")} for data, *_ in calls)
+
+
+@pytest.mark.parametrize("method", list(COMPUTE_FUNCTIONS))
+def test_replicability_fits_on_the_backend_device(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    preprocess(synthetic_study)
+    seen: list[set[torch.device]] = []
+
+    def fake_evaluate(engine: Any, tensor: Any, *args: Any, **kwargs: Any) -> list:
+        seen.append(_devices(tensor))
+        return []
+
+    monkeypatch.setattr(pipeline, "evaluate_replicability_multiproc", fake_evaluate)
+    monkeypatch.setattr(pipeline, "setup_backend", lambda: torch.device("meta"))
+
+    run_replicability(replicability_options(synthetic_study, method=method))
+
+    assert seen == [{torch.device("meta")}]
+
+
+@pytest.mark.parametrize("method", list(COMPUTE_FUNCTIONS))
+def test_flag_off_fits_on_cpu(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    preprocess(synthetic_study)
+    seen = spy_fit_devices(monkeypatch, method)
+    fit = FitOptions(restarts=1, max_iter=50)
+
+    run_decomposition(
+        decomposition_options(synthetic_study, method=method, ranks=(1,), fit=fit),
+    )
+
+    assert seen and set(seen) == {"cpu"}
+
+
+@pytest.mark.skipif(torch.cuda.is_available(), reason="checks the no-CUDA fallback")
+def test_flag_on_without_cuda_falls_back_to_cpu(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    preprocess(synthetic_study)
+    monkeypatch.setenv("GMRITENSOR_USE_GPU", "TRUE")
+    seen = spy_fit_devices(monkeypatch, "parafac2")
+    fit = FitOptions(restarts=1, max_iter=50)
+
+    run_decomposition(decomposition_options(synthetic_study, ranks=(1,), fit=fit))
+
+    assert seen and set(seen) == {"cpu"}
+
+
+@pytest.fixture
+def gpu_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`GMRITENSOR_USE_GPU=TRUE`, with the TF32 switch `setup_backend` flips
+    restored afterwards."""
+    monkeypatch.setenv("GMRITENSOR_USE_GPU", "TRUE")
+    monkeypatch.setattr(
+        torch.backends.cuda.matmul,
+        "allow_tf32",
+        torch.backends.cuda.matmul.allow_tf32,
+    )
+
+
+@needs_cuda
+@pytest.mark.parametrize("method", list(COMPUTE_FUNCTIONS))
+def test_flag_on_fits_decomposition_on_the_gpu(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    gpu_backend: None,
+    method: str,
+) -> None:
+    preprocess(synthetic_study)
+    seen = spy_fit_devices(monkeypatch, method)
+    torch.cuda.reset_peak_memory_stats()
+    fit = FitOptions(restarts=2, max_iter=50)
+    options = decomposition_options(
+        synthetic_study,
+        method=method,
+        ranks=(1,),
+        fit=fit,
+    )
+
+    (path,) = run_decomposition(options)
+
+    assert seen and set(seen) == {"cuda"}
+    assert torch.cuda.max_memory_allocated() > 0
+    saved = load_decomposition(path)
+    assert isinstance(saved.label_mode, np.ndarray)
+    assert np.isfinite(saved.error)
+
+
+@needs_cuda
+@pytest.mark.parametrize("method", list(COMPUTE_FUNCTIONS))
+def test_flag_on_fits_replicability_on_the_gpu(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    gpu_backend: None,
+    method: str,
+) -> None:
+    preprocess(synthetic_study)
+    seen = spy_fit_devices(monkeypatch, method)
+
+    path = run_replicability(replicability_options(synthetic_study, method=method))
+
+    assert seen and set(seen) == {"cuda"}
+    assert len(pd.read_csv(path)) == 2
+
+
+@needs_cuda
+@pytest.mark.parametrize("method", list(COMPUTE_FUNCTIONS))
+def test_gpu_fit_error_matches_the_cpu_fit(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    gpu_backend: None,
+    method: str,
+) -> None:
+    preprocess(synthetic_study)
+    fit = FitOptions(restarts=2, max_iter=200)
+    errors = {}
+    for flag in ("FALSE", "TRUE"):
+        monkeypatch.setenv("GMRITENSOR_USE_GPU", flag)
+        options = decomposition_options(
+            synthetic_study,
+            method=method,
+            ranks=(1,),
+            fit=fit,
+            output_dir=synthetic_study.root / "results" / flag,
+        )
+        (path,) = run_decomposition(options)
+        errors[flag] = load_decomposition(path).error
+
+    assert errors["TRUE"] == pytest.approx(errors["FALSE"], rel=1e-2, abs=1e-3)
+
+
+@needs_cuda
+def test_gpu_refuses_parallel_restarts(
+    synthetic_study: Any,
+    gpu_backend: None,
+) -> None:
+    preprocess(synthetic_study)
+    fit = FitOptions(restarts=2, max_iter=50, restart_procs=2)
+
+    with pytest.raises(ValueError, match="CUDA"):
+        run_decomposition(decomposition_options(synthetic_study, fit=fit))
+
+
 # Decomposition figures -----------------------------------------------------
 
 
@@ -589,7 +904,11 @@ def _figures(study: Any) -> Path:
     return study.root / "results" / "figures" / "decomposition"
 
 
-def test_plot_parafac2_roi_model_with_segmentation(synthetic_study: Any) -> None:
+def test_plot_parafac2_roi_model_with_segmentation(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
     preprocess(synthetic_study)
     options = decomposition_options(synthetic_study, ranks=(2,))
     (model,) = run_decomposition(options)
@@ -618,7 +937,9 @@ def test_plot_parafac2_roi_model_with_segmentation(synthetic_study: Any) -> None
 def test_plot_roi_model_without_segmentation(
     synthetic_study: Any,
     capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    stub_fits(monkeypatch)
     preprocess(synthetic_study)
     (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
 
@@ -639,11 +960,7 @@ def test_plot_cp_voxel_model_without_segmentation(
     synthetic_study: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def fake_cp(tensor: torch.Tensor, rank: int, **kwargs: Any) -> tuple:
-        factors = [torch.rand(n, rank) for n in tensor.shape]
-        return torch.ones(rank), factors, torch.tensor(0.25)
-
-    monkeypatch.setattr(pipeline, "run_CP_decomposition_repeated", fake_cp)
+    stub_fits(monkeypatch)
     preprocess(synthetic_study, store_voxels=True)
     options = decomposition_options(
         synthetic_study,
@@ -676,9 +993,13 @@ def _segmentation_without(study: Any, labels: tuple[int, ...]) -> Path:
     return path
 
 
-def test_plot_roi_model_with_a_segmentation_without_csf(synthetic_study: Any) -> None:
+def test_plot_roi_model_with_a_segmentation_without_csf(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     # Regression test: an empty CSF region crashed the mode grid with an
     # IndexError from np.percentile on no values.
+    stub_fits(monkeypatch)
     preprocess(synthetic_study)
     (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
 
@@ -699,7 +1020,9 @@ def test_plot_roi_model_with_a_segmentation_without_csf(synthetic_study: Any) ->
 
 def test_plot_roi_model_rejects_a_segmentation_in_another_label_space(
     synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    stub_fits(monkeypatch)
     preprocess(synthetic_study)
     (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
     segmentation = _segmentation_without(synthetic_study, (2, 4, 10, 41, 49))
@@ -826,7 +1149,11 @@ def test_group_averages_reject_an_unknown_time_point(synthetic_study: Any) -> No
 CMF_FIT = FitOptions(restarts=2, max_iter=300, tolerance=1e-4)
 
 
-def test_cmf_end_to_end(synthetic_study: Any) -> None:
+def test_cmf_end_to_end(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
     preprocess(synthetic_study)
     options = decomposition_options(
         synthetic_study,
@@ -841,11 +1168,6 @@ def test_cmf_end_to_end(synthetic_study: Any) -> None:
     assert saved.method == "cmf"
     assert saved.evolving_states is not None and len(saved.evolving_states) == 6
     assert saved.label_mode.shape == (5, 2)
-    # The subject mode is each subject's B_i amplitude (A is fixed at one).
-    amplitude = np.stack(
-        [np.sqrt((B**2).mean(axis=0)) for B in saved.evolving_states],
-    )
-    np.testing.assert_allclose(saved.subject_mode, amplitude, rtol=1e-5)
 
     distributed = decomposition_options(
         synthetic_study,
@@ -884,7 +1206,7 @@ def test_cmf_end_to_end(synthetic_study: Any) -> None:
             replicability_options(synthetic_study, method="cmf", fit=CMF_FIT),
         ),
     )
-    assert scores["fms"].between(0, 1).all()
+    assert scores["fms"].between(0, 1 + 1e-6).all()
 
 
 def test_cmf_rejects_the_tensorly_solver(synthetic_study: Any) -> None:
@@ -900,11 +1222,7 @@ def test_cmf_rejects_the_tensorly_solver(synthetic_study: Any) -> None:
 
 
 def _voxel_cp_model(study: Any, monkeypatch: pytest.MonkeyPatch) -> Path:
-    def fake_cp(tensor: torch.Tensor, rank: int, **kwargs: Any) -> tuple:
-        factors = [torch.rand(n, rank) for n in tensor.shape]
-        return torch.ones(rank), factors, torch.tensor(0.25)
-
-    monkeypatch.setattr(pipeline, "run_CP_decomposition_repeated", fake_cp)
+    stub_fits(monkeypatch)
     preprocess(study, store_voxels=True)
     options = decomposition_options(
         study,

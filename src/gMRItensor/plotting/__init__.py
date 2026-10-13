@@ -2,6 +2,7 @@
 from gMRItensor.plotting.evolving_mode import evolving_factors_to_numpy
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.mode_grid import plot_mode_grid
+from gMRItensor.plotting.reproducibility import plot_reproducibility
 from gMRItensor.plotting.roi_evolution import figure_path
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_panels
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_rows
@@ -17,6 +18,7 @@ __all__ = [
     "plot_subject_mode_correlation",
     "plot_spatial_mode",
     "plot_mode_grid",
+    "plot_reproducibility",
     "plot_enhancement_with_background",
     "plot_evolving_mode",
     "evolving_factors_to_numpy",

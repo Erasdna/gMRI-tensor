@@ -2,7 +2,11 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import torch
 from gMRItensor.cli import main
+from gMRItensor.jobs import FitTask
+from gMRItensor.jobs import RestartResult
+from gMRItensor.reproducibility import write_reproducibility
 
 
 def _run(argv: list[Any]) -> int:
@@ -199,6 +203,29 @@ def test_cli_plan_run_collect(
 
     output = "parafac2_rank_1.h5" if command == "decompose" else "replicability.csv"
     assert (results / command / output).exists()
+
+
+def test_cli_replots_reproducibility(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = [
+        RestartResult(
+            FitTask("full", (0, 1, 2), seed),
+            (torch.ones(2), [torch.rand(n, 2) for n in (3, 4, 5)]),
+            0.1 * (seed + 1),
+        )
+        for seed in range(3)
+    ]
+    csv = write_reproducibility(results, tmp_path)
+
+    stem = tmp_path / "replot" / "fms"
+    argv = ["plot", "reproducibility", csv, "--output", stem, "--formats", "png"]
+    assert _run([*argv, "--dpi", 50]) == 0
+    assert (tmp_path / "replot" / "fms.png").exists()
+    assert "1 figure file(s)" in capsys.readouterr().out
+
+    assert _run(["plot", "reproducibility", tmp_path / "missing.csv"]) == 2
 
 
 def test_cli_reports_errors_on_one_line(

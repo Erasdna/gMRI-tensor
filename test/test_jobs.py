@@ -12,6 +12,7 @@ from gMRItensor import fit_task
 from gMRItensor import FitTask
 from gMRItensor import InMemoryStore
 from gMRItensor import job_slice
+from gMRItensor import jobs
 from gMRItensor import n_jobs
 from gMRItensor import PARAFAC2Diagnostics
 from gMRItensor import PARAFAC2Model
@@ -388,3 +389,28 @@ def test_distributed_matches_centralised(tmp_path, method, data, make_engine):
             np.testing.assert_array_equal(key_a, key_b)
         assert math.isfinite(float(score_a))
         assert float(score_a) == float(score_b)
+
+
+@pytest.mark.parametrize("resume, refitted", [(True, [1]), (False, [0, 1])])
+def test_run_tasks_resume_skips_or_refits_stored_tasks(
+    monkeypatch: pytest.MonkeyPatch,
+    resume: bool,
+    refitted: list[int],
+) -> None:
+    fitted: list[int] = []
+
+    def fake_run_task(args: tuple) -> RestartResult:
+        task = args[0]
+        fitted.append(task.seed)
+        return RestartResult(task, fake_model(1.0), 0.1)
+
+    monkeypatch.setattr(jobs, "_run_task", fake_run_task)
+    plan = plan_restarts(3, 2)
+    store = InMemoryStore()
+    store.save(RestartResult(plan[0], failure_reason="max_iter", failure_message="old"))
+
+    run_tasks(plan, make_slices(3), 2, "PARAFAC2", store, resume=resume)
+
+    assert fitted == refitted
+    first = store.load(plan[0])
+    assert first is not None and first.ok is (not resume)

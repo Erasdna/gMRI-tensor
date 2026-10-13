@@ -3,7 +3,7 @@
     gmri preprocess    --manifest scans.csv --output-dir results --input-type T1map
     gmri decompose     run | plan | collect   (run --job N for one distributed job)
     gmri replicability run | plan | collect
-    gmri plot          statistics | decomposition | group-maps
+    gmri plot          statistics | decomposition | group-maps | reproducibility
 
 Each command calls one `gMRItensor.pipeline` stage with its
 `gMRItensor.options` dataclass, so scripts can do the same.
@@ -364,7 +364,7 @@ def _add_fit_command(
 def _add_plot(commands: Any) -> None:
     parser = commands.add_parser(
         "plot",
-        help="ROI statistics, decomposition or group-average figures",
+        help="ROI statistics, decomposition, group-average or reproducibility figures",
     )
     kinds = parser.add_subparsers(dest="action", required=True)
     statistics = kinds.add_parser(
@@ -632,6 +632,28 @@ def _add_plot(commands: Any) -> None:
     )
     _output_options(group_maps)
 
+    reproducibility = kinds.add_parser(
+        "reproducibility",
+        help="redraw a restart-vs-restart FMS matrix from its CSV",
+        description=(
+            "Redraw the reproducibility.csv that decompose run/collect writes "
+            "next to each rank's restarts: pairwise FMS between restarts, "
+            "sorted by reconstruction error."
+        ),
+    )
+    reproducibility.add_argument(
+        "csv",
+        type=Path,
+        help="<store>/<method>_rank_<r>/reproducibility.csv",
+    )
+    reproducibility.add_argument(
+        "--output",
+        type=Path,
+        metavar="STEM",
+        help="figure path without extension (default: next to the CSV)",
+    )
+    _output_options(reproducibility)
+
 
 def _slices(values: list[int] | None) -> tuple[int, int, int] | None:
     return (values[0], values[1], values[2]) if values else None
@@ -779,6 +801,16 @@ def _run_fit_command(args: argparse.Namespace) -> None:
 
 
 def _run_plot(args: argparse.Namespace) -> None:
+    if args.action == "reproducibility":
+        written = pipeline.run_reproducibility_plot(
+            args.csv,
+            args.output,
+            page_width=_page_width(args.page_width),
+            formats=tuple(args.formats),
+            dpi=args.dpi,
+        )
+        print(f"{len(written)} figure file(s): {', '.join(map(str, written))}.")
+        return
     if args.action == "statistics":
         rois: Any = None
         if args.rois is not None:
