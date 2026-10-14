@@ -32,6 +32,7 @@ from gMRItensor.group_statistics import aggregate_subjects
 from gMRItensor.group_statistics import compare_groups_over_time
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import significance_summary
+from gMRItensor.group_statistics import subjects_with_groups
 from gMRItensor.group_statistics import summarize_groups_over_time
 from gMRItensor.jobs import collect
 from gMRItensor.jobs import Data
@@ -45,6 +46,7 @@ from gMRItensor.jobs import run_tasks
 from gMRItensor.model_io import load_decomposition
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
+from gMRItensor.model_io import select_subjects
 from gMRItensor.model_io import sort_components
 from gMRItensor.options import CONCENTRATION_STATISTICS
 from gMRItensor.options import DecompositionOptions
@@ -1183,7 +1185,9 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
 
     Draws the selected parts (`DecompositionPlotOptions.selected_parts`) to
     `<output_dir>/figures/decomposition/<model>__<part>.<ext>`; the subject
-    mode gets `<subject_prefix>_` in front when one is set. Spatial
+    mode gets `<subject_prefix>_` in front when one is set. Parts that
+    group subjects leave out (and name) subjects without a `group_variable`
+    value, as long as every group keeps 2 (`subjects_with_groups`). Spatial
     parts of an ROI model need a segmentation: without one they are skipped
     with a note if no part was chosen explicitly, and raise otherwise.
     """
@@ -1213,6 +1217,23 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
                 raise ValueError(message)
             print(f"Skipping {message}.")
             parts = [p for p in parts if p not in ("mode_grid", "spatial")]
+
+    grouped = {"mode_grid", "subject_mode"} | (
+        set() if saved.method == "cp" else {"time"}
+    )
+    if grouped & set(parts):
+        keep, dropped = subjects_with_groups(
+            subjects,
+            subject_info,
+            options.group_variable,
+        )
+        if dropped:
+            print(
+                f"Leaving out {len(dropped)} subject(s) without a "
+                f"'{options.group_variable}' value: {', '.join(dropped)}",
+            )
+            saved = select_subjects(saved, keep)
+            subjects = [subjects[i] for i in keep]
 
     written: list[Path] = []
 

@@ -253,7 +253,7 @@ gmri plot decomposition --model results/parafac2/parafac2_rank_3.h5 --subject-in
 | `--page-width`, `--formats`, `--dpi` | `double`, `pdf png`, `300` | As for `plot statistics`. |
 
 - **Part flags:** without any, every part is drawn.
-- **Subject variables:** every column named by `--group-variable`, `--categorical` or `--numerical` must be in the subject info; otherwise the command stops before loading the model and lists the available columns. A blank cell leaves that subject out of that variable's panels only; a blank `--group-variable` cell is an error.
+- **Subject variables:** every column named by `--group-variable`, `--categorical` or `--numerical` must be in the subject info; otherwise the command stops before loading the model and lists the available columns. A blank cell leaves that subject out of that variable's panels only. A subject with a blank `--group-variable` cell, or no subject-info row, is left out of the mode grid, subject mode and evolving mode (the command names them); every group must keep at least 2 subjects, or the command stops with an error.
 - **Group comparisons:** in each boxplot, every pair of categories gets a Mann–Whitney U test, and significant pairs are starred (no multiple-comparison correction). The `All` box shows which subjects are outliers for the whole dataset rather than within their group, and is never tested.
 - **Category order:** categories are sorted, so a group has the same colour in every figure.
 - **Several variable sets:** run `--subject-mode` once per set, each with its own prefix, so the figures sit side by side:

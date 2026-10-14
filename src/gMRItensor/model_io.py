@@ -1,4 +1,5 @@
 """Store one fitted CP, PARAFAC2 or CMF decomposition per HDF5 file."""
+from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
@@ -108,6 +109,26 @@ def sort_components(saved: SavedDecomposition) -> SavedDecomposition:
             None
             if saved.evolving_states is None
             else [np.asarray(B)[:, order] for B in saved.evolving_states]
+        ),
+    )
+
+
+def select_subjects(
+    saved: SavedDecomposition,
+    positions: Sequence[int],
+) -> SavedDecomposition:
+    """`saved` restricted to the subjects at `positions`: their
+    `subject_mode` rows and ids, and for PARAFAC2/CMF their evolving states
+    and time points. Shared modes are unchanged."""
+    index = list(positions)
+    states = saved.evolving_states
+    return replace(
+        saved,
+        subject_mode=np.asarray(saved.subject_mode)[index],
+        subjects=np.asarray(saved.subjects)[index],
+        evolving_states=None if states is None else [states[i] for i in index],
+        timepoints=(
+            saved.timepoints if states is None else [saved.timepoints[i] for i in index]
         ),
     )
 

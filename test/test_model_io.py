@@ -9,6 +9,7 @@ from gMRItensor.model_io import component_weights
 from gMRItensor.model_io import load_decomposition
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
+from gMRItensor.model_io import select_subjects
 from gMRItensor.model_io import sort_components
 
 
@@ -293,3 +294,27 @@ def test_load_sorts_files_saved_unsorted(tmp_path: Path) -> None:
 
     _assert_equal(loaded, sort_components(saved))
     assert np.all(np.diff(component_weights(loaded)) <= 0)
+
+
+@pytest.mark.parametrize("method", ["cp", "parafac2", "cmf"])
+def test_select_subjects_keeps_the_subject_indexed_fields(method: str) -> None:
+    saved = _unsorted(method, np.random.default_rng(10))
+
+    subset = select_subjects(saved, [0, 2])
+
+    np.testing.assert_array_equal(subset.subjects, ["sub-01", "sub-03"])
+    np.testing.assert_array_equal(subset.subject_mode, saved.subject_mode[[0, 2]])
+    np.testing.assert_array_equal(subset.label_mode, saved.label_mode)
+    np.testing.assert_array_equal(subset.weights, saved.weights)
+    if method == "cp":
+        np.testing.assert_array_equal(subset.timepoints, saved.timepoints)
+        np.testing.assert_array_equal(subset.time_mode, saved.time_mode)
+    else:
+        assert saved.evolving_states is not None
+        assert subset.evolving_states is not None
+        assert len(subset.evolving_states) == len(subset.timepoints) == 2
+        np.testing.assert_array_equal(subset.timepoints[1], TIMEPOINTS[2])
+        np.testing.assert_array_equal(
+            subset.evolving_states[1],
+            saved.evolving_states[2],
+        )

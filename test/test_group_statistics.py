@@ -9,6 +9,7 @@ from gMRItensor.group_statistics import aggregate_subjects
 from gMRItensor.group_statistics import compare_groups_over_time
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import significance_summary
+from gMRItensor.group_statistics import subjects_with_groups
 from gMRItensor.group_statistics import summarize_groups_over_time
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.utils import scale_mode
@@ -123,6 +124,37 @@ def test_resolve_subject_groups_rejects_missing_subject():
         resolve_subject_groups(["s0", "s1"], subject_info, "group")
     with pytest.raises(ValueError, match="missing"):
         resolve_subject_groups(["s0"], subject_info, "diagnosis")
+
+
+def test_subjects_with_groups_leaves_out_blank_and_unknown_subjects():
+    subject_info = pd.DataFrame(
+        {
+            "subjects": ["s0", "s1", "s2", "s3", "s4"],
+            "group": ["A", "A", None, "B", "B"],
+        },
+    )
+
+    positions, dropped = subjects_with_groups(
+        ["s0", "s1", "s2", "s3", "s4", "s5"],
+        subject_info,
+        "group",
+    )
+
+    assert positions == [0, 1, 3, 4]
+    assert dropped == ["s2", "s5"]  # blank group; no subject-info row
+
+
+def test_subjects_with_groups_needs_two_per_group():
+    subject_info = pd.DataFrame(
+        {"subjects": ["s0", "s1", "s2", "s3"], "group": ["A", None, "B", "B"]},
+    )
+
+    with pytest.raises(ValueError, match="'A'.*1 subject"):
+        subjects_with_groups(["s0", "s1", "s2", "s3"], subject_info, "group")
+    with pytest.raises(ValueError, match="at least 2 groups"):
+        subjects_with_groups(["s2", "s3"], subject_info, "group")
+    with pytest.raises(ValueError, match="missing"):
+        subjects_with_groups(["s0"], subject_info, "diagnosis")
 
 
 def test_plot_evolving_mode_significance_matches_direct_scipy():

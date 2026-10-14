@@ -58,6 +58,51 @@ def resolve_subject_groups(
     return [subject_to_group.loc[s] for s in subjects]
 
 
+def subjects_with_groups(
+    subjects: list[str],
+    subject_info: pd.DataFrame,
+    group_variable: str,
+    min_per_group: int = 2,
+) -> tuple[list[int], list[str]]:
+    """Which `subjects` have a `group_variable` value in `subject_info`.
+
+    Returns `(positions, dropped)`: the positions in `subjects` of those
+    that do, and the ids of those that do not (no `subject_info` row, or a
+    blank cell). Raises `ValueError` if a required column is missing, fewer
+    than 2 groups remain, or a group keeps fewer than `min_per_group`
+    subjects.
+    """
+    if "subjects" not in subject_info.columns:
+        raise ValueError("subject_info must contain a 'subjects' column")
+    if group_variable not in subject_info.columns:
+        raise ValueError(f"'{group_variable}' column missing from subject_info")
+
+    subject_to_group = subject_info.set_index("subjects")[group_variable]
+    positions = [
+        i
+        for i, s in enumerate(subjects)
+        if s in subject_to_group.index and pd.notna(subject_to_group.loc[s])
+    ]
+    kept = set(positions)
+    dropped = [s for i, s in enumerate(subjects) if i not in kept]
+
+    counts = pd.Series([subject_to_group.loc[subjects[i]] for i in positions])
+    counts = counts.value_counts()
+    if len(counts) < 2:
+        raise ValueError(
+            f"'{group_variable}' needs at least 2 groups with data, found "
+            f"{len(counts)}",
+        )
+    small = counts[counts < min_per_group]
+    if not small.empty:
+        listed = ", ".join(f"{g!r} has {n} subject(s)" for g, n in small.items())
+        raise ValueError(
+            f"every '{group_variable}' group needs at least {min_per_group} "
+            f"subjects with data: {listed}",
+        )
+    return positions, dropped
+
+
 Aggregate = Literal["trimmed", "mean", "median"]
 AGGREGATES: tuple[str, ...] = ("trimmed", "mean", "median")
 

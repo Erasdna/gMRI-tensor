@@ -1391,3 +1391,89 @@ def test_subject_prefix_renames_only_the_subject_mode_figure(
         "cp_rank_2__time_mode.png",
         "sleep_cp_rank_2__subject_mode.png",
     ]
+
+
+def _subject_info_with_gaps(study: Any, drop: list[str], blank: list[str]) -> Path:
+    """The study's subject info without the `drop` rows and with a blank
+    diagnosis for `blank`."""
+    info = pd.read_csv(study.subject_info, dtype={"subjects": str})
+    info = info[~info["subjects"].isin(drop)]
+    info.loc[info["subjects"].isin(blank), "diagnosis"] = None
+    path = study.root / "subjects_with_gaps.csv"
+    info.to_csv(path, index=False)
+    return path
+
+
+def test_plots_leave_out_subjects_without_a_group(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
+    info = pd.read_csv(synthetic_study.subject_info, dtype={"subjects": str})
+    pd_subjects = list(info.loc[info["diagnosis"] == "PD", "subjects"])
+    control = list(info.loc[info["diagnosis"] == "Control", "subjects"])
+    gaps = _subject_info_with_gaps(
+        synthetic_study,
+        drop=[control[0]],
+        blank=[pd_subjects[0]],
+    )
+    drawn: dict[str, Any] = {}
+    real_subject_mode = pipeline.plot_subject_mode
+
+    def spy(
+        subject_mode: np.ndarray, subjects: list[str], *args: Any, **kw: Any
+    ) -> Any:
+        drawn["subjects"] = subjects
+        drawn["rows"] = subject_mode.shape[0]
+        return real_subject_mode(subject_mode, subjects, *args, **kw)
+
+    monkeypatch.setattr(pipeline, "plot_subject_mode", spy)
+    written = run_decomposition_plots(
+        plot_options(
+            synthetic_study,
+            model,
+            subject_info=gaps,
+            parts=("mode_grid", "subject_mode", "time"),
+            segmentation=synthetic_study.root / "images" / "seg.nii",
+        ),
+    )
+
+    out = capsys.readouterr().out
+    assert "Leaving out 2 subject(s)" in out
+    assert pd_subjects[0] in out and control[0] in out
+    assert sorted(drawn["subjects"]) == sorted(pd_subjects[1:] + control[1:])
+    assert drawn["rows"] == 4
+    assert {p.name for p in written} >= {
+        "parafac2_rank_2__mode_grid.png",
+        "parafac2_rank_2__subject_mode.png",
+        "parafac2_rank_2__evolving_mode.png",
+    }
+
+
+def test_plots_need_two_subjects_per_group(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
+    info = pd.read_csv(synthetic_study.subject_info, dtype={"subjects": str})
+    control = list(info.loc[info["diagnosis"] == "Control", "subjects"])
+    gaps = _subject_info_with_gaps(
+        synthetic_study,
+        drop=control[:1],
+        blank=control[1:2],
+    )
+
+    with pytest.raises(ValueError, match="'Control'.*1 subject"):
+        run_decomposition_plots(
+            plot_options(
+                synthetic_study,
+                model,
+                subject_info=gaps,
+                parts=("subject_mode",),
+            ),
+        )
