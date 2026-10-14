@@ -112,6 +112,9 @@ FreeSurfer label ids. CSF labels are the parenchyma ids + 10000. Ventricles coun
 | `limbic_system` | hippocampus ∪ amygdala ∪ cingulate ∪ parahippocampal ∪ entorhinal |
 | `cortical_grey_matter_csf`, `cerebellum_csf`, `brainstem_csf`, `limbic_system_csf` | the matching preset + 10000 (`brainstem_csf` is the pontine cistern) |
 | `all_csf` | every `*_csf` preset ∪ `ventricles` |
+| `parenchyma` | every label 1–9999 except the ventricles and FreeSurfer CSF (24) |
+
+Figures label presets with short names (e.g. `white_matter` → "WM", `cortical_grey_matter_csf` → "Supratentorial CSF"); file names keep the preset name.
 
 ## `gmri decompose`
 
@@ -156,7 +159,7 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
   - **Solver settings:** matcouply's own defaults throughout. Penalties and solver settings go through `--fit-option 'aoadmm_options={...}'`, e.g. `{"inner_n_iter_max": 20, "absolute_tol": 1e-6, "feasibility_tol": 1e-5, "inner_tol": 1e-5}` (the notebook's settings).
 
 **Outputs:**
-- `<method>_rank_<r>.h5` (e.g. `cmf_rank_3.h5`): the fitted factors, plus the subjects, time points, label ids and scaling needed to read them. Voxel models also store each voxel's template coordinates, the template's shape and affine, and the recorded template path. Load a model with `gMRItensor.model_io.load_decomposition`.
+- `<method>_rank_<r>.h5` (e.g. `cmf_rank_3.h5`): the fitted factors, components ordered by weight, largest first (`model_io.component_weights`: the weight times each mode's L2 norm), plus the subjects, time points, label ids and scaling needed to read them. Voxel models also store each voxel's template coordinates, the template's shape and affine, and the recorded template path. Load a model with `gMRItensor.model_io.load_decomposition`.
 - `fits.csv`: `method, rank, error`.
 
 ## `gmri replicability`
@@ -215,7 +218,7 @@ gmri plot decomposition --model results/parafac2/parafac2_rank_3.h5 --subject-in
 
 | Argument | Default | Meaning |
 |---|---|---|
-| `--model` | required | `<method>_rank_<r>.h5` from `gmri decompose`. Figures are named after it, e.g. `cmf_rank_3__mode_grid.png`. |
+| `--model` | required | `<method>_rank_<r>.h5` from `gmri decompose`. Figures are named after it, e.g. `cmf_rank_3__mode_grid.png`. Components are drawn largest weight first, also for models saved before sorting existed. |
 | `--subject-info`, `--group-variable` | required | Subjects and the column to colour and compare by. |
 | `--output-dir` | required | Figures go to `figures/decomposition/<model>__<part>.<ext>`. |
 | `--mode-grid` | | Time, subject and spatial modes in one figure, with CSF and parenchyma shown separately. A voxel is CSF if its label is ≥ 10000, a ventricle id or FreeSurfer's CSF (24); everything else is parenchyma. |
