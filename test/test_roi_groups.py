@@ -6,6 +6,7 @@ from gMRItensor.roi_groups import aggregate_roi_signal
 from gMRItensor.roi_groups import get_roi_presets
 from gMRItensor.roi_groups import is_csf
 from gMRItensor.roi_groups import parse_region
+from gMRItensor.roi_groups import roi_display_name
 
 VENTRICLE_IDS = (4, 5, 14, 15, 43, 44, 72)
 PARENCHYMA_PRESETS = (
@@ -88,8 +89,33 @@ def test_all_csf_is_union_of_csf_presets_and_ventricles():
 def test_no_ventricle_id_in_parenchyma_presets():
     presets = get_roi_presets()
     ventricle_ids = set(presets["ventricles"])
-    for name in PARENCHYMA_PRESETS:
+    for name in (*PARENCHYMA_PRESETS, "parenchyma"):
         assert not set(presets[name]) & ventricle_ids, name
+
+
+@pytest.mark.parametrize("csf_offset", [10000, 20000])
+def test_parenchyma_is_every_non_csf_label_below_the_offset(csf_offset):
+    parenchyma = get_roi_presets(csf_offset)["parenchyma"]
+    expected = np.arange(1, csf_offset)
+    expected = expected[~is_csf(expected, csf_offset)]
+    np.testing.assert_array_equal(parenchyma, expected)
+    assert 24 not in parenchyma
+    presets = get_roi_presets(csf_offset)
+    for name in PARENCHYMA_PRESETS:
+        assert set(presets[name]) <= set(parenchyma), name
+
+
+def test_every_preset_has_a_display_name():
+    for name in get_roi_presets():
+        assert roi_display_name(name) != name, name
+    assert roi_display_name("white_matter") == "WM"
+    assert roi_display_name("cortical_grey_matter_csf") == "Supratentorial CSF"
+    assert roi_display_name("parenchyma") == "Parenchyma"
+
+
+def test_display_name_passes_unknown_rois_through():
+    assert roi_display_name("17") == "17"
+    assert roi_display_name("custom") == "custom"
 
 
 def test_is_csf_offset_ventricles_and_label_24() -> None:
