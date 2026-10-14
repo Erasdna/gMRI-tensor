@@ -24,6 +24,8 @@ _POOLED_TICK = "All"
 # Hollow: the pooled box is no group, so it takes no palette colour (the
 # palette includes a grey).
 POOLED_COLOR = "white"
+# Fit line over every subject in the scatters, apart from the group colours.
+POOLED_FIT_COLOR = "black"
 # Light grey for boxes of non-group variables: colour means group, and this
 # is far lighter than the palette's grey.
 CATEGORY_COLOR = "0.85"
@@ -181,12 +183,14 @@ def make_variable_correlation(
     category: str,
     legend: bool = True,
     colors: list | None = None,
+    pooled: bool = False,
 ) -> None:
     """Scatter `y_column` against `x_column`, with a fit line per category.
 
     Rows missing any of the three columns are left out. Categories are
-    `_levels(df[category])`, coloured in that order. A category with fewer
-    than 3 points or a constant x gets no fit line. The legend carries each
+    `_levels(df[category])`, coloured in that order. `pooled` adds a black
+    fit over every subject, labelled `POOLED_LABEL` in the legend. A fit
+    needs at least 3 points and a non-constant x. The legend carries each
     fit's R2 and p-value.
     """
     df = df.dropna(subset=[x_column, y_column, category])
@@ -210,25 +214,30 @@ def make_variable_correlation(
         alpha=1,
         s=15,
     )
-    for k, cat in enumerate(categories):
-        cat_df = df.loc[df[category] == cat]
-        xs = cat_df[x_column]
-        ys = cat_df[y_column]
-        if len(cat_df) < 3 or xs.nunique() < 2:
+    fit_sets = [
+        (df.loc[df[category] == cat], colors[k], "") for k, cat in enumerate(categories)
+    ]
+    if pooled:
+        fit_sets.append((df, POOLED_FIT_COLOR, f"{POOLED_LABEL}: "))
+    for fit_df, color, prefix in fit_sets:
+        xs = fit_df[x_column]
+        ys = fit_df[y_column]
+        if len(fit_df) < 3 or xs.nunique() < 2:
             continue
 
         fit = linregress(xs, ys)
 
-        # Each group's own x-range: no extrapolation onto other groups' data.
+        # The fitted subjects' own x-range: no extrapolation onto other
+        # groups' data.
         x_range = np.linspace(np.min(xs), np.max(xs))
         (line,) = ax.plot(
             x_range,
             fit.slope * x_range + fit.intercept,
-            color=colors[k],
+            color=color,
         )
         line_plots.append(line)
         pvalue_list.append(fit.pvalue)
-        legends.append(rf"$R^2$={fit.rvalue**2:.2f}, $p$={fit.pvalue:.1g}")
+        legends.append(rf"{prefix}$R^2$={fit.rvalue**2:.2f}, $p$={fit.pvalue:.1g}")
 
     if legend and line_plots:
         leg = ax.legend(
@@ -377,7 +386,8 @@ def plot_subject_mode(
     One row per component, one shared y-range per row. Boxplots come first:
     by `group_variable` (plus a pooled box of every subject), then by each
     of `categorical_variables`. Then one scatter column per entry in
-    `numerical_variables`, coloured and fitted per `group_variable` group.
+    `numerical_variables`, coloured and fitted per `group_variable` group,
+    plus a black fit over all subjects.
     A subject with a blank cell is left out of that variable's panels only.
     See `compute_figsize` for the sizing arguments; `width_to_height_ratio`
     defaults to 1.618 for up to two columns and 1.0 (square panels) beyond,
@@ -449,6 +459,7 @@ def plot_subject_mode(
                 y_column=y_column,
                 category=group_variable,
                 legend=True,
+                pooled=True,
             )
             if i == n_components - 1:
                 ax[j].set_xlabel(variable)

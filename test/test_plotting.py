@@ -31,6 +31,7 @@ from gMRItensor.plotting.utils import region_masks_from_segmentations
 from gMRItensor.plotting.utils import scale_mode
 from gMRItensor.plotting.utils import scatter_to_volume
 from matplotlib.colors import to_rgb
+from scipy.stats import linregress
 
 matplotlib.use("Agg")
 
@@ -361,6 +362,64 @@ def test_make_variable_correlation():
     plt.close(fig)
 
 
+def _black_fits(ax: matplotlib.axes.Axes) -> list:
+    return [
+        line
+        for line in ax.get_lines()
+        if len(line.get_xdata()) > 1
+        and matplotlib.colors.same_color(line.get_color(), "black")
+    ]
+
+
+def test_make_variable_correlation_pooled_fit_over_all_subjects():
+    df = pd.DataFrame(
+        {
+            "x": [0.0, 1.0, 2.0, 3.0, 10.0, 11.0, 12.0, 13.0],
+            "y": [0.0, 1.0, 2.1, 2.9, 5.0, 5.5, 6.1, 6.4],
+            "group": ["A"] * 4 + ["B"] * 4,
+        },
+    )
+    fig, ax = plt.subplots()
+
+    make_variable_correlation(ax, df, "x", "y", "group", pooled=True)
+
+    (pooled,) = _black_fits(ax)  # one black line, over every subject's range
+    assert (min(pooled.get_xdata()), max(pooled.get_xdata())) == (0.0, 13.0)
+    fit = linregress(df["x"], df["y"])
+    np.testing.assert_allclose(
+        pooled.get_ydata()[[0, -1]],
+        fit.intercept + fit.slope * np.array([0.0, 13.0]),
+    )
+    texts = [text.get_text() for text in ax.get_legend().get_texts()]
+    assert len(texts) == 3 and texts[-1].startswith("All:")
+    assert f"{fit.rvalue**2:.2f}" in texts[-1]
+    plt.close(fig)
+
+    fig, ax = plt.subplots()
+    make_variable_correlation(ax, df, "x", "y", "group")
+    assert _black_fits(ax) == []  # off by default
+    plt.close(fig)
+
+
+def test_make_variable_correlation_pooled_fit_despite_flat_groups():
+    # B alone has a constant x and gets no fit; all subjects together do.
+    df = pd.DataFrame(
+        {
+            "x": [1.0, 2.0, 3.0, np.nan, 5.0, 5.0, 5.0, 5.0],
+            "y": [1.0, 2.0, 2.5, 4.0, 1.0, 2.0, 3.0, 4.0],
+            "group": ["A"] * 4 + ["B"] * 4,
+        },
+    )
+    fig, ax = plt.subplots()
+
+    make_variable_correlation(ax, df, "x", "y", "group", pooled=True)
+
+    fits = [line for line in ax.get_lines() if len(line.get_xdata())]
+    assert len(fits) == 2  # A and the pooled fit
+    assert len(_black_fits(ax)) == 1
+    plt.close(fig)
+
+
 # --- gMRItensor.plotting.subject_mode: full figure smoke tests ---
 
 
@@ -377,6 +436,9 @@ def test_plot_subject_mode():
         numerical_variables=["age"],
     )
     assert axs.shape == (n_components, 2)
+    # The numerical panels add a black fit over all subjects.
+    assert all(len(_black_fits(ax)) == 1 for ax in axs[:, 1])
+    assert all(_black_fits(ax) == [] for ax in axs[:, 0])
     plt.close(fig)
 
 
