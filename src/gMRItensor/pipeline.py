@@ -1182,7 +1182,8 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
     also for models saved before sorting existed.
 
     Draws the selected parts (`DecompositionPlotOptions.selected_parts`) to
-    `<output_dir>/figures/decomposition/<model>__<part>.<ext>`. Spatial
+    `<output_dir>/figures/decomposition/<model>__<part>.<ext>`; the subject
+    mode gets `<subject_prefix>_` in front when one is set. Spatial
     parts of an ROI model need a segmentation: without one they are skipped
     with a note if no part was chosen explicitly, and raise otherwise.
     """
@@ -1215,9 +1216,10 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
 
     written: list[Path] = []
 
-    def save(fig: matplotlib.figure.Figure, part: str) -> None:
+    def save(fig: matplotlib.figure.Figure, part: str, prefix: str = "") -> None:
+        name = f"{prefix}_{stem}__{part}" if prefix else f"{stem}__{part}"
         written.extend(
-            save_figure(fig, out_dir / f"{stem}__{part}", options.formats, options.dpi),
+            save_figure(fig, out_dir / name, options.formats, options.dpi),
         )
 
     is_cp = saved.method == "cp"
@@ -1252,7 +1254,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
             page_width=page_width,
             min_panel_width=options.min_panel_width,
         )
-        save(fig, "subject_mode")
+        save(fig, "subject_mode", options.subject_prefix)
     if "time" in parts:
         if is_cp:
             fig, _ = plot_time_mode(saved.time_mode, time_points, page_width=page_width)

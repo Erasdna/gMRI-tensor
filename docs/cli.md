@@ -230,7 +230,7 @@ gmri decompose run --output-dir results/parafac2 --job $SLURM_ARRAY_TASK_ID
 gmri plot decomposition --model results/parafac2/parafac2_rank_3.h5 --subject-info subjects.csv \
     --group-variable diagnosis --output-dir results --segmentation template_seg.nii.gz \
     [--mode-grid] [--subject-mode] [--time] [--spatial] [--background template_T1.nii.gz] [--slices 90 110 80] \
-    [--categorical sex apoe] [--numerical age mmse]
+    [--categorical sex apoe] [--numerical age mmse] [--subject-prefix basic]
 ```
 
 | Argument | Default | Meaning |
@@ -248,6 +248,7 @@ gmri plot decomposition --model results/parafac2/parafac2_rank_3.h5 --subject-in
 | `--categorical` | none | Subject-info columns to box-plot the subject mode by. Every value is a category, numeric codes too (e.g. APOE 2/3/4). |
 | `--numerical` | none | Subject-info columns to scatter the subject mode against. A value that is not a number is an error. |
 | `--min-panel-width` | none | Inches. With many variables, the subject-mode panels get narrow; this widens that figure beyond `--page-width` until each panel is at least this wide, e.g. `2`. |
+| `--subject-prefix` | none | Prepended as `<prefix>_` to the subject-mode figure name, e.g. `sleep_cmf_rank_3__subject_mode.png`. Other parts keep their names. |
 | `--alpha`, `--min-group-n` | `0.05`, `2` | Group tests of the evolving mode. |
 | `--page-width`, `--formats`, `--dpi` | `double`, `pdf png`, `300` | As for `plot statistics`. |
 
@@ -255,6 +256,12 @@ gmri plot decomposition --model results/parafac2/parafac2_rank_3.h5 --subject-in
 - **Subject variables:** every column named by `--group-variable`, `--categorical` or `--numerical` must be in the subject info; otherwise the command stops before loading the model and lists the available columns. A blank cell leaves that subject out of that variable's panels only; a blank `--group-variable` cell is an error.
 - **Group comparisons:** in each boxplot, every pair of categories gets a Mann–Whitney U test, and significant pairs are starred (no multiple-comparison correction). The `All` box shows which subjects are outliers for the whole dataset rather than within their group, and is never tested.
 - **Category order:** categories are sorted, so a group has the same colour in every figure.
+- **Several variable sets:** run `--subject-mode` once per set, each with its own prefix, so the figures sit side by side:
+
+  ```bash
+  gmri plot decomposition ... --subject-mode --categorical sex apoe --numerical age --subject-prefix basic
+  gmri plot decomposition ... --subject-mode --numerical sleep_efficiency waso --subject-prefix sleep
+  ```
 - **Missing segmentation:** if a per-ROI model is plotted without `--segmentation`, the spatial parts are skipped with a note. Asking for one explicitly without a segmentation is an error.
 
 ## `gmri plot group-maps`

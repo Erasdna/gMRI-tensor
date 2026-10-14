@@ -246,6 +246,23 @@ def test_decomposition_plot_options_split_subject_variables(tmp_path: Path) -> N
         DecompositionPlotOptions(**common, min_panel_width=0.0)
 
 
+@pytest.mark.parametrize("prefix", ["a/b", "a\\b", ".hidden"])
+def test_decomposition_plot_options_reject_bad_subject_prefix(
+    tmp_path: Path,
+    prefix: str,
+) -> None:
+    model = tmp_path / "pd_rank_2.h5"
+    model.touch()
+    with pytest.raises(ValueError, match="subject_prefix"):
+        DecompositionPlotOptions(
+            model=model,
+            subject_info=_subject_info(tmp_path),
+            group_variable="diagnosis",
+            output_dir=tmp_path,
+            subject_prefix=prefix,
+        )
+
+
 def _misspelled_column_cases(tmp_path: Path) -> list[tuple[Any, str]]:
     subject_info = _subject_info(tmp_path)
     model = tmp_path / "pd_rank_2.h5"

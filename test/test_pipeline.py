@@ -1365,3 +1365,29 @@ def test_plots_sort_models_saved_unsorted(
     for got, want in zip(drawn["evolving_states"], expected.evolving_states):
         np.testing.assert_array_equal(got, want)
     np.testing.assert_array_equal(drawn["subject_mode"], saved.subject_mode)
+
+
+def test_subject_prefix_renames_only_the_subject_mode_figure(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    (model,) = run_decomposition(
+        decomposition_options(synthetic_study, method="cp", ranks=(2,)),
+    )
+    parts = ("subject_mode", "time")
+
+    plain = run_decomposition_plots(plot_options(synthetic_study, model, parts=parts))
+    prefixed = run_decomposition_plots(
+        plot_options(synthetic_study, model, parts=parts, subject_prefix="sleep"),
+    )
+
+    assert sorted(p.name for p in plain) == [
+        "cp_rank_2__subject_mode.png",
+        "cp_rank_2__time_mode.png",
+    ]
+    assert sorted(p.name for p in prefixed) == [
+        "cp_rank_2__time_mode.png",
+        "sleep_cp_rank_2__subject_mode.png",
+    ]

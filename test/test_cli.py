@@ -169,6 +169,9 @@ def test_cli_plot_subject_mode_variables(
     assert '"categorical": [\n      "sex",\n      "apoe"\n    ]' in provenance
     assert '"min_panel_width": 2.0' in provenance
 
+    assert _run([*plot, *variables, "--subject-prefix", "sleep"]) == 0
+    assert (figure.parent / "sleep_parafac2_rank_1__subject_mode.png").exists()
+
     capsys.readouterr()
     assert _run([*plot, "--categorical", "sexx"]) == 2
     error = capsys.readouterr().err

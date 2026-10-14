@@ -541,6 +541,13 @@ def _add_plot(commands: Any) -> None:
         "narrower (default: fit --page-width)",
     )
     decomposition.add_argument(
+        "--subject-prefix",
+        default="",
+        metavar="PREFIX",
+        help="prepended as PREFIX_ to the subject-mode figure name, to keep "
+        "figures for different variable sets apart",
+    )
+    decomposition.add_argument(
         "--alpha",
         type=float,
         default=0.05,
@@ -874,6 +881,7 @@ def _run_plot(args: argparse.Namespace) -> None:
             categorical=tuple(args.categorical),
             numerical=tuple(args.numerical),
             min_panel_width=args.min_panel_width,
+            subject_prefix=args.subject_prefix,
             alpha=args.alpha,
             min_group_n=args.min_group_n,
             page_width=_page_width(args.page_width),

@@ -409,7 +409,9 @@ class DecompositionPlotOptions:
     boxplots by `group_variable` and each `categorical` column and as
     scatters against each `numerical` column, all from `subject_info`;
     with `min_panel_width` (inches) that figure grows beyond `page_width`
-    rather than squeezing its panels.
+    rather than squeezing its panels. A `subject_prefix` is prepended to
+    that figure's name as `<prefix>_`, so runs with different variable sets
+    do not overwrite each other.
     """
 
     model: Path
@@ -423,6 +425,7 @@ class DecompositionPlotOptions:
     categorical: tuple[str, ...] = ()
     numerical: tuple[str, ...] = ()
     min_panel_width: float | None = None
+    subject_prefix: str = ""
     alpha: float = 0.05
     min_group_n: int = 2
     page_width: str | float = "double"
@@ -431,6 +434,12 @@ class DecompositionPlotOptions:
 
     def __post_init__(self) -> None:
         bad = [p for p in self.parts if p not in DECOMPOSITION_PARTS]
+        _check(
+            not any(c in self.subject_prefix for c in "/\\")
+            and not self.subject_prefix.startswith("."),
+            "subject_prefix may not contain '/' or '\\' or start with '.', "
+            f"got {self.subject_prefix!r}",
+        )
         _check(not bad, f"parts must be from {DECOMPOSITION_PARTS}, got {bad}")
         _check(
             self.slices is None or len(self.slices) == 3,
