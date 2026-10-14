@@ -1,5 +1,6 @@
-"""Store one fitted CP or PARAFAC2 decomposition per HDF5 file."""
+"""Store one fitted CP, PARAFAC2 or CMF decomposition per HDF5 file."""
 from dataclasses import dataclass
+from dataclasses import replace
 from pathlib import Path
 from typing import Literal
 
@@ -34,6 +35,10 @@ class SavedDecomposition:
     on the template grid (`template_shape`, `template_affine`), and
     `template_path`, the segmentation preprocessing recorded as the template
     (a record only; it is never read).
+
+    Components are ordered by `component_weights`, largest first: saving
+    through the pipeline sorts them and `load_decomposition` sorts again,
+    so files written before sorting existed load in the same order.
     """
 
     method: Literal["cp", "parafac2", "cmf"]
@@ -55,6 +60,56 @@ class SavedDecomposition:
     template_shape: np.ndarray | None = None
     template_affine: np.ndarray | None = None
     template_path: str | None = None
+
+
+def _column_norms(matrix: np.ndarray) -> np.ndarray:
+    return np.linalg.norm(np.asarray(matrix), axis=0)
+
+
+def component_weights(saved: SavedDecomposition) -> np.ndarray:
+    """Each component's size: `|weights|` times the L2 norms of its modes.
+
+    Equal to `|weights|` when every mode is unit-norm. CP multiplies the
+    subject, time and label norms. PARAFAC2 and CMF use the label norm and
+    the evolving mode's norm over all subjects, each subject's `B_i` scaled
+    by its subject weight for PARAFAC2; CMF's `subject_mode` is derived from
+    the `B_i`, so it is not counted twice.
+    """
+    weights = np.abs(np.asarray(saved.weights, dtype=float))
+    label = _column_norms(saved.label_mode)
+    if saved.method == "cp":
+        assert saved.time_mode is not None
+        return (
+            weights
+            * _column_norms(saved.subject_mode)
+            * _column_norms(saved.time_mode)
+            * label
+        )
+    states = [np.asarray(B) for B in saved.evolving_states or []]
+    if saved.method == "parafac2":
+        states = [B * a for B, a in zip(states, np.asarray(saved.subject_mode))]
+    evolving = np.sqrt(sum((B**2).sum(axis=0) for B in states))
+    return weights * evolving * label
+
+
+def sort_components(saved: SavedDecomposition) -> SavedDecomposition:
+    """`saved` with its components ordered by `component_weights`, largest
+    first (stable for ties). Values are only permuted, never rescaled."""
+    order = np.argsort(-component_weights(saved), kind="stable")
+    return replace(
+        saved,
+        weights=np.asarray(saved.weights)[order],
+        subject_mode=np.asarray(saved.subject_mode)[:, order],
+        label_mode=np.asarray(saved.label_mode)[:, order],
+        time_mode=(
+            None if saved.time_mode is None else np.asarray(saved.time_mode)[:, order]
+        ),
+        evolving_states=(
+            None
+            if saved.evolving_states is None
+            else [np.asarray(B)[:, order] for B in saved.evolving_states]
+        ),
+    )
 
 
 def _write_ragged(file: h5py.File, name: str, arrays: list[np.ndarray]) -> None:
@@ -112,7 +167,13 @@ def save_decomposition(path: Path, saved: SavedDecomposition) -> None:
 
 
 def load_decomposition(path: Path) -> SavedDecomposition:
-    """Read a `save_decomposition` file."""
+    """Read a `save_decomposition` file, components largest first
+    (`sort_components`), however the file was written."""
+    return sort_components(_read_decomposition(path))
+
+
+def _read_decomposition(path: Path) -> SavedDecomposition:
+    """A `save_decomposition` file exactly as stored."""
     with h5py.File(path, "r") as file:
         method = str(file.attrs["method"])
         arrays = {name: file[name][()] for name in _ARRAYS}

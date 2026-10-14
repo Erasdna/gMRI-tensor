@@ -45,6 +45,7 @@ from gMRItensor.jobs import run_tasks
 from gMRItensor.model_io import load_decomposition
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
+from gMRItensor.model_io import sort_components
 from gMRItensor.options import CONCENTRATION_STATISTICS
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
@@ -629,6 +630,7 @@ def _saved_decomposition(
     error: float,
     data: DecompositionInput,
 ) -> SavedDecomposition:
+    """A fit as a `SavedDecomposition`, components largest first."""
     common: dict[str, Any] = {
         "rank": rank,
         "error": float(error),
@@ -645,23 +647,27 @@ def _saved_decomposition(
         "template_path": data.template_path,
     }
     if isinstance(model, (PARAFAC2Model, CMFModel)):
-        return SavedDecomposition(
-            method="cmf" if isinstance(model, CMFModel) else "parafac2",
-            weights=_numpy(model.weights),
-            subject_mode=_numpy(model.subject_mode),
-            label_mode=_numpy(model.label_mode),
-            evolving_states=[_numpy(state) for state in model.evolving_states],
-            **common,
+        return sort_components(
+            SavedDecomposition(
+                method="cmf" if isinstance(model, CMFModel) else "parafac2",
+                weights=_numpy(model.weights),
+                subject_mode=_numpy(model.subject_mode),
+                label_mode=_numpy(model.label_mode),
+                evolving_states=[_numpy(state) for state in model.evolving_states],
+                **common,
+            ),
         )
     weights, factors = model
     subject_mode, time_mode, label_mode = (_numpy(f) for f in factors)
-    return SavedDecomposition(
-        method="cp",
-        weights=_numpy(weights),
-        subject_mode=subject_mode,
-        label_mode=label_mode,
-        time_mode=time_mode,
-        **common,
+    return sort_components(
+        SavedDecomposition(
+            method="cp",
+            weights=_numpy(weights),
+            subject_mode=subject_mode,
+            label_mode=label_mode,
+            time_mode=time_mode,
+            **common,
+        ),
     )
 
 
@@ -1171,6 +1177,9 @@ def _spatial_inputs(
 
 def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
     """`gmri plot decomposition`: one saved model -> figures.
+
+    Components are drawn largest first (`load_decomposition` sorts them),
+    also for models saved before sorting existed.
 
     Draws the selected parts (`DecompositionPlotOptions.selected_parts`) to
     `<output_dir>/figures/decomposition/<model>__<part>.<ext>`. Spatial

@@ -2,6 +2,7 @@ import dataclasses
 from pathlib import Path
 from typing import Any
 
+import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 import pandas as pd
@@ -13,7 +14,11 @@ from gMRItensor import preprocessing
 from gMRItensor import replicability
 from gMRItensor.jobs import FitTask
 from gMRItensor.jobs import RestartResult
+from gMRItensor.model_io import _read_decomposition
+from gMRItensor.model_io import component_weights
 from gMRItensor.model_io import load_decomposition
+from gMRItensor.model_io import save_decomposition
+from gMRItensor.model_io import sort_components
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
 from gMRItensor.options import DistributedOptions
@@ -351,6 +356,13 @@ def test_run_decomposition_from_roi_signal(
     np.testing.assert_array_equal(saved.labels, [2, 4, 10, 41, 49])
     assert saved.voxel_coords is None
     assert (out / "decompose.json").exists()
+    _assert_saved_largest_first(out / "parafac2_rank_2.h5")
+
+
+def _assert_saved_largest_first(path: Path) -> None:
+    """The file itself (not only `load_decomposition`) is sorted."""
+    weights = component_weights(_read_decomposition(path))
+    assert np.all(np.diff(weights) <= 0), weights
 
 
 def test_run_decomposition_inputs_follow_the_statistic(
@@ -1168,6 +1180,7 @@ def test_cmf_end_to_end(
     assert saved.method == "cmf"
     assert saved.evolving_states is not None and len(saved.evolving_states) == 6
     assert saved.label_mode.shape == (5, 2)
+    _assert_saved_largest_first(model)
 
     distributed = decomposition_options(
         synthetic_study,
@@ -1308,3 +1321,47 @@ def test_csf_is_offset_ventricles_and_label_24(
     assert spatial is not None
     # Labels 4 (a ventricle), 10002 and 24 are CSF; 10 and 49 are not.
     np.testing.assert_array_equal(spatial.csf, np.isin(labels, [4, 10002, 24]))
+
+
+def test_plots_sort_models_saved_unsorted(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model written before sorting existed is plotted largest first."""
+    preprocess(synthetic_study)
+    (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
+    saved = load_decomposition(model)
+    assert saved.evolving_states is not None
+    flipped = dataclasses.replace(
+        saved,
+        weights=saved.weights[::-1],
+        subject_mode=saved.subject_mode[:, ::-1],
+        label_mode=saved.label_mode[:, ::-1],
+        evolving_states=[B[:, ::-1] for B in saved.evolving_states],
+    )
+    old = model.with_name("old_rank_2.h5")
+    save_decomposition(old, flipped)
+    assert np.all(np.diff(component_weights(_read_decomposition(old))) >= 0)
+
+    drawn: dict[str, Any] = {}
+
+    def fake_subject_mode(subject_mode: np.ndarray, *args: Any, **kwargs: Any) -> Any:
+        drawn["subject_mode"] = subject_mode
+        return plt.figure(), None
+
+    def fake_evolving_mode(states: list[np.ndarray], *args: Any, **kwargs: Any) -> Any:
+        drawn["evolving_states"] = states
+        return plt.figure(), None, pd.DataFrame()
+
+    monkeypatch.setattr(pipeline, "plot_subject_mode", fake_subject_mode)
+    monkeypatch.setattr(pipeline, "plot_evolving_mode", fake_evolving_mode)
+    run_decomposition_plots(
+        plot_options(synthetic_study, old, parts=("subject_mode", "time")),
+    )
+
+    expected = sort_components(flipped)
+    np.testing.assert_array_equal(drawn["subject_mode"], expected.subject_mode)
+    assert expected.evolving_states is not None
+    for got, want in zip(drawn["evolving_states"], expected.evolving_states):
+        np.testing.assert_array_equal(got, want)
+    np.testing.assert_array_equal(drawn["subject_mode"], saved.subject_mode)
