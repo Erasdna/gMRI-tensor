@@ -5,7 +5,7 @@ Parenchyma uses FreeSurfer LUT ids. The CSF atlas reuses those ids plus
 cerebellar CSF is the cerebellar ids + offset and the pontine cistern is
 brainstem (16) + offset. Ventricle labels are CSF whether or not they carry
 the offset, so `ventricles` holds both and no parenchyma preset contains
-either.
+either. `parenchyma` is every label below the offset that is not CSF.
 """
 from collections.abc import Mapping
 from collections.abc import Sequence
@@ -43,6 +43,24 @@ _PARENCHYMA_PRESETS: dict[str, tuple[int, ...]] = {
     ),
 }
 
+_PARENCHYMA_PRESETS_NAMES: dict[str, str] = {
+    "cortical_grey_matter": "Cortical GM",
+    "subcortical_grey_matter": "Subcortical GM",
+    "grey_matter": "GM",
+    "white_matter": "WM",
+    "cerebellum": "Cerebellum",
+    "brainstem": "Brainstem",
+    "basal_ganglia": "Basal ganglia",
+    "hippocampus": "Hippocampus",
+    "amygdala": "Amygdala",
+    "thalamus": "Thalamus",
+    "cingulate": "Cingulate",
+    "parahippocampal": "Parahippocampal",
+    "entorhinal": "Entorhinal",
+    "limbic_system": "Limbic system",
+    "parenchyma": "Parenchyma",
+}
+
 # CSF preset name -> parenchyma preset whose ids + offset it covers.
 _CSF_COUNTERPARTS = {
     "cortical_grey_matter_csf": "cortical_grey_matter",
@@ -50,15 +68,30 @@ _CSF_COUNTERPARTS = {
     "brainstem_csf": "brainstem",
     "limbic_system_csf": "limbic_system",
 }
+_CSF_PRESETS_NAMES: dict[str, str] = {
+    "cortical_grey_matter_csf": "Supratentorial CSF",
+    "cerebellum_csf": "Infratentorial CSF",
+    "brainstem_csf": "Pontine cistern",
+    "limbic_system_csf": "Limbic system CSF",
+    "ventricles": "Ventricles",
+    "all_csf": "All CSF",
+}
 
 
 def _sorted_unique(ids: Sequence[int]) -> tuple[int, ...]:
     return tuple(sorted(set(ids)))
 
 
+#: FreeSurfer's own CSF label, outside the ventricles.
+CSF_ID = 24
+
+
 def get_roi_presets(csf_offset: int = 10000) -> dict[str, tuple[int, ...]]:
     """All ROI presets as `name -> sorted unique label ids`."""
     presets = {name: _sorted_unique(ids) for name, ids in _PARENCHYMA_PRESETS.items()}
+    presets["parenchyma"] = tuple(
+        i for i in range(1, csf_offset) if i not in (*VENTRICLE_IDS, CSF_ID)
+    )
     presets["ventricles"] = _sorted_unique(
         VENTRICLE_IDS + tuple(i + csf_offset for i in VENTRICLE_IDS),
     )
@@ -70,8 +103,9 @@ def get_roi_presets(csf_offset: int = 10000) -> dict[str, tuple[int, ...]]:
     return presets
 
 
-#: FreeSurfer's own CSF label, outside the ventricles.
-CSF_ID = 24
+def roi_display_name(roi: str) -> str:
+    """Figure label for an ROI: the preset's short name, else `roi` itself."""
+    return {**_PARENCHYMA_PRESETS_NAMES, **_CSF_PRESETS_NAMES}.get(roi, roi)
 
 
 def is_csf(labels: np.ndarray, csf_offset: int = 10000) -> np.ndarray:

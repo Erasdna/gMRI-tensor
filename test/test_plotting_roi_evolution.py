@@ -79,9 +79,15 @@ def test_rows_layout_shape_stars_and_colors(roi_tables):
     assert matplotlib.colors.same_color(axs[0, 2].lines[0].get_color(), color_b)
     # Each row shares one y-range, so ribbon and subject columns compare.
     assert axs[0, 0].get_ylim() == axs[0, 1].get_ylim() == axs[0, 2].get_ylim()
+    # Rows link their y axes; only the left column labels its ticks.
+    shared = axs[0, 0].get_shared_y_axes()
+    assert shared.joined(axs[0, 0], axs[0, 2])
+    assert not shared.joined(axs[0, 0], axs[1, 0])
+    assert axs[0, 0].yaxis.majorTicks[0].label1.get_visible()
+    assert not axs[0, 1].yaxis.majorTicks[0].label1.get_visible()
     assert len(fig.legends) == 1
     assert all(ax.get_legend() is None for ax in axs.flat)
-    assert axs[0, 0].get_ylabel() == "ventricles"
+    assert axs[0, 0].get_ylabel() == "Ventricles"
     assert fig.get_supylabel() == "Median ΔR1 (1/s)"
     plt.close(fig)
 
@@ -101,7 +107,7 @@ def test_panels_layout_hides_unused_axes_and_has_one_legend(roi_tables):
 
     assert axs.shape == (2, 2)
     assert [ax.get_visible() for ax in axs.flat] == [True, True, True, False]
-    assert [ax.get_title() for ax in axs.flat[:3]] == list(ROIS)
+    assert [ax.get_title() for ax in axs.flat[:3]] == ["Ventricles", "WM", "Thalamus"]
     assert _stars(axs[0, 0]) == [2, 3]
     assert len(fig.legends) == 1
     assert all(ax.get_legend() is None for ax in axs.flat)

@@ -18,6 +18,7 @@ from gMRItensor.plotting.utils import get_color_palette
 from gMRItensor.plotting.utils import plot_group_ribbons
 from gMRItensor.plotting.utils import plot_subject_curves
 from gMRItensor.plotting.utils import resolve_page_width
+from gMRItensor.roi_groups import roi_display_name
 
 plt.style.use(["science", "no-latex"])
 matplotlib.use("Agg")
@@ -159,7 +160,8 @@ def plot_roi_evolution_rows(
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """One row per ROI: group ribbons, then each group's subject curves.
 
-    Same layout as `plot_evolving_mode`, with ROIs as rows. `summary` is
+    Same layout as `plot_evolving_mode`, with ROIs as rows; each row shares
+    one y axis, labelled in the ribbon column only. `summary` is
     `summarize_groups_over_time(..., facet="roi")` output, `subject_values`
     the per-scan ROI frame it came from (with `group` and `timepoint`) and
     `significance` the matching `compare_groups_over_time` output with a
@@ -177,6 +179,7 @@ def plot_roi_evolution_rows(
         n_columns,
         figsize=_figsize(len(rois), n_columns, page_width, width_to_height_ratio),
         layout="compressed",
+        sharey="row",
         squeeze=False,
     )
 
@@ -212,7 +215,7 @@ def plot_roi_evolution_rows(
 
         for ax in axs[row, :]:
             ax.set_xticks(sorted(roi_summary["timepoint"].unique()))
-        axs[row, 0].set_ylabel(roi)
+        axs[row, 0].set_ylabel(roi_display_name(roi))
 
     axs[0, 0].set_title(r"Mean $\pm$ SEM")
     for col, category in enumerate(categories, start=1):
@@ -275,7 +278,7 @@ def plot_roi_evolution_panels(
         roi_summary = summary[summary["roi"] == roi]
         ylims.append(plot_group_ribbons(ax, roi_summary, categories, color_by_group))
         ax.set_xticks(sorted(roi_summary["timepoint"].unique()))
-        ax.set_title(roi)
+        ax.set_title(roi_display_name(roi))
     if sharey:
         shared = (min(lo for lo, _ in ylims), max(hi for _, hi in ylims))
         ylims = [shared] * len(ylims)
