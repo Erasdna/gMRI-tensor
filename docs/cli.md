@@ -141,7 +141,7 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 | `--restart-procs` | `1` | Parallel processes for the restarts. |
 | `--non-negative-modes` | `auto` | Modes 0 = subject, 1 = time, 2 = label. See the table below. |
 | `--solver` | `tensorly` | PARAFAC2 solver: `tensorly` (ALS) or `matcouply` (AO-ADMM, which can also constrain mode 1). CMF always uses matcouply. |
-| `--fit-option KEY=VALUE` | | Any other `run_*_decomposition_repeated` option, with VALUE read as JSON, e.g. `--fit-option progress_bar=true` or `--fit-option 'aoadmm_options={"l2_penalty": 0.1}'`. Repeatable. |
+| `--fit-option KEY=VALUE` | | Any other `run_*_decomposition_repeated` option, with VALUE read as JSON, e.g. `--fit-option progress_bar=true` or `--fit-option 'aoadmm_options={"l2_penalty": 0.1}'`. Repeatable. Fits are never normalised: the scale stays in the factors and the weights are ones. The figures and `<model>__component_weights.csv` do the normalising. |
 | `--tasks-per-job`, `--store` | `1`, `restarts` | Distributed runs (below). |
 
 | `--non-negative-modes` | PARAFAC2 | CMF | CP |
@@ -237,10 +237,10 @@ gmri plot decomposition --model results/parafac2/parafac2_rank_3.h5 --subject-in
 |---|---|---|
 | `--model` | required | `<method>_rank_<r>.h5` from `gmri decompose`. Figures are named after it, e.g. `cmf_rank_3__mode_grid.png`. Components are drawn largest weight first, also for models saved before sorting existed. |
 | `--subject-info`, `--group-variable` | required | Subjects and the column to colour and compare by. |
-| `--output-dir` | required | Figures go to `figures/decomposition/<model>__<part>.<ext>`. |
+| `--output-dir` | required | Figures go to `figures/decomposition/<model>__<part>.<ext>`. Every run also writes `<model>__component_weights.csv` there: each component's amplitude (`weight`, and `relative_weight`, its share of the total). The figures draw every mode normalised, so this is the scale they leave out. |
 | `--mode-grid` | | Time, subject and spatial modes in one figure, with CSF and parenchyma shown separately. A voxel is CSF if its label is ≥ 10000, a ventricle id or FreeSurfer's CSF (24); everything else is parenchyma. |
 | `--subject-mode` | | One row per component. Boxplots by `--group-variable`, with an extra hollow `All` box of every subject, then by each `--categorical` column, drawn as light grey boxes with every subject as a dot in its group's colour (colour always means the `--group-variable` group); then a scatter against each `--numerical` column, with one fit line per group and a black one over all subjects (`All` in the legend). Each row shares one y-axis. |
-| `--time` | | CP: the shared time mode. PARAFAC2 and CMF: group ribbons and subject curves of the evolving mode; its group tests are saved as `<model>__evolving_mode_significance.csv`. |
+| `--time` | | CP: the shared time mode. PARAFAC2 and CMF: group ribbons and subject curves of the evolving mode, each subject's curve normalised to its shape. A subject whose subject-mode value is below `--min-subject-coefficient` in absolute value is drawn as zero for that component and left out of its ribbon and group tests (also in `--mode-grid`). The group tests are saved as `<model>__evolving_mode_significance.csv`. |
 | `--spatial` | | The spatial mode on three slices, one figure for parenchyma and one for CSF. |
 | `--segmentation` | | Label volume in the decomposition's label space (one merged file, CSF ids + 10000). Needed for the spatial parts of a per-ROI model. Per-voxel models carry their own coordinates; a segmentation given for one must be on the model's template grid (shape and affine), or the command stops with an error. |
 | `--background` | segmentation mask | Image to draw the spatial maps on. It must be on the template grid (the segmentation's, for a per-ROI model), or the command stops with an error. |
@@ -250,6 +250,7 @@ gmri plot decomposition --model results/parafac2/parafac2_rank_3.h5 --subject-in
 | `--min-panel-width` | none | Inches. With many variables, the subject-mode panels get narrow; this widens that figure beyond `--page-width` until each panel is at least this wide, e.g. `2`. |
 | `--subject-prefix` | none | Prepended as `<prefix>_` to the subject-mode figure name, e.g. `sleep_cmf_rank_3__subject_mode.png`. Other parts keep their names. |
 | `--alpha`, `--min-group-n` | `0.05`, `2` | Group tests of the evolving mode. |
+| `--min-subject-coefficient C` | `1e-6` | PARAFAC2 and CMF only (CP has no per-subject time curves, so it is ignored there). Cutoff on the raw subject mode, which fits never normalise: a subject whose subject-mode value is below C in absolute value for a component is drawn as zero in the evolving mode and left out of its ribbons and group tests, in `--time` and `--mode-grid` alike. With 0, only loadings the fit set exactly to zero are dropped. |
 | `--page-width`, `--formats`, `--dpi` | `double`, `pdf png`, `300` | As for `plot statistics`. |
 
 - **Part flags:** without any, every part is drawn.

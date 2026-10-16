@@ -1,4 +1,5 @@
 import warnings
+from typing import Any
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -710,6 +711,12 @@ def test_plot_evolving_mode_single_group():
     plt.close(fig)
 
 
+def _figure_legend_labels(fig: matplotlib.figure.Figure) -> list[str]:
+    """The labels of the one legend above all panels."""
+    assert len(fig.legends) == 1
+    return [text.get_text() for text in fig.legends[0].get_texts()]
+
+
 def _ribbon_means(ax: matplotlib.axes.Axes) -> dict[str, np.ndarray]:
     """Each group's ribbon mean line, by group label."""
     return {
@@ -717,7 +724,7 @@ def _ribbon_means(ax: matplotlib.axes.Axes) -> dict[str, np.ndarray]:
     }
 
 
-def test_plot_evolving_mode_draws_negligible_subject_as_zero():
+def test_plot_evolving_mode_draws_negligible_subject_as_zero() -> None:
     evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
     subject_mode = np.ones((len(subjects), 2))
     subject_mode[0, 0] = 5e-7  # sub-00 does not express component 1
@@ -737,7 +744,7 @@ def test_plot_evolving_mode_draws_negligible_subject_as_zero():
     plt.close(fig)
 
 
-def test_plot_evolving_mode_leaves_negligible_subject_out_of_ribbon_and_tests():
+def test_plot_evolving_mode_leaves_negligible_subject_out_of_ribbon_and_tests() -> None:
     (
         evolving_factors,
         timepoints,
@@ -778,6 +785,70 @@ def test_plot_evolving_mode_leaves_negligible_subject_out_of_ribbon_and_tests():
     )
 
 
+def test_plot_evolving_mode_rejects_misshaped_subject_mode() -> None:
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
+    with pytest.raises(ValueError, match="subject_mode"):
+        plot_evolving_mode(
+            evolving_factors,
+            timepoints,
+            subjects,
+            subject_info,
+            group_variable="group",
+            subject_mode=np.ones((len(subjects) - 1, 2)),
+        )
+
+
+def test_plot_evolving_mode_ticks_every_drawn_timepoint() -> None:
+    # Only sub-02 and sub-05 are scanned at t=5; neither expresses component 1.
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
+    subject_mode = np.ones((len(subjects), 2))
+    subject_mode[[2, 5], 0] = 0.0
+
+    fig, axs, _ = plot_evolving_mode(
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+        group_variable="group",
+        subject_mode=subject_mode,
+    )
+
+    for ax in axs[0, :]:
+        assert 5 in ax.get_xticks()
+    plt.close(fig)
+
+
+def test_evolving_plots_without_any_expressing_subject(
+    recwarn: pytest.WarningsRecorder,
+) -> None:
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
+    subject_mode = np.ones((len(subjects), 2))
+    subject_mode[:, 0] = 0.0
+
+    fig, axs, significance = plot_evolving_mode(
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+        group_variable="group",
+        subject_mode=subject_mode,
+    )
+    # The group legend sits above the figure, so it survives an empty row.
+    assert _figure_legend_labels(fig) == ["A", "B"]
+    assert (significance["component"] != 0).all()
+    plt.close(fig)
+
+    kwargs = make_mode_grid_parafac2_fixture()
+    kwargs["subject_mode"] = kwargs["subject_mode"].copy()
+    kwargs["subject_mode"][:, 0] = 0.0
+    fig, axs = plot_mode_grid(**kwargs)
+    assert len(axs[0, 0].get_xticks()) > 0
+    assert _figure_legend_labels(fig) == ["A", "B"]
+    plt.close(fig)
+
+    assert not any("No artists" in str(w.message) for w in recwarn)
+
+
 def test_plot_evolving_mode_ribbon_layout():
     (
         evolving_factors,
@@ -793,7 +864,8 @@ def test_plot_evolving_mode_ribbon_layout():
         group_variable="group",
     )
     assert axs.shape[1] == 3
-    assert axs[0, 0].get_legend() is not None
+    assert _figure_legend_labels(fig) == ["A", "B"]
+    assert all(ax.get_legend() is None for ax in axs.flat)
     assert axs[0, 1].get_title() == "A"
     assert axs[0, 2].get_title() == "B"
 
@@ -1374,8 +1446,13 @@ def test_plot_mode_grid_parafac2_ribbon_matches_boxplot_colors():
 
     ribbon_lines = {line.get_label(): line for line in axs[0, 0].get_lines()}
     assert set(ribbon_lines) == {"A", "B"}
-    assert axs[0, 0].get_legend() is not None
-    assert axs[1, 0].get_legend() is None
+    assert _figure_legend_labels(fig) == ["A", "B"]
+    assert all(ax.get_legend() is None for ax in axs[:, 0])
+    legend = fig.legends[0]
+    for handle, text in zip(legend.legend_handles, legend.get_texts()):
+        assert matplotlib.colors.to_rgb(handle.get_color()) == pytest.approx(
+            matplotlib.colors.to_rgb(ribbon_lines[text.get_text()].get_color()),
+        )
 
     # Boxes sit at integer x-positions in `subject_info` group order (A, B).
     boxes = sorted(
@@ -1389,7 +1466,7 @@ def test_plot_mode_grid_parafac2_ribbon_matches_boxplot_colors():
     plt.close(fig)
 
 
-def test_plot_mode_grid_leaves_negligible_subject_out_of_ribbon():
+def test_plot_mode_grid_leaves_negligible_subject_out_of_ribbon() -> None:
     kwargs = make_mode_grid_parafac2_fixture()
     kwargs["subject_mode"] = kwargs["subject_mode"].copy()
     kwargs["subject_mode"][0, 0] = 5e-7  # sub-00 does not express component 1
@@ -1408,6 +1485,25 @@ def test_plot_mode_grid_leaves_negligible_subject_out_of_ribbon():
 
     np.testing.assert_allclose(masked[0]["A"], removed[0]["A"])
     assert not np.allclose(masked[1]["A"], removed[1]["A"])
+
+
+def test_plot_mode_grid_honours_negligible_atol() -> None:
+    kwargs = make_mode_grid_parafac2_fixture()
+    kwargs["subject_mode"] = kwargs["subject_mode"].copy()
+    kwargs["subject_mode"][0, 0] = 5e-5
+
+    def ribbon_a(**overrides: Any) -> np.ndarray:
+        fig, axs = plot_mode_grid(**{**kwargs, **overrides})
+        mean = _ribbon_means(axs[0, 0])["A"]
+        plt.close(fig)
+        return mean
+
+    without = {
+        key: kwargs[key][1:]
+        for key in ("time_mode", "time_points", "subjects", "subject_mode")
+    }
+    np.testing.assert_allclose(ribbon_a(negligible_atol=1e-4), ribbon_a(**without))
+    assert not np.allclose(ribbon_a(), ribbon_a(**without))
 
 
 def test_plot_mode_grid_single_component():

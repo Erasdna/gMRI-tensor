@@ -70,7 +70,9 @@ def _column_norms(matrix: np.ndarray) -> np.ndarray:
 def component_weights(saved: SavedDecomposition) -> np.ndarray:
     """Each component's size: `|weights|` times the L2 norms of its modes.
 
-    Equal to `|weights|` when every mode is unit-norm. CP multiplies the
+    Fits are never normalised (their weights are ones), so this is the
+    product of the mode norms; `|weights|` covers models saved earlier with
+    normalised factors. CP multiplies the
     subject, time and label norms. PARAFAC2 and CMF use the label norm and
     the evolving mode's norm over all subjects, each subject's `B_i` scaled
     by its subject weight for PARAFAC2; CMF's `subject_mode` is derived from
@@ -94,23 +96,11 @@ def component_weights(saved: SavedDecomposition) -> np.ndarray:
 
 
 #: A subject-mode entry below this, in absolute value, means the subject
-#: does not express that component.
+#: does not express that component (`gmri plot decomposition
+#: --min-subject-coefficient`). Unlike the fit's `negligible_rtol`, which
+#: removes solver residue relative to each column, it is absolute, on the
+#: raw (never normalised) subject mode.
 NEGLIGIBLE_SUBJECT_WEIGHT = 1e-6
-
-
-def subject_time_courses(saved: SavedDecomposition) -> list[np.ndarray]:
-    """Each subject's own `(n_timepoints_i, rank)` time course.
-
-    PARAFAC2 scales `B_i` by the subject's weights; CMF's `B_i` already
-    carry the amplitude its `subject_mode` is derived from. Raises
-    `ValueError` for a CP fit, which has no evolving mode.
-    """
-    if saved.method not in _EVOLVING_METHODS or saved.evolving_states is None:
-        raise ValueError(f"a {saved.method} fit has no evolving mode")
-    states = [np.asarray(B) for B in saved.evolving_states]
-    if saved.method == "cmf":
-        return states
-    return [B * a for B, a in zip(states, np.asarray(saved.subject_mode))]
 
 
 def negligible_subjects(
@@ -119,8 +109,12 @@ def negligible_subjects(
 ) -> np.ndarray:
     """`(n_subjects, rank)` mask of subject-mode entries below `atol` in
     absolute value: those subjects' time courses are drawn as zero and left
-    out of the group ribbons and tests."""
-    return np.abs(np.asarray(subject_mode)) < atol
+    out of the group ribbons and tests. Reads the raw subject mode, on the
+    scale the fit left it (see `NEGLIGIBLE_SUBJECT_WEIGHT`). An exact zero,
+    a loading the fit removed as residue, is always negligible, also at
+    `atol=0`."""
+    magnitude = np.abs(np.asarray(subject_mode))
+    return (magnitude < atol) | (magnitude == 0)
 
 
 def sort_components(saved: SavedDecomposition) -> SavedDecomposition:

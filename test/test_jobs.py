@@ -1,5 +1,6 @@
 import math
 import os
+from typing import Any
 
 import numpy as np
 import pytest
@@ -414,3 +415,19 @@ def test_run_tasks_resume_skips_or_refits_stored_tasks(
     assert fitted == refitted
     first = store.load(plan[0])
     assert first is not None and first.ok is (not resume)
+
+
+@pytest.mark.parametrize("method", ["CP", "PARAFAC2", "CMF"])
+def test_scattered_restarts_are_never_normalized(method: str) -> None:
+    """Distributed restarts and replicability go through the same fit path:
+    their models keep weights of one."""
+    data: Any = make_tensor() if method == "CP" else make_slices(8)
+    plan = plan_restarts(len(data), 2)
+    store = InMemoryStore()
+    options: dict[str, Any] = dict(FIT_OPTIONS)
+    run_tasks(plan, data, 2, method, store, **options)  # type: ignore[arg-type]
+    best = collect(plan, store)["full"].best
+    assert best is not None
+    model: Any = best.model
+    weights = model[0] if method == "CP" else model.weights
+    torch.testing.assert_close(weights.float(), torch.ones(2), rtol=0, atol=0)

@@ -43,12 +43,12 @@ from gMRItensor.jobs import plan_replicability
 from gMRItensor.jobs import plan_restarts
 from gMRItensor.jobs import RestartResult
 from gMRItensor.jobs import run_tasks
+from gMRItensor.model_io import component_weights
 from gMRItensor.model_io import load_decomposition
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
 from gMRItensor.model_io import select_subjects
 from gMRItensor.model_io import sort_components
-from gMRItensor.model_io import subject_time_courses
 from gMRItensor.options import CONCENTRATION_STATISTICS
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
@@ -609,7 +609,9 @@ def load_plan(output_dir: Path, expected: type) -> Any:
         raise FileNotFoundError(f"{path} not found; run `plan` first")
     try:
         options = options_from_json(json.loads(path.read_text()))
-    except (json.JSONDecodeError, KeyError, TypeError) as error:
+    # ValueError: options that no longer validate, e.g. a fit option that
+    # was removed (`normalize`).
+    except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         raise ValueError(
             f"{path} is not a valid plan ({type(error).__name__}: {error}); "
             "run `plan` again",
@@ -1178,6 +1180,20 @@ def _spatial_inputs(
     )
 
 
+def _component_weights_table(weights: np.ndarray) -> pd.DataFrame:
+    """`component` (1-based), `weight` and `relative_weight` (its share of
+    the total; zero for an all-zero fit rather than NaN)."""
+    total = weights.sum()
+    relative = weights / total if total > 0 else np.zeros_like(weights)
+    return pd.DataFrame(
+        {
+            "component": np.arange(1, len(weights) + 1),
+            "weight": weights,
+            "relative_weight": relative,
+        },
+    )
+
+
 def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
     """`gmri plot decomposition`: one saved model -> figures.
 
@@ -1186,13 +1202,18 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
 
     Draws the selected parts (`DecompositionPlotOptions.selected_parts`) to
     `<output_dir>/figures/decomposition/<model>__<part>.<ext>`; the subject
-    mode gets `<subject_prefix>_` in front when one is set. Parts that
+    mode gets `<subject_prefix>_` in front when one is set. Every run also
+    writes `<model>__component_weights.csv` there: each component's
+    amplitude once its modes are normalised (`component_weights`), the
+    scale the figures leave out. Parts that
     group subjects leave out (and name) subjects without a `group_variable`
     value, as long as every group keeps 2 (`subjects_with_groups`). Spatial
     parts of an ROI model need a segmentation: without one they are skipped
     with a note if no part was chosen explicitly, and raise otherwise.
     """
     saved = load_decomposition(options.model)
+    # Of the full fit, before any subjects are left out below.
+    weights = component_weights(saved)
     subject_info = _read_subject_info(options.subject_info)
     subjects = [str(s) for s in saved.subjects]
     page_width = resolve_page_width(options.page_width)
@@ -1236,6 +1257,12 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
             saved = select_subjects(saved, keep)
             subjects = [subjects[i] for i in keep]
 
+    out_dir.mkdir(parents=True, exist_ok=True)
+    _component_weights_table(weights).to_csv(
+        out_dir / f"{stem}__component_weights.csv",
+        index=False,
+    )
+
     written: list[Path] = []
 
     def save(fig: matplotlib.figure.Figure, part: str, prefix: str = "") -> None:
@@ -1245,7 +1272,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
         )
 
     is_cp = saved.method == "cp"
-    time_mode: Any = saved.time_mode if is_cp else subject_time_courses(saved)
+    time_mode: Any = saved.time_mode if is_cp else saved.evolving_states
     time_points: Any = list(saved.timepoints) if is_cp else saved.timepoints
 
     if "mode_grid" in parts and spatial is not None:
@@ -1263,6 +1290,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
             subject_info,
             options.group_variable,
             page_width=page_width,
+            negligible_atol=options.min_subject_coefficient,
         )
         save(fig, "mode_grid")
     if "subject_mode" in parts:
@@ -1283,7 +1311,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
             save(fig, "time_mode")
         else:
             fig, _, significance = plot_evolving_mode(
-                time_mode,
+                list(time_mode),
                 list(saved.timepoints),
                 subjects,
                 subject_info,
@@ -1292,6 +1320,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
                 min_group_n=options.min_group_n,
                 significance_alpha=options.alpha,
                 subject_mode=saved.subject_mode,
+                negligible_atol=options.min_subject_coefficient,
             )
             save(fig, "evolving_mode")
             significance.to_csv(

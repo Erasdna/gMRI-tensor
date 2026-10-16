@@ -4,6 +4,7 @@
 # SPDX-License-Identifier:    MIT
 import importlib.metadata
 
+from . import _third_party_warnings  # noqa: F401
 from .decomposition import CMFModel
 from .decomposition import compute_CMF_decomposition
 from .decomposition import compute_CP_decomposition

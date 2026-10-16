@@ -123,6 +123,10 @@ class PARAFAC2Model:
     only up to an orthogonal rotation (`Delta -> Q Delta` with `P_i -> P_i
     Q.T` leaves the model unchanged), so it must never be compared across
     fits.
+
+    `weights` are always ones: no fit is normalised, so the scale stays in
+    the factors. Plotting and post-processing normalise (`scale_mode`,
+    `model_io.component_weights`).
     """
 
     weights: torch.Tensor
@@ -147,7 +151,7 @@ class CMFModel:
     subject's amplitude. `subject_mode` is derived, not fitted:
     `subject_mode[i, r]` is the RMS of `evolving_states[i][:, r]` over that
     subject's time points, so it compares subjects scanned a different number
-    of times.
+    of times. `weights` are always ones, as for `PARAFAC2Model`.
     """
 
     weights: torch.Tensor
@@ -265,7 +269,6 @@ def compute_CP_decomposition(
     init: str = "random",
     CP_verbose_level: int = 0,
     CP_tolerance: float | None = None,
-    normalize_factors: bool = False,
     allow_nan_imputation: bool = False,
     non_negative: bool = True,
 ):
@@ -278,7 +281,8 @@ def compute_CP_decomposition(
 
     `non_negative` defaults to True, appropriate for a tracer signal that is
     physically non-negative. `CP_tolerance=None` uses TensorLy's own default
-    `tol` for the chosen solver.
+    `tol` for the chosen solver. The factors are not normalised, so the
+    weights are ones (see `PARAFAC2Model`).
     """
     mask = None
     if allow_nan_imputation:
@@ -309,7 +313,6 @@ def compute_CP_decomposition(
         random_state=random_state,
         verbose=CP_verbose_level,
         init=init,
-        normalize_factors=normalize_factors,
         mask=mask,
     )
     if len(errors) > CP_max_iter - 1:
@@ -449,7 +452,11 @@ def _zero_negligible_loadings(
     restores it to full amplitude as a mirrored curve.
 
     Scaled per component rather than absolutely, so it adapts to however the
-    fit distributed scale between the modes.
+    fit distributed scale between the modes. This only removes residue,
+    relative to its own column (sign safety). Whether a subject expresses a
+    component at all is decided at plot time, by the absolute
+    `model_io.NEGLIGIBLE_SUBJECT_WEIGHT` (`--min-subject-coefficient`): a
+    column that is small throughout keeps its largest entries here.
     """
     if rtol <= 0:
         return factor
@@ -465,7 +472,8 @@ def _zero_negligible_evolving(
 
     Scaled per component against the largest value over *all* subjects, not
     each subject's own maximum -- otherwise a subject whose whole time course
-    is residue would be rescaled against its own noise and kept.
+    is residue would be rescaled against its own noise and kept. Residue
+    cleanup only, as `_zero_negligible_loadings`.
     """
     if rtol <= 0 or not evolving_states:
         return evolving_states
@@ -506,46 +514,6 @@ def _cross_product_factor(evolving_states: list[torch.Tensor]) -> torch.Tensor:
         _evolving_cross_product(evolving_states),
     )
     return (eigenvectors * torch.sqrt(eigenvalues.clamp(min=0.0))).T
-
-
-def _normalize_parafac2_factors(
-    weights: torch.Tensor,
-    subject_mode: torch.Tensor,
-    evolving_states: list[torch.Tensor],
-    label_mode: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, list[torch.Tensor], torch.Tensor]:
-    """Scale each mode's components to unit norm, folding scale into `weights`.
-
-    The evolving mode needs one scalar per component shared by **every**
-    subject, not a per-subject column norm. Normalizing each `B_i`
-    independently would destroy `B_i.T @ B_i = Phi`, which is the PARAFAC2
-    constraint itself -- and silently corrupt any replicability comparison
-    built on it. `sqrt(diag(Phi))` is the shared per-component norm.
-    """
-    scaled_weights = weights.clone()
-    scaled = []
-    for factor in (subject_mode, label_mode):
-        norms = torch.linalg.norm(factor, dim=0)
-        safe = torch.where(norms > 0, norms, torch.ones_like(norms))
-        scaled.append(factor / safe)
-        scaled_weights = scaled_weights * safe
-
-    evolving_norms = torch.sqrt(
-        torch.diagonal(_evolving_cross_product(evolving_states)).clamp(min=0.0),
-    )
-    safe_evolving = torch.where(
-        evolving_norms > 0,
-        evolving_norms,
-        torch.ones_like(evolving_norms),
-    )
-    scaled_weights = scaled_weights * safe_evolving
-
-    return (
-        scaled_weights,
-        scaled[0],
-        [B / safe_evolving for B in evolving_states],
-        scaled[1],
-    )
 
 
 def _as_optional_bool(value: Any) -> bool | None:
@@ -733,7 +701,6 @@ def _compute_PARAFAC2_matcouply(
     init: str,
     verbose_level: int,
     tolerance: float | None,
-    normalize_factors: bool,
     nn_modes: tuple[int, ...] | None,
     aoadmm_options: dict[str, Any] | None,
     aoadmm_loss_tolerance: float | None,
@@ -778,8 +745,8 @@ def _compute_PARAFAC2_matcouply(
             return_admm_vars=True,
             **options,
         )
-        # matcouply leaves `weights` as None, distributing scale among the
-        # factors; synthesise ones so the contract matches TensorLy's.
+        # matcouply leaves `weights` as None, keeping the scale in the
+        # factors; the weights are ones, as for every fit here.
         _, (A, evolving_states, C) = cmf
         evolving_states = list(evolving_states)
         # A negligible entry means "not expressed"; see
@@ -793,16 +760,8 @@ def _compute_PARAFAC2_matcouply(
                 evolving_states,
                 negligible_rtol,
             )
-        weights = torch.ones(rank, dtype=A.dtype, device=A.device)
-        if normalize_factors:
-            weights, A, evolving_states, C = _normalize_parafac2_factors(
-                weights,
-                A,
-                evolving_states,
-                C,
-            )
         result = PARAFAC2Model(
-            weights=weights,
+            weights=torch.ones(rank, dtype=A.dtype, device=A.device),
             subject_mode=A,
             evolving_states=list(evolving_states),
             label_mode=C,
@@ -831,7 +790,6 @@ def _compute_PARAFAC2_tensorly(
     init: str,
     verbose_level: int,
     tolerance: float | None,
-    normalize_factors: bool,
     nn_modes: tuple[int, ...] | None,
     return_projections: bool,
 ) -> tuple[PARAFAC2Model, list[torch.Tensor], PARAFAC2Diagnostics]:
@@ -852,7 +810,6 @@ def _compute_PARAFAC2_tensorly(
         random_state=random_state,
         verbose=verbose_level,
         init=init,
-        normalize_factors=normalize_factors,
         nn_modes=list(nn_modes) if nn_modes else None,
     )
     if len(errors) > max_iter - 1:
@@ -895,7 +852,6 @@ def compute_PARAFAC2_decomposition(
     init: str = "random",
     PARAFAC2_verbose_level: int = 0,
     PARAFAC2_tolerance: float | None = None,
-    normalize_factors: bool = False,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = "auto",
     solver: PARAFAC2Solver = "tensorly",
     aoadmm_options: dict[str, Any] | None = None,
@@ -1009,7 +965,6 @@ def compute_PARAFAC2_decomposition(
             init=init,
             verbose_level=PARAFAC2_verbose_level,
             tolerance=PARAFAC2_tolerance,
-            normalize_factors=normalize_factors,
             nn_modes=resolved_nn_modes,
             aoadmm_options=aoadmm_options,
             aoadmm_loss_tolerance=aoadmm_loss_tolerance,
@@ -1032,7 +987,6 @@ def compute_PARAFAC2_decomposition(
             init=init,
             verbose_level=PARAFAC2_verbose_level,
             tolerance=PARAFAC2_tolerance,
-            normalize_factors=normalize_factors,
             nn_modes=resolved_nn_modes,
             return_projections=return_projections,
         )
@@ -1075,7 +1029,6 @@ def compute_CMF_decomposition(
     init: str = "random",
     CMF_verbose_level: int = 0,
     CMF_tolerance: float | None = None,
-    normalize_factors: bool = False,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = "auto",
     aoadmm_options: dict[str, Any] | None = None,
     aoadmm_loss_tolerance: float | None = None,
@@ -1101,9 +1054,7 @@ def compute_CMF_decomposition(
     `_AOADMM_PASSTHROUGH_OPTIONS`); unlike the PARAFAC2 wrapper none are set
     here, so matcouply's own defaults apply. Tolerances work as for the
     matcouply PARAFAC2 solver (see `compute_PARAFAC2_decomposition`), with
-    `CMF_tolerance` in place of `PARAFAC2_tolerance`. `normalize_factors`
-    scales `C`'s components to unit norm and moves that scale into every
-    `B_i`, so the subject amplitudes stay comparable.
+    `CMF_tolerance` in place of `PARAFAC2_tolerance`.
 
     There is no degeneracy check: the PARAFAC2 one relies on the constraint
     making `B_i.T @ B_i` the same for every subject.
@@ -1173,11 +1124,6 @@ def compute_CMF_decomposition(
                 evolving_states,
                 negligible_rtol,
             )
-        if normalize_factors:
-            norms = torch.linalg.norm(C, dim=0)
-            safe = torch.where(norms > 0, norms, torch.ones_like(norms))
-            C = C / safe
-            evolving_states = [B * safe for B in evolving_states]
         result = CMFModel(
             weights=torch.ones(rank, dtype=C.dtype, device=C.device),
             subject_mode=_subject_amplitudes(evolving_states),
@@ -1279,7 +1225,6 @@ def _compute_kwargs(
             "CP_max_iter": resolved["max_iter"],
             "CP_verbose_level": resolved["verbose_level"],
             "CP_tolerance": resolved["tolerance"],
-            "normalize_factors": resolved["normalize"],
             "allow_nan_imputation": resolved["allow_nan_imputation"],
             "non_negative": resolved["non_negative"],
         }
@@ -1289,7 +1234,6 @@ def _compute_kwargs(
             "CMF_max_iter": resolved["max_iter"],
             "CMF_verbose_level": resolved["verbose_level"],
             "CMF_tolerance": resolved["tolerance"],
-            "normalize_factors": resolved["normalize"],
             "nn_modes": resolved["nn_modes"],
             "aoadmm_options": resolved["aoadmm_options"],
             "aoadmm_loss_tolerance": resolved["aoadmm_loss_tolerance"],
@@ -1301,7 +1245,6 @@ def _compute_kwargs(
         "PARAFAC2_max_iter": resolved["max_iter"],
         "PARAFAC2_verbose_level": resolved["verbose_level"],
         "PARAFAC2_tolerance": resolved["tolerance"],
-        "normalize_factors": resolved["normalize"],
         "nn_modes": resolved["nn_modes"],
         "solver": resolved["solver"],
         "aoadmm_options": resolved["aoadmm_options"],
@@ -1734,7 +1677,6 @@ def run_CP_decomposition_repeated(
     verbose_level: int = 0,
     tolerance: float | None = None,
     progress_bar: bool = True,
-    normalize: bool = False,
     allow_nan_imputation: bool = False,
     non_negative: bool = True,
     restart_procs: int = 1,
@@ -1758,7 +1700,6 @@ def run_CP_decomposition_repeated(
             "max_iter": max_iter,
             "verbose_level": verbose_level,
             "tolerance": tolerance,
-            "normalize": normalize,
             "allow_nan_imputation": allow_nan_imputation,
             "non_negative": non_negative,
         },
@@ -1991,7 +1932,6 @@ def run_PARAFAC2_decomposition_repeated(
     verbose_level: int = ...,
     tolerance: float | None = ...,
     progress_bar: bool = ...,
-    normalize: bool = ...,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = ...,
     restart_procs: int = ...,
     solver: PARAFAC2Solver = ...,
@@ -2016,7 +1956,6 @@ def run_PARAFAC2_decomposition_repeated(
     verbose_level: int = ...,
     tolerance: float | None = ...,
     progress_bar: bool = ...,
-    normalize: bool = ...,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = ...,
     restart_procs: int = ...,
     solver: PARAFAC2Solver = ...,
@@ -2041,7 +1980,6 @@ def run_PARAFAC2_decomposition_repeated(
     verbose_level: int = 0,
     tolerance: float | None = None,
     progress_bar: bool = True,
-    normalize: bool = False,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = "auto",
     restart_procs: int = 1,
     solver: PARAFAC2Solver = "tensorly",
@@ -2096,7 +2034,6 @@ def run_PARAFAC2_decomposition_repeated(
             "max_iter": max_iter,
             "verbose_level": verbose_level,
             "tolerance": tolerance,
-            "normalize": normalize,
             "nn_modes": nn_modes,
             "solver": solver,
             "aoadmm_options": aoadmm_options,
@@ -2149,7 +2086,6 @@ def run_CMF_decomposition_repeated(
     verbose_level: int = ...,
     tolerance: float | None = ...,
     progress_bar: bool = ...,
-    normalize: bool = ...,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = ...,
     restart_procs: int = ...,
     aoadmm_options: dict[str, Any] | None = ...,
@@ -2172,7 +2108,6 @@ def run_CMF_decomposition_repeated(
     verbose_level: int = ...,
     tolerance: float | None = ...,
     progress_bar: bool = ...,
-    normalize: bool = ...,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = ...,
     restart_procs: int = ...,
     aoadmm_options: dict[str, Any] | None = ...,
@@ -2195,7 +2130,6 @@ def run_CMF_decomposition_repeated(
     verbose_level: int = 0,
     tolerance: float | None = None,
     progress_bar: bool = True,
-    normalize: bool = False,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = "auto",
     restart_procs: int = 1,
     aoadmm_options: dict[str, Any] | None = None,
@@ -2229,7 +2163,6 @@ def run_CMF_decomposition_repeated(
             "max_iter": max_iter,
             "verbose_level": verbose_level,
             "tolerance": tolerance,
-            "normalize": normalize,
             "nn_modes": nn_modes,
             "aoadmm_options": aoadmm_options,
             "aoadmm_loss_tolerance": aoadmm_loss_tolerance,

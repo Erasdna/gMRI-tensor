@@ -269,6 +269,24 @@ def test_compute_fms_ignores_permutation_and_scaling():
     )
 
 
+def test_compute_fms_is_invariant_to_how_components_are_scaled() -> None:
+    """Normalising a fit (one scalar per component and mode, moved into the
+    weights) leaves its FMS unchanged: tlviz normalises the columns itself,
+    and `consider_weights=False` ignores the weights. The stacked evolving
+    mode of PARAFAC2/CMF is rescaled the same way, one scalar per component."""
+    weights, factors = _cp_fit()
+    rng = np.random.default_rng(1)
+    scales = [rng.uniform(0.1, 10.0, 3) for _ in factors]
+    rescaled = [factor * scale for factor, scale in zip(factors, scales)]
+    new_weights = weights / np.prod(scales, axis=0)
+    assert compute_FMS((weights, factors), (new_weights, rescaled)) == pytest.approx(
+        1.0,
+    )
+    assert compute_FMS((weights, factors), (weights * 1e6, factors)) == pytest.approx(
+        1.0,
+    )
+
+
 def test_compute_fms_skip_mode_ignores_that_mode():
     weights, factors = _cp_fit(0)
     _, other = _cp_fit(1)

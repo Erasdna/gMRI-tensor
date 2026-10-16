@@ -19,6 +19,7 @@ from typing import Any
 from gMRItensor import pipeline
 from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.group_statistics import AGGREGATES
+from gMRItensor.model_io import NEGLIGIBLE_SUBJECT_WEIGHT
 from gMRItensor.options import DECOMPOSITION_PARTS
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
@@ -559,6 +560,15 @@ def _add_plot(commands: Any) -> None:
         default=2,
         help="subjects per group to test (default: 2)",
     )
+    decomposition.add_argument(
+        "--min-subject-coefficient",
+        type=float,
+        default=NEGLIGIBLE_SUBJECT_WEIGHT,
+        metavar="C",
+        help="PARAFAC2/CMF: drop a subject from a component's time curves, "
+        "ribbon and tests when |subject mode| < C (default: %(default)g; 0 "
+        "drops only loadings the fit set to zero; ignored for CP)",
+    )
     _output_options(decomposition)
 
     group_maps = kinds.add_parser(
@@ -884,6 +894,7 @@ def _run_plot(args: argparse.Namespace) -> None:
             subject_prefix=args.subject_prefix,
             alpha=args.alpha,
             min_group_n=args.min_group_n,
+            min_subject_coefficient=args.min_subject_coefficient,
             page_width=_page_width(args.page_width),
             formats=tuple(args.formats),
             dpi=args.dpi,

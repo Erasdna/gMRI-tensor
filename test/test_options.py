@@ -83,6 +83,26 @@ def test_unknown_fit_option_fails_before_fitting(method: str) -> None:
         _decomposition(method=method, fit=FitOptions(extra={"bogus": 1}))
 
 
+@pytest.mark.parametrize("method", ["cp", "parafac2", "cmf"])
+def test_fits_cannot_be_normalized(method: str) -> None:
+    """Fits keep the scale in the factors (weights are ones) for decompose
+    and replicability alike; plotting does the normalising."""
+    fit = FitOptions(extra={"normalize": True})
+    with pytest.raises(ValueError, match="normalize"):
+        _decomposition(method=method, fit=fit)
+    with pytest.raises(ValueError, match="normalize"):
+        ReplicabilityOptions(
+            input=Path("x.parquet"),
+            output_dir=Path("out"),
+            method=method,  # type: ignore[arg-type]
+            ranks=(2,),
+            engine="cv",
+            repeats=1,
+            splits=3,
+            fit=fit,
+        )
+
+
 @pytest.mark.parametrize(
     "make, match",
     [
@@ -244,6 +264,10 @@ def test_decomposition_plot_options_split_subject_variables(tmp_path: Path) -> N
     assert options.numerical == ("age",)
     with pytest.raises(ValueError, match="min_panel_width"):
         DecompositionPlotOptions(**common, min_panel_width=0.0)
+    assert DecompositionPlotOptions(**common).min_subject_coefficient == 1e-6
+    assert DecompositionPlotOptions(**common, min_subject_coefficient=0.0)
+    with pytest.raises(ValueError, match="min_subject_coefficient"):
+        DecompositionPlotOptions(**common, min_subject_coefficient=-1e-6)
 
 
 @pytest.mark.parametrize("prefix", ["a/b", "a\\b", ".hidden"])

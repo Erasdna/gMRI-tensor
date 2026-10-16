@@ -162,12 +162,25 @@ def test_cli_plot_subject_mode_variables(
     ]
 
     variables = ["--categorical", "sex", "apoe", "--numerical", "age"]
-    assert _run([*plot, *variables, "--min-panel-width", 2]) == 0
+    assert (
+        _run(
+            [
+                *plot,
+                *variables,
+                "--min-panel-width",
+                2,
+                "--min-subject-coefficient",
+                1e-3,
+            ],
+        )
+        == 0
+    )
     figure = results / "figures" / "decomposition" / "parafac2_rank_1__subject_mode.png"
     assert figure.exists()
     provenance = (results / "plot_decomposition.json").read_text()
     assert '"categorical": [\n      "sex",\n      "apoe"\n    ]' in provenance
     assert '"min_panel_width": 2.0' in provenance
+    assert '"min_subject_coefficient": 0.001' in provenance
 
     assert _run([*plot, *variables, "--subject-prefix", "sleep"]) == 0
     assert (figure.parent / "sleep_parafac2_rank_1__subject_mode.png").exists()
@@ -486,3 +499,21 @@ def test_cli_help(
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
     assert all(word in out for word in expected)
+
+
+def test_cli_rejects_normalized_fits(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _preprocess(synthetic_study)
+    code = _run(
+        [
+            "decompose",
+            "run",
+            *_fit_args(results, "normalized"),
+            "--fit-option",
+            "normalize=true",
+        ],
+    )
+    assert code == 2
+    assert "normalize" in capsys.readouterr().err

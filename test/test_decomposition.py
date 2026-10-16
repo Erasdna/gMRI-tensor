@@ -2,6 +2,7 @@ import dataclasses
 import inspect
 import os
 import warnings
+from typing import Any
 
 import numpy as np
 import pytest
@@ -153,32 +154,6 @@ def test_PARAFAC2_cpu():
 
 def test_PARAFAC2_gpu():
     run_PARAFAC2("TRUE")
-
-
-def test_PARAFAC2_normalize_factors():
-    # `normalize` wasn't previously exposed by run_PARAFAC2_decomposition_repeated
-    # even though compute_PARAFAC2_decomposition already supported it -- with
-    # normalize=True, every factor matrix's columns should come out unit-norm.
-    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
-    device = setup_backend()
-
-    slices = make_parafac2_slices(device)
-    model, _ = run_PARAFAC2_decomposition_repeated(
-        slices,
-        rank=2,
-        max_iter=200,
-        init_repeats=3,
-        device=device,
-        progress_bar=False,
-        normalize=True,
-    )
-    for factor in (model.subject_mode, model.label_mode):
-        norms = torch.linalg.norm(factor, dim=0)
-        assert torch.allclose(norms, torch.ones_like(norms), atol=1e-4)
-    # The evolving mode shares one scalar per component across subjects, so
-    # the unit norm lives on the cross-product, not each B_i's columns.
-    gram = sum(b.T @ b for b in model.evolving_states) / len(model.evolving_states)
-    assert torch.allclose(torch.diagonal(gram), torch.ones(2), atol=1e-3)
 
 
 def test_PARAFAC2_no_convergence_raises():
@@ -481,30 +456,6 @@ def test_PARAFAC2_matcouply_restart_procs_parallel_succeeds():
     assert torch.isfinite(error)
 
 
-def test_PARAFAC2_matcouply_normalize_factors():
-    # matcouply has no normalize option of its own, so this is synthesised
-    # from the orthonormality of the projections -- mirrors
-    # test_PARAFAC2_normalize_factors for the TensorLy path.
-    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
-    device = setup_backend()
-    slices = make_parafac2_slices(device)
-
-    model, _ = run_PARAFAC2_decomposition_repeated(
-        slices,
-        rank=2,
-        max_iter=500,
-        init_repeats=3,
-        device=device,
-        progress_bar=False,
-        solver="matcouply",
-        normalize=True,
-    )
-    for factor in (model.subject_mode, model.label_mode):
-        norms = torch.linalg.norm(factor, dim=0)
-        assert torch.allclose(norms, torch.ones_like(norms), atol=1e-4)
-    assert not torch.allclose(model.weights, torch.ones_like(model.weights))
-
-
 @pytest.mark.parametrize("solver", SOLVERS)
 def test_PARAFAC2_return_projections_opt_in(solver):
     # The Kiers form is available on request but never by default: rebuilding
@@ -786,7 +737,7 @@ def test_tolerances_default_to_the_solvers_own(monkeypatch):
     seen = {}
 
     def spy(tensor, **kwargs):
-        seen[kwargs["normalize_factors"]] = kwargs["tol"]
+        seen["tol"] = kwargs["tol"]
         raise ConvergenceError("stop")
 
     from gMRItensor import decomposition
@@ -800,7 +751,7 @@ def test_tolerances_default_to_the_solvers_own(monkeypatch):
         monkeypatch.setattr(decomposition, name, spy)
         with pytest.raises(ConvergenceError):
             compute_CP_decomposition(tensor, 2, non_negative=non_negative)
-        assert seen.pop(False) == _library_tol(library)
+        assert seen.pop("tol") == _library_tol(library)
 
 
 def test_PARAFAC2_matcouply_keeps_iteration_limit_fits_without_tolerance():
@@ -1463,32 +1414,6 @@ def test_CMF_shape_contract():
     assert diagnostics.loss_tolerance == _library_tol(cmf_aoadmm)
 
 
-def test_CMF_normalize_moves_the_scale_into_the_time_courses():
-    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
-    device = setup_backend()
-    slices = make_cmf_slices(device)
-
-    plain, *_ = compute_CMF_decomposition(slices, 2, CMF_max_iter=5000)
-    normalized, *_ = compute_CMF_decomposition(
-        slices,
-        2,
-        CMF_max_iter=5000,
-        normalize_factors=True,
-    )
-
-    torch.testing.assert_close(
-        torch.linalg.norm(normalized.label_mode, dim=0),
-        torch.ones(2, dtype=normalized.label_mode.dtype),
-    )
-    for B_plain, B_normalized in zip(plain.evolving_states, normalized.evolving_states):
-        torch.testing.assert_close(
-            B_normalized @ normalized.label_mode.T,
-            B_plain @ plain.label_mode.T,
-            rtol=1e-4,
-            atol=1e-5,
-        )
-
-
 def test_CMF_invalid_mode_names_the_method():
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     slices = make_cmf_slices(setup_backend())
@@ -1563,3 +1488,53 @@ def test_run_CMF_restarts_in_parallel_match_sequential():
     assert isinstance(sequential, CMFModel)
     torch.testing.assert_close(sequential.label_mode, parallel.label_mode)
     torch.testing.assert_close(sequential_error, parallel_error)
+
+
+def _fit_weights(method: str, solver: str | None, device: torch.device) -> torch.Tensor:
+    """The weights of a small fit by `method` (and PARAFAC2 `solver`)."""
+    common: dict[str, Any] = dict(
+        rank=2,
+        init_repeats=2,
+        device=device,
+        progress_bar=False,
+    )
+    if method == "CP":
+        weights, _, _ = run_CP_decomposition_repeated(
+            make_low_rank_tensor(),
+            max_iter=500,
+            **common,
+        )
+        return weights
+    if method == "CMF":
+        model, _ = run_CMF_decomposition_repeated(make_cmf_slices(device), **common)
+        return model.weights
+    # Any: the overloads key on a literal solver, here a parameter.
+    fit: Any = run_PARAFAC2_decomposition_repeated
+    model, _ = fit(make_parafac2_slices(device), max_iter=500, solver=solver, **common)
+    return model.weights
+
+
+@pytest.mark.parametrize(
+    ("method", "solver"),
+    [("CP", None), ("PARAFAC2", "tensorly"), ("PARAFAC2", "matcouply"), ("CMF", None)],
+)
+def test_fits_are_never_normalized(method: str, solver: str | None) -> None:
+    """The scale stays in the factors: weights are exactly one, and plotting
+    and post-processing do any normalising."""
+    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+    device = setup_backend()
+    weights = _fit_weights(method, solver, device)
+    torch.testing.assert_close(weights.float(), torch.ones(2), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(
+    "runner",
+    [
+        run_CP_decomposition_repeated,
+        run_PARAFAC2_decomposition_repeated,
+        run_CMF_decomposition_repeated,
+    ],
+)
+def test_normalize_is_not_an_option(runner: Any) -> None:
+    with pytest.raises(TypeError, match="normalize"):
+        runner(None, rank=2, normalize=True)

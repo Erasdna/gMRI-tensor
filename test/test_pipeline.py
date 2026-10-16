@@ -1,4 +1,5 @@
 import dataclasses
+import json
 from pathlib import Path
 from typing import Any
 
@@ -20,12 +21,12 @@ from gMRItensor.model_io import component_weights
 from gMRItensor.model_io import load_decomposition
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import sort_components
-from gMRItensor.model_io import subject_time_courses
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
 from gMRItensor.options import DistributedOptions
 from gMRItensor.options import FitOptions
 from gMRItensor.options import GroupMapPlotOptions
+from gMRItensor.options import options_to_json
 from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import StatisticsPlotOptions
@@ -34,6 +35,7 @@ from gMRItensor.pipeline import collect_decomposition
 from gMRItensor.pipeline import collect_replicability
 from gMRItensor.pipeline import format_significance_summary
 from gMRItensor.pipeline import group_averages
+from gMRItensor.pipeline import load_plan
 from gMRItensor.pipeline import plan_decomposition
 from gMRItensor.pipeline import plan_replicability_jobs
 from gMRItensor.pipeline import read_manifest
@@ -1370,14 +1372,48 @@ def test_plots_sort_models_saved_unsorted(
 
     expected = sort_components(flipped)
     np.testing.assert_array_equal(drawn["subject_mode"], expected.subject_mode)
-    # PARAFAC2's time courses are scaled by the subject weights.
-    for got, want in zip(drawn["evolving_states"], subject_time_courses(expected)):
+    # Each subject's own B_i: the subject weights only decide which are drawn.
+    assert expected.evolving_states is not None
+    for got, want in zip(drawn["evolving_states"], expected.evolving_states):
         np.testing.assert_array_equal(got, want)
     np.testing.assert_array_equal(
         drawn["evolving_subject_mode"],
         expected.subject_mode,
     )
     np.testing.assert_array_equal(drawn["subject_mode"], saved.subject_mode)
+
+
+def test_plots_share_the_subject_coefficient_cutoff(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The evolving mode and the mode grid drop the same subjects."""
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
+    seen: dict[str, float] = {}
+
+    def fake_mode_grid(*args: Any, **kwargs: Any) -> Any:
+        seen["mode_grid"] = kwargs["negligible_atol"]
+        return plt.figure(), None
+
+    def fake_evolving_mode(*args: Any, **kwargs: Any) -> Any:
+        seen["time"] = kwargs["negligible_atol"]
+        return plt.figure(), None, pd.DataFrame()
+
+    monkeypatch.setattr(pipeline, "plot_mode_grid", fake_mode_grid)
+    monkeypatch.setattr(pipeline, "plot_evolving_mode", fake_evolving_mode)
+    run_decomposition_plots(
+        plot_options(
+            synthetic_study,
+            model,
+            parts=("mode_grid", "time"),
+            segmentation=synthetic_study.root / "images" / "seg.nii",
+            min_subject_coefficient=1e-3,
+        ),
+    )
+
+    assert seen == {"mode_grid": 1e-3, "time": 1e-3}
 
 
 def test_subject_prefix_renames_only_the_subject_mode_figure(
@@ -1466,6 +1502,42 @@ def test_plots_leave_out_subjects_without_a_group(
     }
 
 
+@pytest.mark.parametrize("method", ["cp", "parafac2", "cmf"])
+def test_plots_report_component_weights(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    """The amplitude of each component, once its modes are normalised, of
+    the full fit: leaving out subjects without a group does not change it."""
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    fit = CMF_FIT if method == "cmf" else QUICK_FIT
+    (model,) = run_decomposition(
+        decomposition_options(synthetic_study, method=method, ranks=(2,), fit=fit),
+    )
+    info = pd.read_csv(synthetic_study.subject_info, dtype={"subjects": str})
+    gaps = _subject_info_with_gaps(
+        synthetic_study,
+        drop=[info["subjects"][0]],
+        blank=[],
+    )
+
+    run_decomposition_plots(
+        plot_options(synthetic_study, model, subject_info=gaps, parts=("time",)),
+    )
+
+    table = pd.read_csv(
+        _figures(synthetic_study) / f"{method}_rank_2__component_weights.csv",
+    )
+    expected = component_weights(load_decomposition(model))
+    assert list(table.columns) == ["component", "weight", "relative_weight"]
+    assert list(table["component"]) == [1, 2]
+    np.testing.assert_allclose(table["weight"], expected, rtol=1e-6)
+    np.testing.assert_allclose(table["relative_weight"], expected / expected.sum())
+    assert table["weight"].is_monotonic_decreasing
+
+
 def test_plots_need_two_subjects_per_group(
     synthetic_study: Any,
     monkeypatch: pytest.MonkeyPatch,
@@ -1490,3 +1562,27 @@ def test_plots_need_two_subjects_per_group(
                 parts=("subject_mode",),
             ),
         )
+
+
+def test_old_plans_with_a_normalize_option_ask_to_plan_again(tmp_path: Path) -> None:
+    """Plans saved before fits stopped normalising hold `normalize` in
+    `fit.extra`; they now fail with the usual re-plan hint."""
+    options = DecompositionOptions(
+        input=Path("x.parquet"),
+        output_dir=tmp_path,
+        method="parafac2",
+        ranks=(2,),
+    )
+    record = options_to_json(options)
+    record["options"]["fit"]["extra"] = {"normalize": False}
+    (tmp_path / "plan.json").write_text(json.dumps(record))
+
+    with pytest.raises(ValueError, match="run `plan` again"):
+        load_plan(tmp_path, DecompositionOptions)
+
+
+def test_component_weights_table_handles_an_all_zero_fit() -> None:
+    table = pipeline._component_weights_table(np.zeros(2))
+    assert list(table["relative_weight"]) == [0.0, 0.0]
+    table = pipeline._component_weights_table(np.array([3.0, 1.0]))
+    assert list(table["relative_weight"]) == [0.75, 0.25]

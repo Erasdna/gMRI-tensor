@@ -16,6 +16,7 @@ from gMRItensor.plotting.utils import get_color_palette
 from gMRItensor.plotting.utils import plot_group_ribbons
 from gMRItensor.plotting.utils import plot_subject_curves
 from gMRItensor.plotting.utils import scale_mode
+from matplotlib.lines import Line2D
 
 plt.style.use(["science", "no-latex"])
 matplotlib.use("Agg")
@@ -53,52 +54,85 @@ def _build_long_evolving_dataframe(
     `group`, `timepoint`, `component`, `value`. Timepoints keep their raw
     values rather than being binned, so a later `groupby("timepoint")`
     aligns ragged per-subject timepoints by exact value. `negligible`, a
-    `(n_subjects, n_components)` mask, leaves out those subjects' rows for
-    those components.
+    `(n_subjects, n_components)` mask (`_negligible_mask`), leaves out those
+    subjects' rows for those components.
     """
     component_columns = [str(c) for c in range(n_components)]
     frames = []
-    for i, (factor, timepoints, subject, group) in enumerate(
+    for position, (factor, timepoints, subject, group) in enumerate(
         zip(scaled_factors, timepoints_per_subject, subjects, groups),
     ):
-        values = np.asarray(factor[:, :n_components], dtype=float)
-        if negligible is not None:
-            # NaN marks the rows to leave out after the melt.
-            values = np.where(negligible[i, :n_components], np.nan, values)
-        frame = pd.DataFrame(values, columns=component_columns)
+        frame = pd.DataFrame(factor[:, :n_components], columns=component_columns)
         frame["subject"] = subject
         frame["group"] = group
         frame["timepoint"] = np.asarray(timepoints)
+        frame["_position"] = position
         frames.append(frame)
 
     long_df = pd.concat(frames, ignore_index=True).melt(
-        id_vars=["subject", "group", "timepoint"],
+        id_vars=["subject", "group", "timepoint", "_position"],
         value_vars=component_columns,
         var_name="component",
         value_name="value",
     )
     long_df["component"] = long_df["component"].astype(int)
     if negligible is not None:
-        long_df = long_df.dropna(subset=["value"]).reset_index(drop=True)
-    return long_df
+        dropped = negligible[long_df["_position"], long_df["component"]]
+        long_df = long_df[~dropped].reset_index(drop=True)
+    return long_df.drop(columns="_position")
 
 
-def _mask_negligible(
-    scaled_factors: list[np.ndarray],
+def _negligible_mask(
     subject_mode: np.ndarray | None,
+    n_subjects: int,
+    n_components: int,
     atol: float,
-) -> tuple[list[np.ndarray], np.ndarray | None]:
-    """Zero the components a subject does not express (`negligible_subjects`
-    of `subject_mode`); returns the factors and the mask, None without
-    `subject_mode`."""
+) -> np.ndarray | None:
+    """`(n_subjects, n_components)` mask of the components each subject does
+    not express (`negligible_subjects`), or None without `subject_mode`.
+    Raises `ValueError` unless `subject_mode` has a row per subject and a
+    column per component."""
     if subject_mode is None:
-        return scaled_factors, None
-    negligible = negligible_subjects(subject_mode, atol)
-    masked = [
-        np.where(flags[None, : factor.shape[1]], 0.0, factor)
-        for factor, flags in zip(scaled_factors, negligible)
+        return None
+    subject_mode = np.asarray(subject_mode)
+    if subject_mode.ndim != 2 or subject_mode.shape[0] != n_subjects:
+        raise ValueError(
+            f"subject_mode must have one row per subject ({n_subjects}), got "
+            f"shape {subject_mode.shape}",
+        )
+    if subject_mode.shape[1] < n_components:
+        raise ValueError(
+            f"subject_mode has {subject_mode.shape[1]} components, the evolving "
+            f"mode {n_components}",
+        )
+    return negligible_subjects(subject_mode[:, :n_components], atol)
+
+
+def _all_timepoints(timepoints_per_subject: list[np.ndarray]) -> list:
+    """Every subject's time points, sorted: the x-ticks of each row, so a
+    time point scanned only by a dropped subject keeps its tick."""
+    return sorted(set(np.concatenate([np.asarray(t) for t in timepoints_per_subject])))
+
+
+def _group_legend(
+    fig: matplotlib.figure.Figure,
+    categories: list[str],
+    color_by_group: dict[str, str],
+) -> None:
+    """One group legend above all panels, as in `roi_evolution`. Built from
+    the colours rather than the drawn ribbons, so it is there even when no
+    subject expresses the first component."""
+    handles = [
+        Line2D([], [], color=color_by_group[c], marker="o", markersize=3)
+        for c in categories
     ]
-    return masked, negligible
+    fig.legend(
+        handles,
+        [str(c) for c in categories],
+        loc="outside upper center",
+        ncols=len(categories),
+        frameon=False,
+    )
 
 
 def plot_evolving_mode(
@@ -126,9 +160,10 @@ def plot_evolving_mode(
     Parameters
     ----------
     evolving_factors : list[np.ndarray]
-        Per-subject `(n_timepoints_i, rank)` time courses, e.g. from
-        `model_io.subject_time_courses` (PARAFAC2's scaled by the subject
-        weights).
+        Per-subject `(n_timepoints_i, rank)` evolving states `B_i`, e.g.
+        from `evolving_factors_to_numpy`. Each subject's columns are scaled
+        to unit norm: the curves show shape, the subject weights (see
+        `subject_mode`) only decide which are drawn.
     timepoints_per_subject : list[np.ndarray]
         Time point arrays matching `evolving_factors[i]`'s rows.
     subjects : list[str]
@@ -193,11 +228,13 @@ def plot_evolving_mode(
     color_by_group = dict(zip(categories, colors))
 
     n_components = evolving_factors[0].shape[1]
-    scaled_factors, negligible = _mask_negligible(
-        [scale_mode(factor) for factor in evolving_factors],
+    negligible = _negligible_mask(
         subject_mode,
+        len(subjects),
+        n_components,
         negligible_atol,
     )
+    scaled_factors = [scale_mode(factor) for factor in evolving_factors]
 
     long_df = _build_long_evolving_dataframe(
         scaled_factors,
@@ -236,6 +273,15 @@ def plot_evolving_mode(
         for category in categories
     }
 
+    # Dropped subjects are still drawn, as zero, in their group's column.
+    drawn_factors = scaled_factors
+    if negligible is not None:
+        drawn_factors = [
+            np.where(flags, 0.0, factor)
+            for factor, flags in zip(scaled_factors, negligible)
+        ]
+    row_timepoints = _all_timepoints(timepoints_per_subject)
+
     row_ylims = []
     for component in range(n_components):
         ribbon_stats_component = ribbon_stats.loc[
@@ -252,7 +298,7 @@ def plot_evolving_mode(
             g_min, g_max = plot_subject_curves(
                 axs[component, col],
                 [
-                    (timepoints_per_subject[i], scaled_factors[i][:, component])
+                    (timepoints_per_subject[i], drawn_factors[i][:, component])
                     for i in group_indices[category]
                 ],
                 color_by_group[category],
@@ -260,9 +306,6 @@ def plot_evolving_mode(
             row_min, row_max = min(row_min, g_min), max(row_max, g_max)
         row_ylims.append((row_min, row_max))
 
-        row_timepoints = sorted(
-            long_df.loc[long_df["component"] == component, "timepoint"].unique(),
-        )
         for ax in axs[component, :]:
             ax.set_xticks(row_timepoints)
 
@@ -271,12 +314,12 @@ def plot_evolving_mode(
             axs[component, 0].set_title(r"Mean $\pm$ SEM")
             for col, category in enumerate(categories, start=1):
                 axs[component, col].set_title(str(category))
-            axs[component, 0].legend(frameon=True, framealpha=0.9)
         if component == n_components - 1:
             for ax in axs[component, :]:
                 ax.set_xlabel("Time after injection [h]")
 
     apply_row_ylims(axs, row_ylims)
+    _group_legend(fig, categories, color_by_group)
     fig.align_titles()
 
     return fig, axs, significance

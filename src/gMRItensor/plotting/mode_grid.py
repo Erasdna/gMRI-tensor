@@ -5,8 +5,11 @@ import pandas as pd
 import scienceplots  # noqa: F401
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import summarize_groups_over_time
-from gMRItensor.model_io import negligible_subjects
+from gMRItensor.model_io import NEGLIGIBLE_SUBJECT_WEIGHT
+from gMRItensor.plotting.evolving_mode import _all_timepoints
 from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
+from gMRItensor.plotting.evolving_mode import _group_legend
+from gMRItensor.plotting.evolving_mode import _negligible_mask
 from gMRItensor.plotting.spatial_mode import _percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
@@ -46,11 +49,13 @@ def _plot_time_column_evolving(
     ribbon_stats_component: pd.DataFrame,
     categories: list[str],
     color_by_group: dict[str, str],
+    timepoints: list,
 ) -> None:
     """Draw one component of a PARAFAC2/CMF evolving mode as per-group ribbons.
 
     Same mean +/- SEM ribbon as the left column of `plot_evolving_mode`,
-    with the same 5% y-padding as `apply_row_ylims`.
+    with the same 5% y-padding as `apply_row_ylims`. `timepoints` are the
+    x-ticks.
     """
     ymin, ymax = plot_group_ribbons(
         ax,
@@ -61,7 +66,7 @@ def _plot_time_column_evolving(
     if np.isfinite(ymin) and np.isfinite(ymax):
         span = ymax - ymin if ymax > ymin else 1.0
         ax.set_ylim(ymin - 0.05 * span, ymax + 0.05 * span)
-    ax.set_xticks(sorted(ribbon_stats_component["timepoint"].unique()))
+    ax.set_xticks(timepoints)
 
 
 def plot_mode_grid(
@@ -79,6 +84,7 @@ def plot_mode_grid(
     group_variable: str,
     page_width: float = 7.0,
     share_colorbar_scaling: bool = False,
+    negligible_atol: float = NEGLIGIBLE_SUBJECT_WEIGHT,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """Plot a component-per-row grid: time, subject boxplot, and spatial mode.
 
@@ -87,13 +93,13 @@ def plot_mode_grid(
     - CP: `time_mode` is one shared `(n_timepoints, rank)` array and
       `time_points` its timepoints; drawn as a single line per component.
     - PARAFAC2/CMF: `time_mode` is a list of per-subject `(n_timepoints_i, rank)`
-      time courses (e.g. from `model_io.subject_time_courses`) and
-      `time_points` the matching list of per-subject timepoint arrays, both
-      in `subjects` order. Drawn as a per-group mean +/- SEM ribbon, as in
-      the left column of `plot_evolving_mode`, with group colors matching
-      the subject boxplot. A subject whose `subject_mode` weight is
-      negligible (`negligible_subjects`) is left out of that component's
-      ribbon.
+      evolving states `B_i` (e.g. from `evolving_factors_to_numpy`), each
+      scaled to unit norm, and `time_points` the matching list of
+      per-subject timepoint arrays, both in `subjects` order. Drawn as a
+      per-group mean +/- SEM ribbon, as in the left column of
+      `plot_evolving_mode`, with group colors matching the subject boxplot.
+      A subject whose `subject_mode` weight is below `negligible_atol` in
+      absolute value is left out of that component's ribbon.
 
     The Parenchyma/CSF columns use the same masking and percentile scaling
     as `plot_spatial_mode`. `share_colorbar_scaling` likewise mirrors that
@@ -125,8 +131,14 @@ def plot_mode_grid(
             subjects,
             groups,
             n_components,
-            negligible_subjects(subject_mode),
+            _negligible_mask(
+                subject_mode,
+                len(subjects),
+                n_components,
+                negligible_atol,
+            ),
         )
+        evolving_timepoints = _all_timepoints(time_points)
         ribbon_stats = summarize_groups_over_time(long_df, facet="component")
     else:
         scaled_time_mode = scale_mode(time_mode)
@@ -207,9 +219,8 @@ def plot_mode_grid(
                 ribbon_stats.loc[ribbon_stats["component"] == component],
                 categories,
                 color_by_group,
+                evolving_timepoints,
             )
-            if component == 0:
-                time_ax.legend(frameon=True, framealpha=0.9)
         else:
             plot_time_column_cp(time_ax, scaled_time_mode, time_points, component)
         time_ax.set_ylabel(f"Component {component+1}")
@@ -309,4 +320,6 @@ def plot_mode_grid(
                 ax_obj.set_title(title)
             fig.align_titles()
 
+    if is_evolving:
+        _group_legend(fig, categories, color_by_group)
     return fig, axs
