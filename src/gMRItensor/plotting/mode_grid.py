@@ -5,6 +5,7 @@ import pandas as pd
 import scienceplots  # noqa: F401
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import summarize_groups_over_time
+from gMRItensor.model_io import negligible_subjects
 from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
 from gMRItensor.plotting.spatial_mode import _percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
@@ -86,11 +87,13 @@ def plot_mode_grid(
     - CP: `time_mode` is one shared `(n_timepoints, rank)` array and
       `time_points` its timepoints; drawn as a single line per component.
     - PARAFAC2/CMF: `time_mode` is a list of per-subject `(n_timepoints_i, rank)`
-      evolving factors (e.g. from `evolving_factors_to_numpy`) and
+      time courses (e.g. from `model_io.subject_time_courses`) and
       `time_points` the matching list of per-subject timepoint arrays, both
       in `subjects` order. Drawn as a per-group mean +/- SEM ribbon, as in
       the left column of `plot_evolving_mode`, with group colors matching
-      the subject boxplot.
+      the subject boxplot. A subject whose `subject_mode` weight is
+      negligible (`negligible_subjects`) is left out of that component's
+      ribbon.
 
     The Parenchyma/CSF columns use the same masking and percentile scaling
     as `plot_spatial_mode`. `share_colorbar_scaling` likewise mirrors that
@@ -122,6 +125,7 @@ def plot_mode_grid(
             subjects,
             groups,
             n_components,
+            negligible_subjects(subject_mode),
         )
         ribbon_stats = summarize_groups_over_time(long_df, facet="component")
     else:

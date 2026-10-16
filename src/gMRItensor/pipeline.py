@@ -48,6 +48,7 @@ from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
 from gMRItensor.model_io import select_subjects
 from gMRItensor.model_io import sort_components
+from gMRItensor.model_io import subject_time_courses
 from gMRItensor.options import CONCENTRATION_STATISTICS
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
@@ -1244,7 +1245,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
         )
 
     is_cp = saved.method == "cp"
-    time_mode: Any = saved.time_mode if is_cp else saved.evolving_states
+    time_mode: Any = saved.time_mode if is_cp else subject_time_courses(saved)
     time_points: Any = list(saved.timepoints) if is_cp else saved.timepoints
 
     if "mode_grid" in parts and spatial is not None:
@@ -1282,7 +1283,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
             save(fig, "time_mode")
         else:
             fig, _, significance = plot_evolving_mode(
-                list(saved.evolving_states or []),
+                time_mode,
                 list(saved.timepoints),
                 subjects,
                 subject_info,
@@ -1290,6 +1291,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
                 page_width=page_width,
                 min_group_n=options.min_group_n,
                 significance_alpha=options.alpha,
+                subject_mode=saved.subject_mode,
             )
             save(fig, "evolving_mode")
             significance.to_csv(

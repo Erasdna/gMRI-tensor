@@ -710,6 +710,74 @@ def test_plot_evolving_mode_single_group():
     plt.close(fig)
 
 
+def _ribbon_means(ax: matplotlib.axes.Axes) -> dict[str, np.ndarray]:
+    """Each group's ribbon mean line, by group label."""
+    return {
+        str(line.get_label()): np.asarray(line.get_ydata()) for line in ax.get_lines()
+    }
+
+
+def test_plot_evolving_mode_draws_negligible_subject_as_zero():
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
+    subject_mode = np.ones((len(subjects), 2))
+    subject_mode[0, 0] = 5e-7  # sub-00 does not express component 1
+
+    fig, axs, _ = plot_evolving_mode(
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+        group_variable="group",
+        subject_mode=subject_mode,
+    )
+
+    # sub-00 is group A's first curve.
+    assert np.all(axs[0, 1].get_lines()[0].get_ydata() == 0)
+    assert np.any(axs[1, 1].get_lines()[0].get_ydata() != 0)
+    plt.close(fig)
+
+
+def test_plot_evolving_mode_leaves_negligible_subject_out_of_ribbon_and_tests():
+    (
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+    ) = make_evolving_factors_shared_timepoints(n_subjects_per_group=4)
+    evolving_factors = [np.hstack([f, f[::-1]]) for f in evolving_factors]
+    subject_mode = np.ones((len(subjects), 2))
+    subject_mode[0, 0] = 0.0
+
+    def plot(
+        keep: slice,
+        weights: np.ndarray,
+    ) -> tuple[list[dict[str, np.ndarray]], pd.DataFrame]:
+        fig, axs, significance = plot_evolving_mode(
+            evolving_factors[keep],
+            timepoints[keep],
+            subjects[keep],
+            subject_info,
+            group_variable="group",
+            subject_mode=weights[keep],
+        )
+        means = [_ribbon_means(axs[c, 0]) for c in range(2)]
+        plt.close(fig)
+        return means, significance
+
+    masked_means, masked = plot(slice(None), subject_mode)
+    full_means, _ = plot(slice(None), np.ones_like(subject_mode))
+    without_means, without = plot(slice(1, None), subject_mode)  # no sub-00
+
+    # Component 1 as if sub-00 were absent; component 2 keeps sub-00.
+    np.testing.assert_allclose(masked_means[0]["A"], without_means[0]["A"])
+    np.testing.assert_allclose(masked_means[1]["A"], full_means[1]["A"])
+    assert not np.allclose(without_means[1]["A"], masked_means[1]["A"])
+    pd.testing.assert_frame_equal(
+        masked[masked["component"] == 0].reset_index(drop=True),
+        without[without["component"] == 0].reset_index(drop=True),
+    )
+
+
 def test_plot_evolving_mode_ribbon_layout():
     (
         evolving_factors,
@@ -1319,6 +1387,27 @@ def test_plot_mode_grid_parafac2_ribbon_matches_boxplot_colors():
             matplotlib.colors.to_rgb(ribbon_lines[group].get_color()),
         )
     plt.close(fig)
+
+
+def test_plot_mode_grid_leaves_negligible_subject_out_of_ribbon():
+    kwargs = make_mode_grid_parafac2_fixture()
+    kwargs["subject_mode"] = kwargs["subject_mode"].copy()
+    kwargs["subject_mode"][0, 0] = 5e-7  # sub-00 does not express component 1
+
+    fig, axs = plot_mode_grid(**kwargs)
+    masked = [_ribbon_means(axs[c, 0]) for c in range(2)]
+    plt.close(fig)
+
+    without = dict(kwargs)
+    for key in ("time_mode", "time_points", "subjects"):
+        without[key] = kwargs[key][1:]
+    without["subject_mode"] = kwargs["subject_mode"][1:]
+    fig, axs = plot_mode_grid(**without)
+    removed = [_ribbon_means(axs[c, 0]) for c in range(2)]
+    plt.close(fig)
+
+    np.testing.assert_allclose(masked[0]["A"], removed[0]["A"])
+    assert not np.allclose(masked[1]["A"], removed[1]["A"])
 
 
 def test_plot_mode_grid_single_component():

@@ -3,6 +3,7 @@ import os
 
 import numpy as np
 import pytest
+import tensorly as tl
 import torch
 from gMRItensor import CMFModel
 from gMRItensor import setup_backend
@@ -12,6 +13,35 @@ from gMRItensor.replicability import CrossValidationEngine
 from gMRItensor.replicability import evaluate_replicability_multiproc
 from gMRItensor.replicability import HalfHalfEngine
 from scipy.special import comb
+
+
+@pytest.fixture
+def numpy_backend():
+    """TensorLy's default backend, as in a fresh `collect` process that
+    never calls `setup_backend`; the previous backend is restored after."""
+    previous = tl.get_backend()
+    tl.set_backend("numpy")
+    yield
+    tl.set_backend(previous)
+
+
+def test_compute_FMS_accepts_torch_fits_on_numpy_backend(numpy_backend):
+    # Regression test: `gmri replicability collect` loads torch fits in a
+    # fresh process, and tlviz rejected their torch weights there.
+    generator = torch.Generator().manual_seed(0)
+    factors = [torch.randn(n, 2, generator=generator) for n in (5, 4, 3)]
+    weights = torch.ones(2)
+    # The same components, reordered, rescaled and with two signs flipped.
+    swapped = [
+        -factors[0][:, [1, 0]],
+        -factors[1][:, [1, 0]],
+        3 * factors[2][:, [1, 0]],
+    ]
+
+    score = compute_FMS((weights, factors), (weights, swapped))
+
+    assert isinstance(score, float)
+    assert score == pytest.approx(1.0)
 
 
 def test_half_half_engine_input():

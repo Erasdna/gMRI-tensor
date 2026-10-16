@@ -28,22 +28,13 @@ def _restart_fit(result: RestartResult) -> ComparableFit:
     Restarts fit the same subjects in the same order, so no alignment is
     needed. Only a ragged evolving mode (PARAFAC2's and CMF's `B_i`) is
     stacked into one `(sum_i J_i, rank)` matrix, since `factor_match_score`
-    rejects lists. Everything is handed over as numpy, which tlviz accepts
-    whatever tensorly backend is active (a fresh `collect` sets none).
+    rejects lists. `compute_FMS` converts the fit to numpy itself.
     """
     weights, factors = _weights_and_factors(result.model)
     subject_mode, evolving, label_mode = factors
     if not isinstance(evolving, torch.Tensor):
         evolving = torch.cat(list(evolving), dim=0)
-    return _as_numpy(weights), [
-        _as_numpy(mode) for mode in (subject_mode, evolving, label_mode)
-    ]
-
-
-def _as_numpy(value: torch.Tensor | np.ndarray) -> np.ndarray:
-    if isinstance(value, torch.Tensor):
-        return value.detach().cpu().numpy()
-    return np.asarray(value)
+    return weights, [subject_mode, evolving, label_mode]
 
 
 def restart_fms_matrix(

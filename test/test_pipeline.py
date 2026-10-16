@@ -7,6 +7,7 @@ import nibabel as nib
 import numpy as np
 import pandas as pd
 import pytest
+import tensorly as tl
 import torch
 from gMRItensor import decomposition
 from gMRItensor import pipeline
@@ -19,6 +20,7 @@ from gMRItensor.model_io import component_weights
 from gMRItensor.model_io import load_decomposition
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import sort_components
+from gMRItensor.model_io import subject_time_courses
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
 from gMRItensor.options import DistributedOptions
@@ -664,7 +666,13 @@ def test_distributed_replicability_matches_centralised(synthetic_study: Any) -> 
     assert n_jobs == 4  # 1 rank x 2 repeats x 2 halves x 2 restarts, blocks of 2
     for job in range(n_jobs):
         run_replicability_job(distributed.output_dir, job)
-    got = pd.read_csv(collect_replicability(distributed.output_dir))
+    # `collect` runs in a fresh process, which never sets the pytorch backend.
+    previous = tl.get_backend()
+    tl.set_backend("numpy")
+    try:
+        got = pd.read_csv(collect_replicability(distributed.output_dir))
+    finally:
+        tl.set_backend(previous)
 
     pd.testing.assert_frame_equal(got, expected, rtol=1e-5)
 
@@ -1351,6 +1359,7 @@ def test_plots_sort_models_saved_unsorted(
 
     def fake_evolving_mode(states: list[np.ndarray], *args: Any, **kwargs: Any) -> Any:
         drawn["evolving_states"] = states
+        drawn["evolving_subject_mode"] = kwargs["subject_mode"]
         return plt.figure(), None, pd.DataFrame()
 
     monkeypatch.setattr(pipeline, "plot_subject_mode", fake_subject_mode)
@@ -1361,9 +1370,13 @@ def test_plots_sort_models_saved_unsorted(
 
     expected = sort_components(flipped)
     np.testing.assert_array_equal(drawn["subject_mode"], expected.subject_mode)
-    assert expected.evolving_states is not None
-    for got, want in zip(drawn["evolving_states"], expected.evolving_states):
+    # PARAFAC2's time courses are scaled by the subject weights.
+    for got, want in zip(drawn["evolving_states"], subject_time_courses(expected)):
         np.testing.assert_array_equal(got, want)
+    np.testing.assert_array_equal(
+        drawn["evolving_subject_mode"],
+        expected.subject_mode,
+    )
     np.testing.assert_array_equal(drawn["subject_mode"], saved.subject_mode)
 
 

@@ -93,6 +93,36 @@ def component_weights(saved: SavedDecomposition) -> np.ndarray:
     return weights * evolving * label
 
 
+#: A subject-mode entry below this, in absolute value, means the subject
+#: does not express that component.
+NEGLIGIBLE_SUBJECT_WEIGHT = 1e-6
+
+
+def subject_time_courses(saved: SavedDecomposition) -> list[np.ndarray]:
+    """Each subject's own `(n_timepoints_i, rank)` time course.
+
+    PARAFAC2 scales `B_i` by the subject's weights; CMF's `B_i` already
+    carry the amplitude its `subject_mode` is derived from. Raises
+    `ValueError` for a CP fit, which has no evolving mode.
+    """
+    if saved.method not in _EVOLVING_METHODS or saved.evolving_states is None:
+        raise ValueError(f"a {saved.method} fit has no evolving mode")
+    states = [np.asarray(B) for B in saved.evolving_states]
+    if saved.method == "cmf":
+        return states
+    return [B * a for B, a in zip(states, np.asarray(saved.subject_mode))]
+
+
+def negligible_subjects(
+    subject_mode: np.ndarray,
+    atol: float = NEGLIGIBLE_SUBJECT_WEIGHT,
+) -> np.ndarray:
+    """`(n_subjects, rank)` mask of subject-mode entries below `atol` in
+    absolute value: those subjects' time courses are drawn as zero and left
+    out of the group ribbons and tests."""
+    return np.abs(np.asarray(subject_mode)) < atol
+
+
 def sort_components(saved: SavedDecomposition) -> SavedDecomposition:
     """`saved` with its components ordered by `component_weights`, largest
     first (stable for ties). Values are only permuted, never rescaled."""

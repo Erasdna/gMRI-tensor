@@ -8,6 +8,8 @@ import torch
 from gMRItensor.group_statistics import compare_groups_over_time
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import summarize_groups_over_time
+from gMRItensor.model_io import NEGLIGIBLE_SUBJECT_WEIGHT
+from gMRItensor.model_io import negligible_subjects
 from gMRItensor.plotting.utils import apply_row_ylims
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import get_color_palette
@@ -43,23 +45,27 @@ def _build_long_evolving_dataframe(
     subjects: list[str],
     groups: list[str],
     n_components: int,
+    negligible: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Stack per-subject evolving-mode factors into one long-form frame.
 
     One row per `(subject, timepoint, component)`, with columns `subject`,
     `group`, `timepoint`, `component`, `value`. Timepoints keep their raw
     values rather than being binned, so a later `groupby("timepoint")`
-    aligns ragged per-subject timepoints by exact value.
+    aligns ragged per-subject timepoints by exact value. `negligible`, a
+    `(n_subjects, n_components)` mask, leaves out those subjects' rows for
+    those components.
     """
     component_columns = [str(c) for c in range(n_components)]
     frames = []
-    for factor, timepoints, subject, group in zip(
-        scaled_factors,
-        timepoints_per_subject,
-        subjects,
-        groups,
+    for i, (factor, timepoints, subject, group) in enumerate(
+        zip(scaled_factors, timepoints_per_subject, subjects, groups),
     ):
-        frame = pd.DataFrame(factor[:, :n_components], columns=component_columns)
+        values = np.asarray(factor[:, :n_components], dtype=float)
+        if negligible is not None:
+            # NaN marks the rows to leave out after the melt.
+            values = np.where(negligible[i, :n_components], np.nan, values)
+        frame = pd.DataFrame(values, columns=component_columns)
         frame["subject"] = subject
         frame["group"] = group
         frame["timepoint"] = np.asarray(timepoints)
@@ -72,7 +78,27 @@ def _build_long_evolving_dataframe(
         value_name="value",
     )
     long_df["component"] = long_df["component"].astype(int)
+    if negligible is not None:
+        long_df = long_df.dropna(subset=["value"]).reset_index(drop=True)
     return long_df
+
+
+def _mask_negligible(
+    scaled_factors: list[np.ndarray],
+    subject_mode: np.ndarray | None,
+    atol: float,
+) -> tuple[list[np.ndarray], np.ndarray | None]:
+    """Zero the components a subject does not express (`negligible_subjects`
+    of `subject_mode`); returns the factors and the mask, None without
+    `subject_mode`."""
+    if subject_mode is None:
+        return scaled_factors, None
+    negligible = negligible_subjects(subject_mode, atol)
+    masked = [
+        np.where(flags[None, : factor.shape[1]], 0.0, factor)
+        for factor, flags in zip(scaled_factors, negligible)
+    ]
+    return masked, negligible
 
 
 def plot_evolving_mode(
@@ -85,6 +111,8 @@ def plot_evolving_mode(
     width_to_height_ratio: float = 1.618,
     min_group_n: int = 2,
     significance_alpha: float = 0.05,
+    subject_mode: np.ndarray | None = None,
+    negligible_atol: float = NEGLIGIBLE_SUBJECT_WEIGHT,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray, pd.DataFrame]:
     """Plot each subject's own PARAFAC2/CMF evolving-mode (time) pattern.
 
@@ -98,8 +126,9 @@ def plot_evolving_mode(
     Parameters
     ----------
     evolving_factors : list[np.ndarray]
-        Per-subject `(n_timepoints_i, rank)` factors, e.g. from
-        `reconstruct_evolving_factors`.
+        Per-subject `(n_timepoints_i, rank)` time courses, e.g. from
+        `model_io.subject_time_courses` (PARAFAC2's scaled by the subject
+        weights).
     timepoints_per_subject : list[np.ndarray]
         Time point arrays matching `evolving_factors[i]`'s rows.
     subjects : list[str]
@@ -115,6 +144,13 @@ def plot_evolving_mode(
         Minimum subjects per group at a timepoint for it to be tested.
     significance_alpha : float, optional
         FDR-corrected threshold for the `significant` column.
+    subject_mode : np.ndarray, optional
+        `(n_subjects, rank)` subject weights. A subject whose weight is
+        below `negligible_atol` in absolute value does not express that
+        component: its curve is drawn as zero, and it is left out of the
+        ribbon and the significance tests.
+    negligible_atol : float, optional
+        See `subject_mode`.
 
     Returns
     -------
@@ -157,7 +193,11 @@ def plot_evolving_mode(
     color_by_group = dict(zip(categories, colors))
 
     n_components = evolving_factors[0].shape[1]
-    scaled_factors = [scale_mode(factor) for factor in evolving_factors]
+    scaled_factors, negligible = _mask_negligible(
+        [scale_mode(factor) for factor in evolving_factors],
+        subject_mode,
+        negligible_atol,
+    )
 
     long_df = _build_long_evolving_dataframe(
         scaled_factors,
@@ -165,6 +205,7 @@ def plot_evolving_mode(
         subjects,
         groups,
         n_components,
+        negligible,
     )
     ribbon_stats = summarize_groups_over_time(long_df, facet="component")
     significance = compare_groups_over_time(

@@ -7,10 +7,12 @@ import numpy as np
 import pytest
 from gMRItensor.model_io import component_weights
 from gMRItensor.model_io import load_decomposition
+from gMRItensor.model_io import negligible_subjects
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
 from gMRItensor.model_io import select_subjects
 from gMRItensor.model_io import sort_components
+from gMRItensor.model_io import subject_time_courses
 
 
 def _common(rank: int, rng: np.random.Generator) -> dict[str, Any]:
@@ -318,3 +320,30 @@ def test_select_subjects_keeps_the_subject_indexed_fields(method: str) -> None:
             subset.evolving_states[1],
             saved.evolving_states[2],
         )
+
+
+def test_parafac2_time_courses_are_weighted_by_the_subject_mode() -> None:
+    saved = _unsorted("parafac2", np.random.default_rng(9))
+    assert saved.evolving_states is not None
+    courses = subject_time_courses(saved)
+    for course, B, a in zip(courses, saved.evolving_states, saved.subject_mode):
+        np.testing.assert_allclose(course, B * a)
+
+
+def test_cmf_time_courses_are_the_evolving_states() -> None:
+    """CMF's B_i already carry the amplitude its subject mode is derived from."""
+    saved = _unsorted("cmf", np.random.default_rng(10))
+    assert saved.evolving_states is not None
+    for course, B in zip(subject_time_courses(saved), saved.evolving_states):
+        np.testing.assert_array_equal(course, B)
+
+
+def test_subject_time_courses_rejects_cp() -> None:
+    with pytest.raises(ValueError, match="evolving"):
+        subject_time_courses(_unsorted("cp", np.random.default_rng(11)))
+
+
+def test_negligible_subjects_is_strict_and_absolute() -> None:
+    subject_mode = np.array([[1.0, 1e-6], [-5e-7, 0.0], [-2.0, 1e-3]])
+    expected = np.array([[False, False], [True, True], [False, False]])
+    np.testing.assert_array_equal(negligible_subjects(subject_mode), expected)

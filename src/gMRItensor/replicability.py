@@ -122,6 +122,17 @@ def _align_pair(
 ComparableFit = tuple[Any, list[Any]]
 
 
+def _as_numpy(value: torch.Tensor | np.ndarray) -> np.ndarray:
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _fit_as_numpy(fit: ComparableFit) -> ComparableFit:
+    weights, factors = fit
+    return _as_numpy(weights), [_as_numpy(factor) for factor in factors]
+
+
 def compute_FMS(
     fit_i: ComparableFit,
     fit_j: ComparableFit,
@@ -131,15 +142,17 @@ def compute_FMS(
 
     The caller organises the inputs: the same subjects in the same order
     and regular (not ragged) factor matrices, as the replicability engines
-    and `reproducibility.restart_fms_matrix` prepare them. numpy arrays
-    always work; torch tensors only once `setup_backend` has made torch
-    TensorLy's backend. Weights are ignored, so only the components' shapes
-    are compared.
+    and `reproducibility.restart_fms_matrix` prepare them. Weights are
+    ignored, so only the components' shapes are compared.
+
+    Both fits are handed to tlviz as numpy, which it accepts whatever
+    TensorLy backend is active. Torch tensors pass only under the pytorch
+    backend, and a fresh `collect` process sets none.
     """
     return float(
         factor_match_score(
-            fit_i,
-            fit_j,
+            _fit_as_numpy(fit_i),
+            _fit_as_numpy(fit_j),
             skip_mode=skip_mode,
             consider_weights=False,
         ),
