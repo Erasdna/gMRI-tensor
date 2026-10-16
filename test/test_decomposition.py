@@ -14,6 +14,7 @@ from gMRItensor import compute_CP_decomposition
 from gMRItensor import compute_PARAFAC2_decomposition
 from gMRItensor import PARAFAC2Diagnostics
 from gMRItensor import PARAFAC2Model
+from gMRItensor import PARAFAC2Solver
 from gMRItensor import run_CMF_decomposition_repeated
 from gMRItensor import run_CP_decomposition_repeated
 from gMRItensor import run_PARAFAC2_decomposition_repeated
@@ -337,6 +338,56 @@ def test_PARAFAC2_rejects_nan():
             device=device,
             progress_bar=False,
         )
+
+
+@pytest.mark.parametrize("solver", ["tensorly", "matcouply"])
+def test_PARAFAC2_rank_above_labels_raises(solver: PARAFAC2Solver) -> None:
+    setup_backend()
+    tensor = torch.rand(6, 10, 4, dtype=torch.float64)
+
+    with pytest.raises(ValueError, match=r"rank \(5\).*labels \(4\)"):
+        compute_PARAFAC2_decomposition(tensor, rank=5, solver=solver)
+
+
+@pytest.mark.parametrize("solver", ["tensorly", "matcouply"])
+def test_PARAFAC2_rank_above_time_points_raises(solver: PARAFAC2Solver) -> None:
+    setup_backend()
+    slices = [torch.rand(n, 8, dtype=torch.float64) for n in (10, 3, 10)]
+
+    with pytest.raises(ValueError, match=r"rank \(4\).*subject 1.*3 time points"):
+        compute_PARAFAC2_decomposition(slices, rank=4, solver=solver)
+
+
+def test_PARAFAC2_repeated_checks_rank_before_fitting(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    setup_backend()
+    tensor = torch.rand(6, 10, 4, dtype=torch.float64)
+
+    def no_fit(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a fit was started")
+
+    monkeypatch.setattr("gMRItensor.decomposition._fit_one", no_fit)
+    with pytest.raises(ValueError, match="labels"):
+        run_PARAFAC2_decomposition_repeated(
+            tensor,
+            rank=5,
+            init_repeats=2,
+            progress_bar=False,
+        )
+
+
+def test_PARAFAC2_rank_equal_to_smallest_dimension_is_accepted() -> None:
+    setup_backend()
+    slices = [torch.rand(n, 3, dtype=torch.float64) for n in (5, 3, 4)]
+
+    model, _, _ = compute_PARAFAC2_decomposition(
+        slices,
+        rank=3,
+        PARAFAC2_max_iter=20,
+        nn_modes=None,
+    )
+    assert model.label_mode.shape == (3, 3)
 
 
 # ---------------------------------------------------------------------------

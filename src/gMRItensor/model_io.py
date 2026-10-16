@@ -72,11 +72,11 @@ def component_weights(saved: SavedDecomposition) -> np.ndarray:
 
     Fits are never normalised (their weights are ones), so this is the
     product of the mode norms; `|weights|` covers models saved earlier with
-    normalised factors. CP multiplies the
-    subject, time and label norms. PARAFAC2 and CMF use the label norm and
-    the evolving mode's norm over all subjects, each subject's `B_i` scaled
-    by its subject weight for PARAFAC2; CMF's `subject_mode` is derived from
-    the `B_i`, so it is not counted twice.
+    normalised factors. CP multiplies the subject, time and label norms.
+    PARAFAC2 and CMF use the label norm and the evolving mode's norm over
+    all subjects, each subject's `B_i` scaled by its subject weight for
+    PARAFAC2; CMF's `subject_mode` is derived from the `B_i`, so it is not
+    counted twice.
     """
     weights = np.abs(np.asarray(saved.weights, dtype=float))
     label = _column_norms(saved.label_mode)

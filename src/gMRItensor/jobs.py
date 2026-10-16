@@ -36,6 +36,7 @@ from numpy.typing import ArrayLike
 from tqdm import tqdm
 
 from .decomposition import _BestOfRestarts
+from .decomposition import _check_parafac2_rank
 from .decomposition import _compute_kwargs
 from .decomposition import _fit_one
 from .decomposition import _init_restart_worker_backend
@@ -420,8 +421,13 @@ def run_tasks(
     ValueError
         If `n_procs >= 2` and the fit runs on CUDA. Worker processes against
         a CUDA context are unreliable across driver setups, so this is
-        rejected rather than silently run sequentially.
+        rejected rather than silently run sequentially. Also for a PARAFAC2
+        `rank` the data cannot support (see `_check_parafac2_rank`), before
+        any task is fitted.
     """
+    if method == "PARAFAC2":
+        # Subsets only drop subjects, so the full data sets the limits.
+        _check_parafac2_rank(data, rank)
     resolved = _resolve_options(method, kwargs)
     compute_device = resolved.get("compute_device")
     fit_device = compute_device if compute_device is not None else _data_device(data)

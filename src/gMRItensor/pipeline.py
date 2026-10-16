@@ -1205,11 +1205,14 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
     mode gets `<subject_prefix>_` in front when one is set. Every run also
     writes `<model>__component_weights.csv` there: each component's
     amplitude once its modes are normalised (`component_weights`), the
-    scale the figures leave out. Parts that
-    group subjects leave out (and name) subjects without a `group_variable`
-    value, as long as every group keeps 2 (`subjects_with_groups`). Spatial
-    parts of an ROI model need a segmentation: without one they are skipped
-    with a note if no part was chosen explicitly, and raise otherwise.
+    scale the figures leave out. Parts that group subjects leave out (and
+    name) subjects without a `group_variable` value, as long as every group
+    keeps 2 (`subjects_with_groups`). Spatial parts of an ROI model need a
+    segmentation: without one they are skipped with a note if no part was
+    chosen explicitly, and raise otherwise.
+
+    Returns the figure files only: the CSVs (component weights, evolving-mode
+    significance) are written next to them but not listed.
     """
     saved = load_decomposition(options.model)
     # Of the full fit, before any subjects are left out below.

@@ -1,5 +1,6 @@
 import math
 import os
+from collections.abc import Iterator
 
 import numpy as np
 import pytest
@@ -16,7 +17,7 @@ from scipy.special import comb
 
 
 @pytest.fixture
-def numpy_backend():
+def numpy_backend() -> Iterator[None]:
     """TensorLy's default backend, as in a fresh `collect` process that
     never calls `setup_backend`; the previous backend is restored after."""
     previous = tl.get_backend()
@@ -25,7 +26,7 @@ def numpy_backend():
     tl.set_backend(previous)
 
 
-def test_compute_FMS_accepts_torch_fits_on_numpy_backend(numpy_backend):
+def test_compute_FMS_accepts_torch_fits_on_numpy_backend(numpy_backend: None) -> None:
     # Regression test: `gmri replicability collect` loads torch fits in a
     # fresh process, and tlviz rejected their torch weights there.
     generator = torch.Generator().manual_seed(0)

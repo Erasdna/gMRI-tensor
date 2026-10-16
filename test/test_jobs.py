@@ -206,6 +206,17 @@ def test_run_tasks_skips_stored_tasks():
     assert store.load(plan[1]) is not None
 
 
+def test_run_tasks_rejects_parafac2_rank_above_labels():
+    slices = make_slices()
+    n_labels = slices[0].shape[1]
+    plan = plan_restarts(len(slices), 2)
+    store = InMemoryStore()
+
+    with pytest.raises(ValueError, match="labels"):
+        run_tasks(plan, slices, n_labels + 1, "PARAFAC2", store, n_procs=2)
+    assert store.load(plan[0]) is None
+
+
 # --- Gathering ------------------------------------------------------------
 
 

@@ -910,12 +910,15 @@ def compute_PARAFAC2_decomposition(
     Raises
     ------
     ValueError
-        NaN input, unknown `solver`, an AO-ADMM-only option passed with
-        `solver="tensorly"`, or `nn_modes` including mode 1 for TensorLy.
+        NaN input, `rank` above the label count or a subject's time-point
+        count (see `_check_parafac2_rank`), unknown `solver`, an
+        AO-ADMM-only option passed with `solver="tensorly"`, or `nn_modes`
+        including mode 1 for TensorLy.
     ConvergenceError
         The acceptance gate failed, matcouply's constraints were left
         infeasible, or the result is degenerate.
     """
+    _check_parafac2_rank(tensor_slices, rank)
     slices_to_check = (
         tensor_slices if isinstance(tensor_slices, list) else [tensor_slices]
     )
@@ -1014,6 +1017,45 @@ def _as_slices(tensor_slices: list[torch.Tensor] | torch.Tensor) -> list[torch.T
     if isinstance(tensor_slices, list):
         return list(tensor_slices)
     return [tensor_slices[i] for i in range(tensor_slices.shape[0])]
+
+
+def _check_parafac2_rank(
+    tensor_slices: list[torch.Tensor] | torch.Tensor,
+    rank: int,
+) -> None:
+    """Raise if `rank` is too large for PARAFAC2 on these slices.
+
+    Each subject's `(n_timepoints_i, n_labels)` slice has rank at most
+    `min(n_timepoints_i, n_labels)`, and its projection `P_i` needs `rank`
+    orthonormal columns of length `n_timepoints_i`. So `rank` may exceed
+    neither the label count nor any subject's time-point count. Both solvers
+    would otherwise fail inside the library with a shape error, or (matcouply
+    with too few labels) return a non-unique fit.
+
+    Raises
+    ------
+    ValueError
+        Naming the limit that was exceeded.
+    """
+    if isinstance(tensor_slices, list):
+        n_timepoints = [s.shape[0] for s in tensor_slices]
+        n_labels = tensor_slices[0].shape[1]
+    else:
+        n_timepoints = [tensor_slices.shape[1]] * tensor_slices.shape[0]
+        n_labels = tensor_slices.shape[2]
+    if rank > n_labels:
+        raise ValueError(
+            f"PARAFAC2 rank ({rank}) exceeds the number of labels ({n_labels}); "
+            f"use rank <= {n_labels}.",
+        )
+    shortest = min(range(len(n_timepoints)), key=n_timepoints.__getitem__)
+    if rank > n_timepoints[shortest]:
+        raise ValueError(
+            f"PARAFAC2 rank ({rank}) exceeds the time-point count of subject "
+            f"{shortest}, which has only {n_timepoints[shortest]} time points; "
+            f"use rank <= {n_timepoints[shortest]}, or drop short subjects "
+            "with --min-timepoints.",
+        )
 
 
 def _subject_amplitudes(evolving_states: list[torch.Tensor]) -> torch.Tensor:
@@ -2025,6 +2067,8 @@ def run_PARAFAC2_decomposition_repeated(
         `i`'s own time course. `error` is the relative reconstruction error,
         defined identically for both solvers and so comparable between them.
     """
+    # Once up front, not in every restart (and worker).
+    _check_parafac2_rank(tensor_slices, rank)
     _maybe_register_memory_efficient_khatri_rao(use_memory_efficient_khatri_rao)
 
     kwargs = _compute_kwargs(

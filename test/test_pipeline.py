@@ -1524,7 +1524,13 @@ def test_plots_report_component_weights(
     )
 
     run_decomposition_plots(
-        plot_options(synthetic_study, model, subject_info=gaps, parts=("time",)),
+        plot_options(
+            synthetic_study,
+            model,
+            subject_info=gaps,
+            # Both parts group subjects, so every method drops one first.
+            parts=("subject_mode", "time"),
+        ),
     )
 
     table = pd.read_csv(

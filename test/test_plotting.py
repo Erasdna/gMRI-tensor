@@ -785,6 +785,60 @@ def test_plot_evolving_mode_leaves_negligible_subject_out_of_ribbon_and_tests() 
     )
 
 
+def test_plot_evolving_mode_does_not_flip_negative_weights() -> None:
+    """Curves show each subject's B_i shape; the weight's sign belongs to the
+    subject-mode plot, so a negative (non-negligible) weight is drawn and
+    counted exactly as a positive one."""
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
+    positive = np.ones((len(subjects), 2))
+    negative = positive.copy()
+    negative[0, 0] = -0.8
+
+    def draw(subject_mode: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
+        fig, axs, _ = plot_evolving_mode(
+            evolving_factors,
+            timepoints,
+            subjects,
+            subject_info,
+            group_variable="group",
+            subject_mode=subject_mode,
+        )
+        curve = np.asarray(axs[0, 1].get_lines()[0].get_ydata())  # sub-00
+        means = _ribbon_means(axs[0, 0])
+        plt.close(fig)
+        return curve, means
+
+    curve, means = draw(negative)
+    np.testing.assert_allclose(curve, scale_mode(evolving_factors[0])[:, 0])
+    _, positive_means = draw(positive)
+    np.testing.assert_allclose(means["A"], positive_means["A"])
+
+
+def test_plot_evolving_mode_drops_curves_that_scaling_zeroes() -> None:
+    """A column `scale_mode` zeroes (negligible next to the subject's other
+    column) is drawn as zero and kept out of the ribbon, even at atol=0."""
+    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
+    evolving_factors = [factor.copy() for factor in evolving_factors]
+    evolving_factors[0][:, 0] *= 1e-12
+    subject_mode = np.ones((len(subjects), 2))
+
+    def ribbon_a(keep: slice) -> np.ndarray:
+        fig, axs, _ = plot_evolving_mode(
+            evolving_factors[keep],
+            timepoints[keep],
+            subjects[keep],
+            subject_info,
+            group_variable="group",
+            subject_mode=subject_mode[keep],
+            negligible_atol=0.0,
+        )
+        mean = _ribbon_means(axs[0, 0])["A"]
+        plt.close(fig)
+        return mean
+
+    np.testing.assert_allclose(ribbon_a(slice(None)), ribbon_a(slice(1, None)))
+
+
 def test_plot_evolving_mode_rejects_misshaped_subject_mode() -> None:
     evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
     with pytest.raises(ValueError, match="subject_mode"):

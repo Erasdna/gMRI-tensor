@@ -10,6 +10,7 @@ from gMRItensor.plotting.evolving_mode import _all_timepoints
 from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
 from gMRItensor.plotting.evolving_mode import _group_legend
 from gMRItensor.plotting.evolving_mode import _negligible_mask
+from gMRItensor.plotting.evolving_mode import _with_zeroed_curves
 from gMRItensor.plotting.spatial_mode import _percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
 from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
@@ -49,7 +50,7 @@ def _plot_time_column_evolving(
     ribbon_stats_component: pd.DataFrame,
     categories: list[str],
     color_by_group: dict[str, str],
-    timepoints: list,
+    timepoints: list[float],
 ) -> None:
     """Draw one component of a PARAFAC2/CMF evolving mode as per-group ribbons.
 
@@ -124,19 +125,24 @@ def plot_mode_grid(
         groups = resolve_subject_groups(subjects, subject_info, group_variable)
         categories = sorted(set(groups))
         color_by_group = dict(zip(categories, get_color_palette(len(categories))))
-        # Per-subject scaling, as in `plot_evolving_mode`.
-        long_df = _build_long_evolving_dataframe(
-            [scale_mode(np.asarray(factor)) for factor in time_mode],
-            [np.asarray(timepoints) for timepoints in time_points],
-            subjects,
-            groups,
-            n_components,
+        # Per-subject scaling and dropped subjects, as in `plot_evolving_mode`.
+        scaled_factors = [scale_mode(np.asarray(factor)) for factor in time_mode]
+        negligible = _with_zeroed_curves(
             _negligible_mask(
                 subject_mode,
                 len(subjects),
                 n_components,
                 negligible_atol,
             ),
+            scaled_factors,
+        )
+        long_df = _build_long_evolving_dataframe(
+            scaled_factors,
+            [np.asarray(timepoints) for timepoints in time_points],
+            subjects,
+            groups,
+            n_components,
+            negligible,
         )
         evolving_timepoints = _all_timepoints(time_points)
         ribbon_stats = summarize_groups_over_time(long_df, facet="component")

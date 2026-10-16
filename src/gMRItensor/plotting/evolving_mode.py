@@ -108,7 +108,23 @@ def _negligible_mask(
     return negligible_subjects(subject_mode[:, :n_components], atol)
 
 
-def _all_timepoints(timepoints_per_subject: list[np.ndarray]) -> list:
+def _with_zeroed_curves(
+    negligible: np.ndarray | None,
+    scaled_factors: list[np.ndarray],
+) -> np.ndarray | None:
+    """`negligible`, plus the curves `scale_mode` set to zero (negligible
+    next to the subject's other columns): drawn as zero, they must not enter
+    the ribbon or the tests as zeros either. None stays None."""
+    if negligible is None:
+        return None
+    n_components = negligible.shape[1]
+    zeroed = np.array(
+        [~np.any(factor[:, :n_components] != 0, axis=0) for factor in scaled_factors],
+    )
+    return negligible | zeroed
+
+
+def _all_timepoints(timepoints_per_subject: list[np.ndarray]) -> list[float]:
     """Every subject's time points, sorted: the x-ticks of each row, so a
     time point scanned only by a dropped subject keeps its tick."""
     return sorted(set(np.concatenate([np.asarray(t) for t in timepoints_per_subject])))
@@ -235,6 +251,7 @@ def plot_evolving_mode(
         negligible_atol,
     )
     scaled_factors = [scale_mode(factor) for factor in evolving_factors]
+    negligible = _with_zeroed_curves(negligible, scaled_factors)
 
     long_df = _build_long_evolving_dataframe(
         scaled_factors,
