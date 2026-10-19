@@ -672,7 +672,9 @@ def test_PARAFAC2_compute_device_none_preserves_behaviour(solver):
 
     default_model, default_errors, _ = compute_PARAFAC2_decomposition(slices, **kwargs)
     explicit_model, explicit_errors, _ = compute_PARAFAC2_decomposition(
-        slices, compute_device=torch.device("cpu"), **kwargs
+        slices,
+        compute_device=torch.device("cpu"),
+        **kwargs,
     )
 
     torch.testing.assert_close(default_model.subject_mode, explicit_model.subject_mode)
@@ -1589,3 +1591,36 @@ def test_fits_are_never_normalized(method: str, solver: str | None) -> None:
 def test_normalize_is_not_an_option(runner: Any) -> None:
     with pytest.raises(TypeError, match="normalize"):
         runner(None, rank=2, normalize=True)
+
+
+def test_CP_imputation_error_covers_observed_entries_only():
+    setup_backend()
+    tensor = make_low_rank_tensor_with_nan()
+
+    decomp, errors = compute_CP_decomposition(
+        tensor,
+        rank=2,
+        CP_max_iter=500,
+        allow_nan_imputation=True,
+    )
+
+    observed = ~torch.isnan(tensor)
+    residual = (tensor - tl.cp_to_tensor(decomp))[observed]
+    expected = torch.linalg.norm(residual) / torch.linalg.norm(tensor[observed])
+    torch.testing.assert_close(errors[-1], expected)
+
+
+def test_CP_imputation_without_nan_fits_as_without_imputation():
+    setup_backend()
+    tensor = make_low_rank_tensor()
+
+    (_, plain), plain_errors = compute_CP_decomposition(tensor, rank=2)
+    (_, imputed), imputed_errors = compute_CP_decomposition(
+        tensor,
+        rank=2,
+        allow_nan_imputation=True,
+    )
+
+    for a, b in zip(plain, imputed):
+        torch.testing.assert_close(a, b)
+    assert plain_errors == imputed_errors

@@ -437,9 +437,61 @@ def test_cp_wiring_and_center(
     assert tensor.shape == (6, 3, 5)
     np.testing.assert_allclose(tensor.mean(axis=(0, 1)), 0.0, atol=1e-5)
     assert n_tasks == 4 and kwargs["non_negative"] is False
+    assert kwargs["allow_nan_imputation"] is True
     saved = load_decomposition(options.output_dir / "cp_rank_3.h5")
     assert saved.time_mode is not None and saved.time_mode.shape == (3, 3)
     assert saved.centered is True and saved.scale_std is None
+
+
+def _drop_session(study: Any, subject: str, time_point: int) -> None:
+    """Remove one scan from the study's manifest."""
+    manifest = pd.read_csv(study.manifest)
+    keep = ~((manifest["subject"] == subject) & (manifest["time_point"] == time_point))
+    manifest[keep].to_csv(study.manifest, index=False)
+
+
+def test_cp_imputes_a_missing_session(synthetic_study: Any) -> None:
+    # Regression test: CP used to drop (or fail on) a subject missing a scan.
+    _drop_session(synthetic_study, "sub-01", 6)
+    preprocess(synthetic_study)
+    options = decomposition_options(
+        synthetic_study,
+        method="cp",
+        ranks=(2,),
+        tensor=TensorOptions(min_timepoints=2),
+        fit=FitOptions(restarts=2, max_iter=2000, tolerance=1e-4),
+    )
+
+    with pytest.warns(UserWarning, match=r"1 missing session.*\('sub-01', 6\)"):
+        run_decomposition(options)
+
+    saved = load_decomposition(options.output_dir / "cp_rank_2.h5")
+    assert "sub-01" in saved.subjects and len(saved.subjects) == 6
+    assert saved.time_mode is not None
+    for factor in (saved.subject_mode, saved.time_mode, saved.label_mode):
+        assert np.isfinite(factor).all()
+    assert np.isfinite(saved.error)
+
+
+def test_parafac2_keeps_a_shorter_slice_for_a_missing_session(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = stub_fits(monkeypatch)
+    _drop_session(synthetic_study, "sub-01", 6)
+    preprocess(synthetic_study)
+
+    run_decomposition(
+        decomposition_options(
+            synthetic_study,
+            ranks=(1,),
+            tensor=TensorOptions(min_timepoints=2),
+        ),
+    )
+
+    ((slices, _, kwargs),) = calls
+    assert [len(s) for s in slices] == [3, 2, 3, 3, 3, 3]
+    assert "allow_nan_imputation" not in kwargs
 
 
 @pytest.mark.parametrize(
@@ -1473,7 +1525,10 @@ def test_plots_leave_out_subjects_without_a_group(
     real_subject_mode = pipeline.plot_subject_mode
 
     def spy(
-        subject_mode: np.ndarray, subjects: list[str], *args: Any, **kw: Any
+        subject_mode: np.ndarray,
+        subjects: list[str],
+        *args: Any,
+        **kw: Any,
     ) -> Any:
         drawn["subjects"] = subjects
         drawn["rows"] = subject_mode.shape[0]

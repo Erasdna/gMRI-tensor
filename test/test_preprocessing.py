@@ -1002,10 +1002,9 @@ def test_atomic_outputs_moves_written_files_into_place(tmp_path):
 def test_atomic_outputs_removes_tmp_files_on_failure(tmp_path):
     first = tmp_path / "a.parquet"
 
-    with pytest.raises(RuntimeError):
-        with _atomic_outputs(first) as (tmp_first,):
-            tmp_first.write_text("partial")
-            raise RuntimeError("boom")
+    with pytest.raises(RuntimeError), _atomic_outputs(first) as (tmp_first,):
+        tmp_first.write_text("partial")
+        raise RuntimeError("boom")
 
     assert list(tmp_path.iterdir()) == []
 
@@ -1221,3 +1220,46 @@ def test_write_preprocessed_data_rejects_bad_arguments(tmp_path):
     args_list[1]["signal_type"] = "T1map"
     with pytest.raises(ValueError, match="signal_type"):
         write_preprocessed_data(args_list, tmp_path)
+
+
+def test_load_tensor_from_parquet_impute_missing_keeps_nan_entries(tmp_path):
+    # "b" misses time point 2 entirely; label 20 is NaN in one of "a"'s
+    # scans, which would otherwise drop it for everyone; label 30 is never
+    # finite, so it still goes.
+    sessions = {"a": [0, 1, 2], "b": [0, 1]}
+    never_finite = {(s, t, 30) for s, tps in sessions.items() for t in tps}
+    df = make_long_df(sessions, missing={("a", 1, 20)} | never_finite)
+    path = _write_long_df(df, tmp_path / "tracer.parquet")
+
+    with pytest.warns(UserWarning, match=r"1 missing session.*\('b', 2\).*1 scattered"):
+        tensor, subjects, timepoints, labels, _ = load_tensor_from_parquet(
+            path,
+            "cp",
+            min_timepoints=2,
+            impute_missing=True,
+        )
+
+    np.testing.assert_array_equal(subjects, ["a", "b"])
+    np.testing.assert_array_equal(timepoints, [0, 1, 2])
+    np.testing.assert_array_equal(labels, [10, 20])
+    assert np.isnan(tensor[1, 2]).all()
+    assert np.isnan(tensor[0, 1, 1])
+    assert np.count_nonzero(np.isnan(tensor)) == 3
+
+
+def test_load_tensor_from_parquet_impute_missing_is_cp_only(tmp_path):
+    path = _write_long_df(make_long_df({"a": [0]}), tmp_path / "tracer.parquet")
+
+    with pytest.raises(ValueError, match="impute_missing"):
+        load_tensor_from_parquet(path, "parafac2", impute_missing=True)
+
+
+def test_load_tensor_from_parquet_impute_missing_without_nan_is_silent(tmp_path):
+    df = make_long_df({"a": [0, 1], "b": [0, 1]})
+    path = _write_long_df(df, tmp_path / "tracer.parquet")
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        got = load_tensor_from_parquet(path, "cp", impute_missing=True)
+
+    _assert_matches_prepare_tensor(got, df, "cp")

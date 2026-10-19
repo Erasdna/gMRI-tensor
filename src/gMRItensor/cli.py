@@ -186,13 +186,16 @@ def _add_fit_arguments(parser: argparse.ArgumentParser, required: bool) -> None:
     tensor.add_argument(
         "--min-timepoints",
         type=int,
-        help="minimum valid time points per subject (default: all)",
+        help="minimum valid time points per subject (default: all); CP imputes "
+        "the missing ones, PARAFAC2/CMF fit shorter time courses",
     )
     tensor.add_argument(
         "--max-invalid-fraction",
         type=float,
         default=0.9,
-        help="drop scans with a larger non-finite fraction (default: 0.9)",
+        help="treat scans with a larger non-finite fraction as missing; CP "
+        "imputes the other non-finite values, PARAFAC2/CMF drop their columns "
+        "(default: 0.9)",
     )
     fit = parser.add_argument_group("fit")
     fit.add_argument(

@@ -425,7 +425,9 @@ def load_decomposition_input(
     `roi_signal.parquet` gives one column per label (its `statistic`);
     `voxels.parquet` one column per voxel, with the voxel coordinates.
     Optionally centered and/or scaled per column over all subjects and time
-    points.
+    points. CP keeps NaN for missing sessions and scattered invalid values
+    (see `load_tensor_from_parquet`'s `impute_missing`), and the fit imputes
+    them.
     """
     _require(path, "preprocess")
     kind = read_signal_metadata(path).get("kind")
@@ -443,6 +445,7 @@ def load_decomposition_input(
         "cp" if method == "cp" else "parafac2",
         min_timepoints=tensor.min_timepoints,
         max_invalid_fraction=tensor.max_invalid_fraction,
+        impute_missing=method == "cp",
     )
     mean = std = None
     if tensor.scale:
@@ -488,13 +491,17 @@ def _fit_options(fit: FitOptions, method: str) -> dict[str, Any]:
     """`run_*_decomposition_repeated` options from `fit` (also what
     `jobs.run_tasks`/`jobs.collect` take; restart-loop ones are ignored there).
 
-    CP's non-negativity is all-or-nothing (`non_negative`); PARAFAC2 and
+    CP's non-negativity is all-or-nothing (`non_negative`), and CP imputes
+    the input's NaN entries (`allow_nan_imputation`); PARAFAC2 and
     CMF take the modes (`nn_modes`, `"auto"` = the method's default), and
     PARAFAC2 also its `solver` (CMF only has matcouply's).
     """
     specific: dict[str, Any]
     if method == "cp":
-        specific = {"non_negative": fit.non_negative_modes is not None}
+        specific = {
+            "non_negative": fit.non_negative_modes is not None,
+            "allow_nan_imputation": True,
+        }
     else:
         specific = {"nn_modes": fit.non_negative_modes}
         if fit.solver is not None and method == "parafac2":
@@ -1556,9 +1563,8 @@ def run_group_map_plots(options: GroupMapPlotOptions) -> list[Path]:
 
     written: list[Path] = []
     for t, timepoint in enumerate(averages.timepoints):
-        # str.format: add-trailing-comma breaks "(n=" inside an f-string.
         row_labels = [
-            "{} (n={})".format(group, n)
+            f"{group} (n={n})"
             for group, n in zip(averages.groups, averages.n_subjects[t])
         ]
         for fig, _, name in plot_spatial_mode(

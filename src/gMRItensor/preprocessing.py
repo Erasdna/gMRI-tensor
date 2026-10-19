@@ -1,5 +1,8 @@
 import json
+import warnings
 from collections import deque
+from collections.abc import Callable
+from collections.abc import Iterator
 from contextlib import contextmanager
 from contextlib import ExitStack
 from functools import partial
@@ -8,9 +11,7 @@ from multiprocessing import Pool
 from multiprocessing.pool import AsyncResult
 from pathlib import Path
 from typing import Any
-from typing import Callable
 from typing import cast
-from typing import Iterator
 from typing import Literal
 from typing import NamedTuple
 
@@ -30,9 +31,12 @@ from tqdm import tqdm
 def compute_tracer(baseline: np.ndarray, post_injection: np.ndarray, signal_type: str):
 
     if signal_type == "T1map":
-        expr = "where((abs(post_injection) < 1e-6) | (abs(baseline) < 1e-6), nan, (1 / post_injection) - (1 / baseline))"  # noqa: E501
+        expr = (
+            "where((abs(post_injection) < 1e-6) | (abs(baseline) < 1e-6), nan, "
+            "(1 / post_injection) - (1 / baseline))"
+        )
     elif signal_type == "R1map":
-        expr = "post_injection - baseline"  # noqa: E501
+        expr = "post_injection - baseline"
     elif signal_type == "T1w":
         expr = "where(abs(baseline) < 1e-6, nan, post_injection / baseline)"
     else:
@@ -985,11 +989,13 @@ def _scan_tracer_parquet(
     parquet_file: pq.ParquetFile,
     group_filtering: tuple[str, str] | None,
     sessions: set[tuple[str, int]],
+    any_finite: bool = False,
 ) -> np.ndarray:
     """Sorted keys finite in every one of `sessions`.
 
     The columns `prepare_tensor`'s `dropna` would keep if `sessions` were the
-    only observed rows; chunks of other sessions are ignored.
+    only observed rows; chunks of other sessions are ignored. `any_finite`
+    keeps the keys finite in at least one of `sessions` instead.
     """
     keys = np.empty(0, dtype=np.int64)
     finite_count = np.empty(0, dtype=np.int64)
@@ -1011,7 +1017,39 @@ def _scan_tracer_parquet(
             previous_positions = np.searchsorted(keys, finite_keys)
         finite_count[previous_positions] += 1
 
-    return keys[finite_count == len(sessions)]
+    return keys if any_finite else keys[finite_count == len(sessions)]
+
+
+def _warn_imputed_entries(
+    tensor: np.ndarray,
+    subjects: list[str],
+    time_points: np.ndarray,
+    sessions: set[tuple[str, int]],
+) -> None:
+    """Warn how many missing sessions and scattered entries of the CP
+    `tensor` are NaN, so left for the fit to impute."""
+    missing_sessions = [
+        (subject, int(t))
+        for subject in subjects
+        for t in time_points
+        if (subject, int(t)) not in sessions
+    ]
+    n_scattered = (
+        int(np.count_nonzero(np.isnan(tensor)))
+        - len(
+            missing_sessions,
+        )
+        * tensor.shape[-1]
+    )
+    if missing_sessions or n_scattered:
+        warnings.warn(
+            f"load_tensor_from_parquet: imputing {len(missing_sessions)} missing "
+            f"session(s) (subject, time_point) {missing_sessions} and "
+            f"{n_scattered} scattered NaN entr(ies) of "
+            f"{tensor.size} in the CP fit",
+            UserWarning,
+            stacklevel=3,
+        )
 
 
 def load_tensor_from_parquet(
@@ -1021,6 +1059,7 @@ def load_tensor_from_parquet(
     min_timepoints: int | None = None,
     max_invalid_fraction: float = 0.9,
     dtype: npt.DTypeLike = np.float32,
+    impute_missing: bool = False,
 ) -> tuple[
     np.ndarray | list[np.ndarray],
     np.ndarray,
@@ -1044,6 +1083,12 @@ def load_tensor_from_parquet(
     and `min_timepoints=1` this matches `prepare_tensor` (except that
     dropped subjects no longer veto columns).
 
+    `impute_missing` (`"cp"` only) relaxes the column rule: a column is kept
+    if it is finite in at least one kept session, and its other entries stay
+    NaN, as do the kept subjects' missing sessions, for
+    `run_CP_decomposition_repeated(allow_nan_imputation=True)` to impute. A
+    `UserWarning` gives how many sessions and scattered entries that is.
+
     Parameters
     ----------
     path : Path | str
@@ -1066,6 +1111,9 @@ def load_tensor_from_parquet(
         Sessions with a larger non-finite fraction are dropped. Default 0.9.
     dtype : npt.DTypeLike, optional
         Output dtype. float32 by default, halving memory versus float64.
+    impute_missing : bool, optional
+        Keep the NaN entries of the `"cp"` tensor for imputation rather than
+        dropping their columns (see above). Default False.
 
     Returns
     -------
@@ -1073,6 +1121,8 @@ def load_tensor_from_parquet(
     """
     if model not in ("cp", "parafac2"):
         raise ValueError(f"model must be 'cp' or 'parafac2', got {model!r}")
+    if impute_missing and model != "cp":
+        raise ValueError("impute_missing applies to model='cp' only")
 
     parquet_file = pq.ParquetFile(path, read_dictionary=["subject"])
     invalid_fraction = _invalid_fraction_per_session(parquet_file, group_filtering)
@@ -1127,10 +1177,17 @@ def load_tensor_from_parquet(
         for subject, time_points in zip(subjects, timepoints_per_subject)
         for t in time_points
     }
-    valid_keys = _scan_tracer_parquet(parquet_file, group_filtering, sessions)
+    valid_keys = _scan_tracer_parquet(
+        parquet_file,
+        group_filtering,
+        sessions,
+        any_finite=impute_missing,
+    )
     if len(valid_keys) == 0:
         raise ValueError(
-            "No column is finite in every kept session; lower "
+            "No column is finite in any kept session"
+            if impute_missing
+            else "No column is finite in every kept session; lower "
             "max_invalid_fraction to drop more sessions",
         )
 
@@ -1179,6 +1236,9 @@ def load_tensor_from_parquet(
             positions = positions[kept]
             previous_keys = chunk.keys
         target_row(chunk.subject, chunk.time_point)[positions] = chunk.values[kept]
+
+    if impute_missing:
+        _warn_imputed_entries(tensor, subjects, all_timepoints, sessions)
 
     labels = (valid_keys >> _KEY_SHIFT).astype(int)
     label_index = (valid_keys & _KEY_MASK).astype(int)

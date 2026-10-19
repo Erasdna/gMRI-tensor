@@ -72,10 +72,18 @@ args_list = [
     },
     # ... one entry per scan
 ]
-paths = write_preprocessed_data(args_list, "results", time_unit="ms", store_voxels=False, n_procs=5)
+paths = write_preprocessed_data(
+    args_list, "results", time_unit="ms", store_voxels=False, n_procs=5
+)
 
-data = load_decomposition_input(paths.roi_signal, "parafac2", TensorOptions(scale=True), statistic="median")
-slices, subjects, timepoints = data.data, data.subjects, data.timepoints  # torch slices, one per subject
+data = load_decomposition_input(
+    paths.roi_signal, "parafac2", TensorOptions(scale=True), statistic="median"
+)
+slices, subjects, timepoints = (
+    data.data,
+    data.subjects,
+    data.timepoints,
+)  # torch slices, one per subject
 ```
 
 - **Signal:** ΔR1 = R1_post − R1_baseline in 1/s for T1 or R1 maps, or the post/baseline ratio for T1w. Only voxels inside the mask with a nonzero segmentation label are used.
@@ -96,24 +104,32 @@ from gMRItensor import (
     setup_backend,
 )
 
-device = setup_backend()  # GPU if GMRITENSOR_USE_GPU=TRUE, else CPU with $CPUS_PER_TASK threads
+device = (
+    setup_backend()
+)  # GPU if GMRITENSOR_USE_GPU=TRUE, else CPU with $CPUS_PER_TASK threads
 
-model, error = run_PARAFAC2_decomposition_repeated(slices, rank=3, init_repeats=50, device=device)
+model, error = run_PARAFAC2_decomposition_repeated(
+    slices, rank=3, init_repeats=50, device=device
+)
 # model.subject_mode: (subjects, rank); model.evolving_states[i]: subject i's (n_timepoints_i, rank) time course;
 # model.label_mode: (labels, rank)
 
-cmf, error = run_CMF_decomposition_repeated(slices, rank=3, init_repeats=50, device=device)
+cmf, error = run_CMF_decomposition_repeated(
+    slices, rank=3, init_repeats=50, device=device
+)
 # The same fields as PARAFAC2, without the PARAFAC2 constraint: cmf.evolving_states[i] is free per subject.
 # The subject weights are fixed at one, so cmf.subject_mode is derived: the RMS of each subject's time course.
 
-tensor = load_decomposition_input(paths.roi_signal, "cp", TensorOptions()).data  # (subjects, time points, labels)
+tensor = load_decomposition_input(
+    paths.roi_signal, "cp", TensorOptions()
+).data  # (subjects, time points, labels)
 weights, factors, error = run_CP_decomposition_repeated(tensor, rank=3, device=device)
 ```
 
 - All runners fit from `init_repeats` random restarts and keep the best accepted fit. `restart_procs` spreads the restarts over processes.
 - Tolerances default to `None`, which means each library's own default `tol`. A TensorLy restart that runs out of iterations is rejected; a matcouply one is kept, as matcouply returns it, with a warning.
 - PARAFAC2 supports `solver="tensorly"` (default) or `"matcouply"` (AO-ADMM, with constraints passed through `aoadmm_options`). `nn_modes` chooses which modes are non-negative.
-- CP non-negativity is set with `non_negative`, and `allow_nan_imputation=True` fits tensors that contain NaN rows.
+- CP non-negativity is set with `non_negative`. `allow_nan_imputation=True` fits tensors that contain NaN entries (from `load_tensor_from_parquet(..., impute_missing=True)`): it imputes them, and the error covers the observed entries only. `gmri decompose` always does this for CP.
 - CMF uses matcouply's `cmf_aoadmm` with its own defaults. `nn_modes="auto"` constrains the time and label modes, and `aoadmm_options` passes penalties and solver settings.
 - PARAFAC2 and CMF raise a `UserWarning` when most restarts fail for the same reason, naming the setting to change (e.g. `max_iter`).
 
@@ -123,8 +139,12 @@ weights, factors, error = run_CP_decomposition_repeated(tensor, rank=3, device=d
 from gMRItensor.replicability import HalfHalfEngine, evaluate_replicability_multiproc
 
 scores = evaluate_replicability_multiproc(
-    HalfHalfEngine(repeats=20), slices, rank=3, method="PARAFAC2",
-    n_procs=4, init_repeats=20,
+    HalfHalfEngine(repeats=20),
+    slices,
+    rank=3,
+    method="PARAFAC2",
+    n_procs=4,
+    init_repeats=20,
 )
 ```
 
@@ -138,9 +158,17 @@ scores = evaluate_replicability_multiproc(
 `gMRItensor.jobs` splits the same work into `(group, seed)` tasks, so restarts can run as separate jobs (e.g. a SLURM array) that share a `ResultStore`:
 
 ```python
-from gMRItensor.jobs import DirectoryStore, collect, job_slice, plan_replicability, run_tasks
+from gMRItensor.jobs import (
+    DirectoryStore,
+    collect,
+    job_slice,
+    plan_replicability,
+    run_tasks,
+)
 
-plan = plan_replicability(HalfHalfEngine(repeats=20, seed=0), len(slices), n_restarts=10)
+plan = plan_replicability(
+    HalfHalfEngine(repeats=20, seed=0), len(slices), n_restarts=10
+)
 store = DirectoryStore("results/rank3")
 run_tasks(job_slice(plan, job_index, tasks_per_job=4), slices, 3, "PARAFAC2", store)
 # ...once every job has finished:
@@ -154,11 +182,21 @@ fms = HalfHalfEngine(repeats=20, seed=0).compute_fms(collect(plan, store))
 ### Plotting decomposition modes
 
 ```python
-from gMRItensor.plotting import evolving_factors_to_numpy, plot_evolving_mode, plot_subject_mode
+from gMRItensor.plotting import (
+    evolving_factors_to_numpy,
+    plot_evolving_mode,
+    plot_subject_mode,
+)
 
-fig, axs = plot_subject_mode(model.subject_mode.numpy(), subjects, subject_info, "diagnosis", ["age"])
+fig, axs = plot_subject_mode(
+    model.subject_mode.numpy(), subjects, subject_info, "diagnosis", ["age"]
+)
 fig, axs, significance = plot_evolving_mode(
-    evolving_factors_to_numpy(model.evolving_states), timepoints, subjects, subject_info, "diagnosis",
+    evolving_factors_to_numpy(model.evolving_states),
+    timepoints,
+    subjects,
+    subject_info,
+    "diagnosis",
 )
 ```
 
@@ -176,21 +214,35 @@ Regions, concentrations and statistics are computed from `roi_signal.parquet` at
 
 ```python
 import pandas as pd
-from gMRItensor.group_statistics import compare_groups_over_time, resolve_subject_groups, summarize_groups_over_time
+from gMRItensor.group_statistics import (
+    compare_groups_over_time,
+    resolve_subject_groups,
+    summarize_groups_over_time,
+)
 from gMRItensor.plotting import plot_roi_evolution_panels, save_figure
 from gMRItensor.roi_groups import add_concentration, aggregate_roi_signal, parse_region
 
-regions = dict(parse_region(spec) for spec in ["ventricles", "white_matter", "my_region=17,53"])
+regions = dict(
+    parse_region(spec) for spec in ["ventricles", "white_matter", "my_region=17,53"]
+)
 rois = aggregate_roi_signal(pd.read_parquet("results/data/roi_signal.parquet"), regions)
-rois = add_concentration(rois, relaxivity=3.2).rename(columns={"time_point": "timepoint"})
+rois = add_concentration(rois, relaxivity=3.2).rename(
+    columns={"time_point": "timepoint"}
+)
 subjects = sorted(rois["subject"].unique())
-rois["group"] = rois["subject"].map(dict(zip(subjects, resolve_subject_groups(subjects, subject_info, "diagnosis"))))
+rois["group"] = rois["subject"].map(
+    dict(zip(subjects, resolve_subject_groups(subjects, subject_info, "diagnosis")))
+)
 
 summary = summarize_groups_over_time(rois, facet="roi", value="median_concentration")
-significance = compare_groups_over_time(rois, sorted(rois["group"].unique()), facet="roi", value="median_concentration")
+significance = compare_groups_over_time(
+    rois, sorted(rois["group"].unique()), facet="roi", value="median_concentration"
+)
 significance["significant"] = significance["p_adj"] < 0.05
 
-fig, _ = plot_roi_evolution_panels(summary, significance, list(regions), "median_concentration", n_rows=1, n_cols=3)
+fig, _ = plot_roi_evolution_panels(
+    summary, significance, list(regions), "median_concentration", n_rows=1, n_cols=3
+)
 save_figure(fig, "results/figures/overview")
 ```
 

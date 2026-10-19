@@ -134,8 +134,8 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 | `--statistic` | `median` | Per-ROI statistic to decompose (`roi_signal` input only). |
 | `--no-scale` | scale | Do not divide each column by its standard deviation over subjects and time points. |
 | `--center` | off | Subtract each column's mean. Centered data is negative, so this needs `--non-negative-modes none`. |
-| `--min-timepoints` | all | Minimum valid time points to keep a subject. For CP, a lower value leaves NaN rows (see `--fit-option allow_nan_imputation=true`). |
-| `--max-invalid-fraction` | `0.9` | Drop a scan whose fraction of non-finite values is larger. |
+| `--min-timepoints` | all | Minimum valid time points to keep a subject. CP imputes the missing sessions of the subjects it keeps, with a warning. PARAFAC2 and CMF fit those subjects with shorter time courses. |
+| `--max-invalid-fraction` | `0.9` | A scan whose fraction of non-finite values is larger counts as missing. In the scans that are kept, CP imputes the remaining non-finite values and drops only the columns that are never finite. PARAFAC2 and CMF drop every column that is non-finite in any kept scan. `0` imputes no scattered values, `1` imputes all it can. CP's reported error covers the observed entries only. |
 | `--restarts` | `50` | Random initialisations per fit; the best accepted one is kept. |
 | `--max-iter`, `--tolerance` | `2000`, the solver's own | Iteration limit and convergence tolerance per restart. Without `--tolerance`, each library's own default `tol` is used: TensorLy CP `1e-8` (non-negative `1e-6`), TensorLy PARAFAC2 `1e-8`, matcouply `1e-8` on its penalized objective. A TensorLy restart that runs out of iterations is rejected; a matcouply one (PARAFAC2 or CMF) is kept, as matcouply returns it, with a warning. With matcouply, `--tolerance` adds a gate on the reconstruction-error change: restarts that settle within it are accepted, even at the iteration limit, and the rest are rejected. |
 | `--restart-procs` | `1` | Parallel processes for the restarts. |
@@ -309,9 +309,13 @@ import pandas as pd
 from gMRItensor.plotting import plot_roi_evolution_panels, save_figure
 
 summary = pd.read_parquet("results/roi_analysis/summary__median.parquet")
-significance = pd.read_csv("results/roi_analysis/significance__median.csv", dtype={"roi": str})
+significance = pd.read_csv(
+    "results/roi_analysis/significance__median.csv", dtype={"roi": str}
+)
 rois = ["ventricles", "white_matter", "cortical_grey_matter", "thalamus"]
-fig, axs = plot_roi_evolution_panels(summary, significance, rois, "median", n_rows=2, n_cols=2, page_width="double")
+fig, axs = plot_roi_evolution_panels(
+    summary, significance, rois, "median", n_rows=2, n_cols=2, page_width="double"
+)
 save_figure(fig, "results/figures/overview")
 ```
 

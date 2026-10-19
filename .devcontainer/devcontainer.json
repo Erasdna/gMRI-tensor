@@ -1,0 +1,70 @@
+// Claude Code sandbox for this repo (rootless Podman). See .devcontainer/README.md.
+// Lines marked PROJECT are the ones to change when copying this folder to another repo.
+{
+  "name": "claude-${localWorkspaceFolderBasename}",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "args": {
+      "PYTHON_VERSION": "3.12" // PROJECT
+    }
+  },
+
+  // Same absolute path as on the host, so absolute paths in the repo keep working.
+  "workspaceFolder": "${localWorkspaceFolder}",
+  "workspaceMount": "source=${localWorkspaceFolder},target=${localWorkspaceFolder},type=bind",
+
+  "runArgs": [
+    "--userns=keep-id:uid=1000,gid=1000",
+    "--hostname=devbox",
+    "--name=claude-${localWorkspaceFolderBasename}"
+  ],
+  "containerUser": "vscode",
+  "remoteUser": "vscode",
+  "updateRemoteUserUID": false,
+
+  "mounts": [
+    // Files the host executes: read-only inside the container
+    "source=${localWorkspaceFolder}/.git/hooks,target=${localWorkspaceFolder}/.git/hooks,type=bind,readonly",
+    "source=${localWorkspaceFolder}/.git/config,target=${localWorkspaceFolder}/.git/config,type=bind,readonly",
+    "source=${localWorkspaceFolder}/.devcontainer,target=${localWorkspaceFolder}/.devcontainer,type=bind,readonly",
+    // Per-repo deploy key, created by init-host.sh
+    "source=${localEnv:HOME}/.ssh/deploy_keys/${localWorkspaceFolderBasename},target=/home/vscode/.ssh/deploy_key,type=bind,readonly",
+    // Hides the host .venv
+    "source=venv-${localWorkspaceFolderBasename},target=${localWorkspaceFolder}/.venv,type=volume",
+    "source=claude-devcontainer-cache,target=/home/vscode/.cache,type=volume"
+  ],
+
+  "containerEnv": {
+    "IN_CLAUDE_DEVCONTAINER": "1",
+    "SANDBOX_HOST_HOME": "${localEnv:HOME}",
+    "SANDBOX_WORKSPACE": "${localWorkspaceFolder}",
+    "SANDBOX_RO_PATHS": "${localWorkspaceFolder}/.git/hooks:${localWorkspaceFolder}/.git/config:${localWorkspaceFolder}/.devcontainer",
+    "SANDBOX_ALLOWED_KEYS": "/home/vscode/.ssh/deploy_key",
+    "GIT_SSH_COMMAND": "ssh -i /home/vscode/.ssh/deploy_key -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new",
+    "UV_LINK_MODE": "copy",
+    "UV_PYTHON_DOWNLOADS": "never"
+  },
+  "remoteEnv": {
+    "SSH_AUTH_SOCK": ""
+  },
+
+  "initializeCommand": "bash .devcontainer/init-host.sh",
+  "postCreateCommand": "bash .devcontainer/setup.sh",
+  "postAttachCommand": "bash .devcontainer/setup-claude-plugins.sh",
+
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "charliermarsh.ruff",
+        "tamasfe.even-better-toml",
+        "anthropic.claude-code"
+      ],
+      "settings": {
+        "python.defaultInterpreterPath": "${containerWorkspaceFolder}/.venv/bin/python",
+        "python.testing.pytestEnabled": true
+      }
+    }
+  }
+}

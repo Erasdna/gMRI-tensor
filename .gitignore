@@ -139,3 +139,6 @@ CLAUDE.md
 
 # Local experiments (not pushed)
 experiments/
+
+# Dev Containers CLI lock file
+devcontainer-lock.json

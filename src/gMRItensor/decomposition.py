@@ -5,6 +5,7 @@ import os
 import sys
 import warnings
 from collections import Counter
+from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -12,7 +13,6 @@ from dataclasses import replace
 from multiprocessing import current_process
 from multiprocessing import get_context
 from typing import Any
-from typing import Callable
 from typing import Literal
 from typing import overload
 
@@ -276,8 +276,11 @@ def compute_CP_decomposition(
 
     `allow_nan_imputation` treats NaN entries as missing and imputes them
     from the model's own reconstruction each iteration, via TensorLy's
-    `mask`. Off by default, where NaN input raises instead. PARAFAC2 has no
-    equivalent (see `compute_PARAFAC2_decomposition`).
+    `mask`; a tensor without NaN is fitted unmasked, as with it off. The
+    last returned error is then measured on the observed entries only
+    (TensorLy's own includes the imputed ones). Off by default, where NaN
+    input raises instead. PARAFAC2 has no equivalent (see
+    `compute_PARAFAC2_decomposition`).
 
     `non_negative` defaults to True, appropriate for a tracer signal that is
     physically non-negative. `CP_tolerance=None` uses TensorLy's own default
@@ -285,10 +288,11 @@ def compute_CP_decomposition(
     weights are ones (see `PARAFAC2Model`).
     """
     mask = None
-    if allow_nan_imputation:
+    has_nan = bool(torch.isnan(tensor).any())
+    if allow_nan_imputation and has_nan:
         mask = (~torch.isnan(tensor)).to(tensor.dtype)
         tensor = torch.nan_to_num(tensor, nan=0.0)
-    elif torch.isnan(tensor).any():
+    elif has_nan:
         raise ValueError(
             "tensor contains NaN values; pass allow_nan_imputation=True to let "
             "TensorLy impute them during fitting, or remove/fill them yourself "
@@ -326,7 +330,20 @@ def compute_CP_decomposition(
     if degeneracy_score((w, f)) < -0.85:
         raise ConvergenceError("Decomposition is degenerate")
 
+    if mask is not None:
+        errors = [*errors[:-1], _observed_error(tensor, decomp, mask)]
     return decomp, errors
+
+
+def _observed_error(
+    tensor: torch.Tensor,
+    decomp: Any,
+    mask: torch.Tensor,
+) -> torch.Tensor:
+    """Relative reconstruction error of `decomp` over the entries `mask`
+    marks as observed: `||M*(X - X_hat)|| / ||M*X||`."""
+    residual = mask * (tensor - tl.cp_to_tensor(decomp))
+    return torch.linalg.norm(residual) / torch.linalg.norm(mask * tensor)
 
 
 @contextmanager
@@ -398,7 +415,7 @@ def _build_aoadmm_options(
     for key in aoadmm_options:
         if key in managed:
             raise ValueError(
-                f"aoadmm_options[{key!r}] is managed by {owner} -- " f"{managed[key]}.",
+                f"aoadmm_options[{key!r}] is managed by {owner} -- {managed[key]}.",
             )
         if key not in _AOADMM_PASSTHROUGH_OPTIONS:
             raise ValueError(
@@ -934,14 +951,12 @@ def compute_PARAFAC2_decomposition(
 
     if solver not in ("tensorly", "matcouply"):
         raise ValueError(
-            f"Unknown PARAFAC2 solver {solver!r}; expected 'tensorly' or "
-            "'matcouply'.",
+            f"Unknown PARAFAC2 solver {solver!r}; expected 'tensorly' or 'matcouply'.",
         )
     if solver != "matcouply":
         if aoadmm_options is not None:
             raise ValueError(
-                f"aoadmm_options only applies to solver='matcouply', not "
-                f"{solver!r}.",
+                f"aoadmm_options only applies to solver='matcouply', not {solver!r}.",
             )
         if aoadmm_loss_tolerance is not None:
             raise ValueError(

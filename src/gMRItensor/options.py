@@ -45,6 +45,7 @@ _MANAGED_FIT_OPTIONS: dict[str, str] = {
     "restart_procs": "--restart-procs",
     "nn_modes": "--non-negative-modes",
     "non_negative": "--non-negative-modes",
+    "allow_nan_imputation": "the pipeline (CP always imputes NaN entries)",
     "solver": "--solver",
     "rank": "--ranks",
     "device": "the pipeline (GMRITENSOR_USE_GPU)",
@@ -173,8 +174,7 @@ class FitOptions:
             normalised = tuple(sorted(set(int(m) for m in modes)))  # type: ignore[union-attr]
             _check(
                 bool(normalised) and set(normalised) <= {0, 1, 2},
-                "non_negative_modes are 0 (subject), 1 (time), 2 (label), got "
-                f"{modes}",
+                f"non_negative_modes are 0 (subject), 1 (time), 2 (label), got {modes}",
             )
             object.__setattr__(self, "non_negative_modes", normalised)
         for key, owner in _MANAGED_FIT_OPTIONS.items():
@@ -455,8 +455,7 @@ class DecompositionPlotOptions:
         )
         _check(
             self.min_subject_coefficient >= 0,
-            "min_subject_coefficient must be >= 0, got "
-            f"{self.min_subject_coefficient}",
+            f"min_subject_coefficient must be >= 0, got {self.min_subject_coefficient}",
         )
         _check_page_width(self.page_width)
         _check(self.dpi >= 1, f"dpi must be >= 1, got {self.dpi}")

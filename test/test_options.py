@@ -68,6 +68,7 @@ def test_fit_tolerance_defaults_to_the_solvers() -> None:
         ("tolerance", "--tolerance"),
         ("restart_procs", "--restart-procs"),
         ("rank", "--ranks"),
+        ("allow_nan_imputation", "pipeline"),
     ],
 )
 def test_fit_options_cannot_override_the_flags(key: str, flag: str) -> None:
