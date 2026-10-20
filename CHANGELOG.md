@@ -17,6 +17,7 @@
 - **matcouply loss tolerance:** `1e-7` instead of matcouply's `1e-8`, which fits rarely met within their iteration budget although the error had stopped improving (`--fit-option aoadmm_loss_tolerance=1e-8` restores it).
 - **Output layout:** each model is written to its own directory, `<method>_rank_<r>/model.h5` with its `decompose.json`; `fits.csv` lists every model of the output directory.
 - **Stricter arguments:** abbreviated flags, and arguments that would have no effect (`replicability --restart-procs`, `--splits` with `halfhalf`, `--subject-info` without `--stratify-by`, `--tasks-per-job` without `--job`), are errors.
+- **Moved:** `gMRItensor.decomposition` is a package (`models`, `cp`, `parafac2`, `cmf`, `restarts`); its public names are still importable from `gMRItensor.decomposition`. `scatter_to_volume`, `expand_roi_mode_to_voxels`, `merge_segmentations` and `region_masks_from_segmentations` moved from `gMRItensor.plotting.utils` to `gMRItensor.volumes`.
 - **Removed:** the `normalize` fit option (fits keep their scale in the factors; figures normalise), and the legacy preprocessing API (`compute_tracer_from_image`, `compute_tracer_parallel`, `iter_tracer_results`, `write_tracer_parquet`, `prepare_tensor`), superseded by `gmri preprocess` and `load_tensor_from_parquet`.
 
 ### Fixed

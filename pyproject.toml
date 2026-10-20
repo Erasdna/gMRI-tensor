@@ -6,7 +6,7 @@ name = "gMRItensor"
 authors = [
     {name = "Andreas R. Solheim", email = "solheim@simula.no"},
     ]
-version = "0.1.0"
+version = "0.2.0"
 description = "Tensor decompositions (CP, PARAFAC2, CMF) of gadolinium-enhanced MRI time series, with preprocessing, group statistics and figures"
 readme = "README.md"
 requires-python = ">=3.10"
