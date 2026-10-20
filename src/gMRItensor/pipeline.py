@@ -32,7 +32,9 @@ from gMRItensor.group_statistics import aggregate_subjects
 from gMRItensor.group_statistics import compare_groups_over_time
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import significance_summary
+from gMRItensor.group_statistics import subjects_outside_sd
 from gMRItensor.group_statistics import subjects_with_groups
+from gMRItensor.group_statistics import summarize_cohort_over_time
 from gMRItensor.group_statistics import summarize_groups_over_time
 from gMRItensor.jobs import collect
 from gMRItensor.jobs import Data
@@ -60,8 +62,11 @@ from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import StatisticsPlotOptions
 from gMRItensor.options import TensorOptions
+from gMRItensor.outliers import data_slices
+from gMRItensor.outliers import outlier_table
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.mode_grid import plot_mode_grid
+from gMRItensor.plotting.outliers import plot_outliers
 from gMRItensor.plotting.reproducibility import plot_reproducibility
 from gMRItensor.plotting.roi_evolution import figure_path
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_panels
@@ -247,8 +252,11 @@ def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult
     adds concentrations if a concentration statistic is requested, and
     writes to `<output_dir>/roi_analysis/`: `roi_statistics.parquet`, one
     `summary__<stat>.parquet` and `significance__<stat>.csv` per statistic,
-    and `summary.csv`. Then one figure per ROI and statistic, drawn from
-    those saved tables, under `<output_dir>/figures/roi/`.
+    and `summary.csv` (with `sd_bands`, also `cohort__<stat>.parquet`, the
+    cohort mean and SD behind the bands, and `outside_3sd__<stat>.csv`, the
+    subjects named for a point beyond +/-3 SD). Then one figure per ROI and
+    statistic, drawn from those saved tables, under
+    `<output_dir>/figures/roi/`.
     """
     metadata = _metadata(options.roi_signal, "roi_signal")
     signal = metadata.get("signal", "delta_R1")
@@ -305,6 +313,13 @@ def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult
         )
         significance["significant"] = significance["p_adj"] < options.alpha
         significance.to_csv(significance_path, index=False)
+        if options.sd_bands:
+            cohort = summarize_cohort_over_time(observed, facet="roi", value=statistic)
+            cohort.to_parquet(tables_dir / f"cohort__{statistic}.parquet", index=False)
+            subjects_outside_sd(observed, cohort, facet="roi", value=statistic).to_csv(
+                tables_dir / f"outside_3sd__{statistic}.csv",
+                index=False,
+            )
         tables[statistic] = (
             pd.read_parquet(summary_path),
             # Label ROIs are named str(id): keep them strings, not ints.
@@ -315,6 +330,13 @@ def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult
 
     written: list[Path] = []
     for statistic, (summary_table, significance) in tables.items():
+        cohort = outside = None
+        if options.sd_bands:
+            cohort = pd.read_parquet(tables_dir / f"cohort__{statistic}.parquet")
+            outside = pd.read_csv(
+                tables_dir / f"outside_3sd__{statistic}.csv",
+                dtype={"roi": str, "subject": str, "group": str},
+            )
         for roi in frame["roi"].drop_duplicates():
             if options.layout == "rows":
                 fig, _ = plot_roi_evolution_rows(
@@ -325,6 +347,8 @@ def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult
                     statistic,
                     page_width=options.page_width,
                     signal=signal,
+                    cohort=cohort,
+                    outside=outside,
                 )
             else:
                 fig, _ = plot_roi_evolution_panels(
@@ -1201,6 +1225,54 @@ def _component_weights_table(weights: np.ndarray) -> pd.DataFrame:
     )
 
 
+def load_model_data(
+    model: Path,
+    saved: SavedDecomposition,
+    input_override: Path | None = None,
+) -> list[np.ndarray]:
+    """The data `model` was fitted to, one array per subject, in the space
+    of the fit (same subjects, scaling and centring).
+
+    Settings come from the `decompose.json` next to the model; the input
+    path from there unless `input_override` is given. Raises
+    `FileNotFoundError` if either file is missing and `ValueError` if the
+    reloaded subjects are not the model's.
+    """
+    record_path = Path(model).with_name("decompose.json")
+    _require(record_path, "decompose")
+    record = json.loads(record_path.read_text())["options"]
+    path = Path(input_override or record["input"])
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path}, the input recorded in {record_path}, not found; pass --input",
+        )
+    data = load_decomposition_input(
+        path,
+        saved.method,
+        TensorOptions(**record["tensor"]),
+        record["statistic"],
+    )
+    if [str(s) for s in data.subjects] != [str(s) for s in saved.subjects]:
+        raise ValueError(
+            f"the subjects in {path} are not those of {model}; was the input "
+            "preprocessed again after the fit?",
+        )
+    return data_slices(data.data)
+
+
+def _optional_groups(
+    subjects: list[str],
+    subject_info: pd.DataFrame,
+    group_variable: str,
+) -> list[str | None]:
+    """Each subject's group as text, None if it has none."""
+    lookup = subject_info.set_index("subjects")[group_variable]
+    return [
+        str(lookup[s]) if s in lookup.index and pd.notna(lookup[s]) else None
+        for s in subjects
+    ]
+
+
 def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
     """`gmri plot decomposition`: one saved model -> figures.
 
@@ -1218,8 +1290,13 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
     segmentation: without one they are skipped with a note if no part was
     chosen explicitly, and raise otherwise.
 
+    The outlier part reloads the data the model was fitted to
+    (`load_model_data`) and scores every fitted subject, also those without
+    a group (`outlier_table`, written as `<model>__outliers.csv`); without
+    that data it is skipped with a note if no part was chosen explicitly.
+
     Returns the figure files only: the CSVs (component weights, evolving-mode
-    significance) are written next to them but not listed.
+    significance, outliers) are written next to them but not listed.
     """
     saved = load_decomposition(options.model)
     # Of the full fit, before any subjects are left out below.
@@ -1249,6 +1326,26 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
                 raise ValueError(message)
             print(f"Skipping {message}.")
             parts = [p for p in parts if p not in ("mode_grid", "spatial")]
+
+    outliers = None
+    outlier_groups: list[str | None] = []
+    if "outliers" in parts:
+        # Before subjects without a group are left out: leverage and
+        # residuals are relative to the model as fitted.
+        try:
+            observed = load_model_data(options.model, saved, options.input)
+        except FileNotFoundError as error:
+            if options.parts:
+                raise
+            print(f"Skipping the outlier part: {error}")
+            parts.remove("outliers")
+        else:
+            outliers = outlier_table(saved, observed, options.outlier_alpha)
+            outlier_groups = _optional_groups(
+                subjects,
+                subject_info,
+                options.group_variable,
+            )
 
     grouped = {"mode_grid", "subject_mode"} | (
         set() if saved.method == "cp" else {"time"}
@@ -1352,6 +1449,27 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
             page_width=page_width,
         ):
             save(fig, f"spatial_{name}")
+    if outliers is not None:
+        table, cutoffs = outliers
+        fig, _ = plot_outliers(
+            table,
+            cutoffs,
+            outlier_groups,
+            options.group_variable,
+            page_width=min(page_width, resolve_page_width("single")),
+        )
+        save(fig, "outliers")
+        table.to_csv(out_dir / f"{stem}__outliers.csv", index=False)
+        flagged = table.loc[
+            table[["high_leverage", "high_residual", "high_residual_robust"]].any(
+                axis=1,
+            ),
+            "subject",
+        ]
+        print(
+            f"Possible outliers (alpha {options.outlier_alpha}): "
+            f"{', '.join(flagged) if len(flagged) else 'none'}.",
+        )
     write_provenance(Path(options.output_dir), "plot_decomposition", options)
     return written
 

@@ -20,6 +20,7 @@ from gMRItensor.model_io import _read_decomposition
 from gMRItensor.model_io import component_weights
 from gMRItensor.model_io import load_decomposition
 from gMRItensor.model_io import save_decomposition
+from gMRItensor.model_io import select_subjects
 from gMRItensor.model_io import sort_components
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
@@ -999,6 +1000,7 @@ def test_plot_parafac2_roi_model_with_segmentation(
     assert names == [
         "parafac2_rank_2__evolving_mode.png",
         "parafac2_rank_2__mode_grid.png",
+        "parafac2_rank_2__outliers.png",
         "parafac2_rank_2__spatial_csf.png",
         "parafac2_rank_2__spatial_parenchyma.png",
         "parafac2_rank_2__subject_mode.png",
@@ -1021,6 +1023,7 @@ def test_plot_roi_model_without_segmentation(
 
     assert sorted(p.name for p in written) == [
         "parafac2_rank_2__evolving_mode.png",
+        "parafac2_rank_2__outliers.png",
         "parafac2_rank_2__subject_mode.png",
     ]
     assert "segmentation" in capsys.readouterr().out
@@ -1271,6 +1274,7 @@ def test_cmf_end_to_end(
     assert sorted(p.name for p in written) == [
         "cmf_rank_2__evolving_mode.png",
         "cmf_rank_2__mode_grid.png",
+        "cmf_rank_2__outliers.png",
         "cmf_rank_2__spatial_csf.png",
         "cmf_rank_2__spatial_parenchyma.png",
         "cmf_rank_2__subject_mode.png",
@@ -1647,3 +1651,105 @@ def test_component_weights_table_handles_an_all_zero_fit() -> None:
     assert list(table["relative_weight"]) == [0.0, 0.0]
     table = pipeline._component_weights_table(np.array([3.0, 1.0]))
     assert list(table["relative_weight"]) == [0.75, 0.25]
+
+
+# Outlier diagnostics -------------------------------------------------------
+
+
+@pytest.mark.parametrize("method", ["cp", "parafac2", "cmf"])
+def test_plot_outliers_part_writes_figure_and_table(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    (model,) = run_decomposition(
+        decomposition_options(synthetic_study, method=method, ranks=(2,)),
+    )
+
+    written = run_decomposition_plots(
+        plot_options(synthetic_study, model, parts=("outliers",)),
+    )
+
+    assert [p.name for p in written] == [f"{method}_rank_2__outliers.png"]
+    table = pd.read_csv(
+        _figures(synthetic_study) / f"{method}_rank_2__outliers.csv",
+        dtype={"subject": str},
+    )
+    saved = load_decomposition(model)
+    assert list(table["subject"]) == [str(s) for s in saved.subjects]
+    assert table["leverage"].sum() == pytest.approx(2)
+    assert table["residual"].sum() == pytest.approx(1)
+    assert "Possible outliers" in capsys.readouterr().out
+
+
+def test_plot_outliers_needs_the_fitted_data(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
+    results = preprocess(synthetic_study)
+    (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
+    record = model.with_name("decompose.json")
+    data = json.loads(record.read_text())
+    data["options"]["input"] = str(synthetic_study.root / "moved.parquet")
+    record.write_text(json.dumps(data))
+
+    # Chosen explicitly: an error that names the way out.
+    with pytest.raises(FileNotFoundError, match="--input"):
+        run_decomposition_plots(
+            plot_options(synthetic_study, model, parts=("outliers",)),
+        )
+    # --input points at the data instead.
+    written = run_decomposition_plots(
+        plot_options(
+            synthetic_study,
+            model,
+            parts=("outliers",),
+            input=results / "data" / "roi_signal.parquet",
+        ),
+    )
+    assert [p.name for p in written] == ["parafac2_rank_2__outliers.png"]
+    # By default: skipped with a note.
+    record.unlink()
+    capsys.readouterr()
+    written = run_decomposition_plots(plot_options(synthetic_study, model))
+    assert "parafac2_rank_2__outliers.png" not in [p.name for p in written]
+    assert "Skipping the outlier part" in capsys.readouterr().out
+
+
+def test_plot_outliers_rejects_data_with_other_subjects(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
+    saved = load_decomposition(model)
+    fewer = select_subjects(saved, list(range(len(saved.subjects) - 1)))
+
+    with pytest.raises(ValueError, match="not those of"):
+        pipeline.load_model_data(model, fewer)
+
+
+def test_run_statistics_plots_sd_bands_write_the_cohort_table(
+    synthetic_study: Any,
+) -> None:
+    preprocess(synthetic_study)
+
+    run_statistics_plots(statistics_options(synthetic_study, sd_bands=True))
+
+    cohort = pd.read_parquet(
+        synthetic_study.root / "results" / "roi_analysis" / "cohort__median.parquet",
+    )
+    assert list(cohort.columns) == ["roi", "timepoint", "mean", "std", "n"]
+    # Six subjects: nothing can lie beyond 3 SD, but the table is written.
+    outside = pd.read_csv(
+        synthetic_study.root / "results" / "roi_analysis" / "outside_3sd__median.csv",
+    )
+    assert outside.empty and "z" in outside.columns
+    with pytest.raises(ValueError, match="--sd-bands needs --layout rows"):
+        statistics_options(synthetic_study, sd_bands=True, layout="panels")

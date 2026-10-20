@@ -192,6 +192,7 @@ def test_statistics_plot_options(tmp_path: Path) -> None:
         ({"rois": ("csf",)}, "rois"),
         ({"relaxivity": -1.0}, "relaxivity"),
         ({"layout": "grid"}, "layout"),
+        ({"sd_bands": True, "layout": "panels"}, "--sd-bands needs --layout rows"),
     ]
     for bad, match in cases:
         with pytest.raises(ValueError, match=match):
@@ -214,6 +215,7 @@ def test_decomposition_plot_options(tmp_path: Path) -> None:
         "subject_mode",
         "time",
         "spatial",
+        "outliers",
     )
     assert DecompositionPlotOptions(**common, parts=("time",)).selected_parts() == (
         "time",
@@ -222,6 +224,11 @@ def test_decomposition_plot_options(tmp_path: Path) -> None:
         DecompositionPlotOptions(**common, parts=("everything",))
     with pytest.raises(ValueError, match="slices"):
         DecompositionPlotOptions(**common, slices=(1, 2))  # type: ignore[arg-type]
+    for alpha in (0.0, 1.0):
+        with pytest.raises(ValueError, match="outlier_alpha"):
+            DecompositionPlotOptions(**common, outlier_alpha=alpha)
+    with pytest.raises(FileNotFoundError, match="input"):
+        DecompositionPlotOptions(**common, input=tmp_path / "missing.parquet")
 
 
 def test_options_json_round_trip() -> None:

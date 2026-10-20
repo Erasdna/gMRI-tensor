@@ -450,11 +450,17 @@ def _add_plot(commands: Any) -> None:
         default="rows",
         help="figure layout (default: rows)",
     )
+    statistics.add_argument(
+        "--sd-bands",
+        action="store_true",
+        help="draw the cohort mean +/- 1, 2 and 3 SD behind the subject curves, "
+        "to spot outlying subjects (rows layout only)",
+    )
     _output_options(statistics)
 
     decomposition = kinds.add_parser(
         "decomposition",
-        help="mode grid, subject mode, time mode and spatial maps of one model",
+        help="mode grid, subject, time and spatial modes and outliers of one model",
         description=(
             "Plot a saved <method>_rank_<r>.h5. Without part flags every part is drawn; "
             "spatial parts of a per-ROI model need --segmentation."
@@ -504,6 +510,12 @@ def _add_plot(commands: Any) -> None:
         "--spatial",
         action="store_true",
         help="spatial mode on brain slices",
+    )
+    parts.add_argument(
+        "--outliers",
+        action="store_true",
+        help="leverage against residual per subject, with Bonferroni cut-offs; "
+        "reloads the data the model was fitted to",
     )
     decomposition.add_argument(
         "--segmentation",
@@ -571,6 +583,19 @@ def _add_plot(commands: Any) -> None:
         help="PARAFAC2/CMF: drop a subject from a component's time curves, "
         "ribbon and tests when |subject mode| < C (default: %(default)g; 0 "
         "drops only loadings the fit set to zero; ignored for CP)",
+    )
+    decomposition.add_argument(
+        "--outlier-alpha",
+        type=float,
+        default=0.01,
+        help="family-wise p for the outlier cut-offs, Bonferroni-corrected over "
+        "subjects (default: %(default)g)",
+    )
+    decomposition.add_argument(
+        "--input",
+        type=Path,
+        help="data the model was fitted to, for --outliers (default: the input "
+        "recorded in decompose.json next to the model)",
     )
     _output_options(decomposition)
 
@@ -847,6 +872,7 @@ def _run_plot(args: argparse.Namespace) -> None:
             alpha=args.alpha,
             min_group_n=args.min_group_n,
             layout=args.layout,
+            sd_bands=args.sd_bands,
             page_width=_page_width(args.page_width),
             formats=tuple(args.formats),
             dpi=args.dpi,
@@ -898,6 +924,8 @@ def _run_plot(args: argparse.Namespace) -> None:
             alpha=args.alpha,
             min_group_n=args.min_group_n,
             min_subject_coefficient=args.min_subject_coefficient,
+            outlier_alpha=args.outlier_alpha,
+            input=args.input,
             page_width=_page_width(args.page_width),
             formats=tuple(args.formats),
             dpi=args.dpi,

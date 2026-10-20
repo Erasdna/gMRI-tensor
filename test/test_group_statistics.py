@@ -9,7 +9,9 @@ from gMRItensor.group_statistics import aggregate_subjects
 from gMRItensor.group_statistics import compare_groups_over_time
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import significance_summary
+from gMRItensor.group_statistics import subjects_outside_sd
 from gMRItensor.group_statistics import subjects_with_groups
+from gMRItensor.group_statistics import summarize_cohort_over_time
 from gMRItensor.group_statistics import summarize_groups_over_time
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.utils import scale_mode
@@ -284,3 +286,76 @@ def test_aggregate_subjects_rejects_bad_arguments() -> None:
         aggregate_subjects(np.ones((3, 1)), "mode")  # type: ignore[arg-type]
     with pytest.raises(ValueError, match="trim"):
         aggregate_subjects(np.ones((3, 1)), "trimmed", trim=-1)
+
+
+def test_summarize_cohort_over_time_pools_groups():
+    long_df = pd.DataFrame(
+        {
+            "roi": ["r"] * 5,
+            "group": ["A", "A", "B", "B", "A"],
+            "timepoint": [0, 0, 0, 0, 6],
+            "median": [1.0, 2.0, 3.0, 4.0, 5.0],
+        },
+    )
+
+    stats = summarize_cohort_over_time(long_df, facet="roi", value="median")
+
+    assert list(stats.columns) == ["roi", "timepoint", "mean", "std", "n"]
+    first = stats[stats["timepoint"] == 0].iloc[0]
+    assert first["mean"] == pytest.approx(2.5)
+    assert first["std"] == pytest.approx(np.std([1, 2, 3, 4], ddof=1))
+    assert first["n"] == 4
+    single = stats[stats["timepoint"] == 6].iloc[0]
+    assert single["std"] == 0.0 and single["n"] == 1
+
+
+def test_subjects_outside_sd_names_each_at_its_most_extreme_point():
+    rng = np.random.default_rng(0)
+    rows = []
+    for i in range(30):
+        for timepoint in (0, 6, 24):
+            value = rng.normal()
+            if i == 7:
+                value += {0: 0.0, 6: 8.0, 24: 6.0}[timepoint]
+            rows.append(
+                {
+                    "roi": "r",
+                    "subject": f"s{i}",
+                    "group": "A" if i < 15 else "B",
+                    "timepoint": timepoint,
+                    "median": value,
+                },
+            )
+    long_df = pd.DataFrame(rows)
+    cohort = summarize_cohort_over_time(long_df, facet="roi", value="median")
+
+    outside = subjects_outside_sd(long_df, cohort, facet="roi", value="median")
+
+    assert list(outside.columns) == [
+        "roi",
+        "subject",
+        "group",
+        "timepoint",
+        "median",
+        "z",
+    ]
+    assert outside[["subject", "group", "timepoint"]].values.tolist() == [
+        ["s7", "A", 6],
+    ]
+    assert outside["z"].iloc[0] > 3
+
+
+def test_subjects_outside_sd_finds_nothing_in_a_small_cohort():
+    """With n <= 10 no point can lie beyond 3 sample SDs."""
+    long_df = pd.DataFrame(
+        {
+            "roi": "r",
+            "subject": [f"s{i}" for i in range(10)],
+            "group": "A",
+            "timepoint": 0,
+            "median": [0.0] * 9 + [100.0],
+        },
+    )
+    cohort = summarize_cohort_over_time(long_df, facet="roi", value="median")
+
+    assert subjects_outside_sd(long_df, cohort, facet="roi", value="median").empty

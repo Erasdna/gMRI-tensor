@@ -292,6 +292,43 @@ def plot_group_ribbons(
     return ymin, ymax
 
 
+#: Opacity of the nested cohort SD bands, innermost (±1 SD) first; they
+#: stack, so the ±1 SD region is the darkest.
+SD_BAND_ALPHAS = (0.18, 0.12, 0.08)
+SD_BAND_COLOR = "0.45"
+
+
+def plot_sd_bands(
+    ax: matplotlib.axes.Axes,
+    cohort: pd.DataFrame,
+    n_sd: Sequence[int] = (1, 2, 3),
+) -> tuple[float, float]:
+    """Draw the cohort mean and nested mean +/- k SD bands in grey, below
+    any curves, for one facet.
+
+    `cohort` is `group_statistics.summarize_cohort_over_time` output
+    pre-filtered to that facet. Returns the `(ymin, ymax)` drawn, for
+    row-wise y-limit finalization.
+    """
+    stats = cohort.sort_values("timepoint")
+    timepoints = stats["timepoint"].to_numpy()
+    mean = stats["mean"].to_numpy()
+    std = stats["std"].to_numpy()
+    for k, alpha in zip(n_sd, SD_BAND_ALPHAS):
+        ax.fill_between(
+            timepoints,
+            mean - k * std,
+            mean + k * std,
+            color=SD_BAND_COLOR,
+            alpha=alpha,
+            linewidth=0,
+            zorder=0,
+        )
+    ax.plot(timepoints, mean, color=SD_BAND_COLOR, linewidth=0.8, zorder=1)
+    widest = max(n_sd)
+    return float(np.min(mean - widest * std)), float(np.max(mean + widest * std))
+
+
 def plot_subject_curves(
     ax: matplotlib.axes.Axes,
     curves: list[tuple[np.ndarray, np.ndarray]],

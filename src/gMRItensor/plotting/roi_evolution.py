@@ -16,9 +16,13 @@ from gMRItensor.plotting.utils import apply_row_ylims
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import get_color_palette
 from gMRItensor.plotting.utils import plot_group_ribbons
+from gMRItensor.plotting.utils import plot_sd_bands
 from gMRItensor.plotting.utils import plot_subject_curves
 from gMRItensor.plotting.utils import resolve_page_width
+from gMRItensor.plotting.utils import SD_BAND_ALPHAS
+from gMRItensor.plotting.utils import SD_BAND_COLOR
 from gMRItensor.roi_groups import roi_display_name
+from matplotlib.patches import Patch
 
 plt.style.use(["science", "no-latex"])
 matplotlib.use("Agg")
@@ -36,6 +40,7 @@ _STAR_OFFSET_PT = 1.0
 # Extra figure height [in] for the figure legend and shared time label,
 # which take fixed space regardless of the number of rows.
 _FIGURE_LABEL_HEIGHT = 0.5
+SD_BAND_LABEL = r"Cohort mean $\pm$1/2/3 SD"
 
 
 def statistic_label(statistic: str, signal: str = "delta_R1") -> str:
@@ -85,21 +90,31 @@ def _figsize(
 def _add_figure_labels(
     fig: matplotlib.figure.Figure,
     legend_ax: matplotlib.axes.Axes,
-    n_groups: int,
     statistic: str,
     signal: str,
+    sd_bands: bool = False,
 ) -> None:
     """One legend above all panels plus shared time and statistic labels.
 
     Figure-level labels instead of per-axes ones, so narrow (single column)
-    figures do not collide.
+    figures do not collide. With `sd_bands` the legend also names the grey
+    cohort bands.
     """
     handles, labels = legend_ax.get_legend_handles_labels()
+    if sd_bands:
+        handles.append(
+            Patch(
+                color=SD_BAND_COLOR,
+                alpha=sum(SD_BAND_ALPHAS),
+                linewidth=0,
+            ),
+        )
+        labels.append(SD_BAND_LABEL)
     fig.legend(
         handles,
         labels,
         loc="outside upper center",
-        ncols=n_groups,
+        ncols=len(handles),
         frameon=False,
     )
     fontsize = plt.rcParams["axes.labelsize"]
@@ -148,6 +163,31 @@ def _mark_significance(
         )
 
 
+def _name_points(
+    group_axes: Sequence[matplotlib.axes.Axes],
+    categories: list[str],
+    points: pd.DataFrame,
+    statistic: str,
+) -> None:
+    """Name each subject next to its point in its group's column: above a
+    high point, below a low one."""
+    # As text: a CSV round trip turns numeric group codes into strings.
+    names = [str(category) for category in categories]
+    for _, point in points.iterrows():
+        if str(point["group"]) not in names:
+            continue
+        above = point["z"] > 0
+        group_axes[names.index(str(point["group"]))].annotate(
+            str(point["subject"]),
+            xy=(point["timepoint"], point[statistic]),
+            xytext=(3, 3 if above else -3),
+            textcoords="offset points",
+            ha="left",
+            va="bottom" if above else "top",
+            fontsize="x-small",
+        )
+
+
 def plot_roi_evolution_rows(
     summary: pd.DataFrame,
     subject_values: pd.DataFrame,
@@ -157,6 +197,8 @@ def plot_roi_evolution_rows(
     page_width: str | float = "double",
     width_to_height_ratio: float = 1.618,
     signal: str = "delta_R1",
+    cohort: pd.DataFrame | None = None,
+    outside: pd.DataFrame | None = None,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """One row per ROI: group ribbons, then each group's subject curves.
 
@@ -167,7 +209,12 @@ def plot_roi_evolution_rows(
     `significance` the matching `compare_groups_over_time` output with a
     `significant` column, for the same `statistic`. Significant time
     points get a `*` above the ribbon. `page_width` is a `JOURNAL_WIDTHS`
-    name or inches.
+    name or inches. With `cohort` (`summarize_cohort_over_time(...,
+    facet="roi")` output) every subject column also gets the cohort mean
+    and grey +/-1, 2 and 3 SD bands behind the curves, to spot outlying
+    subjects; the y-range then covers +/-3 SD. Subjects in `outside`
+    (`subjects_outside_sd(..., facet="roi")` output) are named at that
+    point, as the outlier figure names subjects.
 
     Returns `(fig, axs)`, `axs` of shape `(len(rois), 1 + n_groups)`.
     """
@@ -195,6 +242,12 @@ def plot_roi_evolution_rows(
         )
         roi_values = observed[observed["roi"] == roi]
         for col, category in enumerate(categories, start=1):
+            if cohort is not None:
+                b_min, b_max = plot_sd_bands(
+                    axs[row, col],
+                    cohort[cohort["roi"] == roi],
+                )
+                row_min, row_max = min(row_min, b_min), max(row_max, b_max)
             group_values = roi_values[roi_values["group"] == category]
             curves = [
                 (
@@ -216,11 +269,24 @@ def plot_roi_evolution_rows(
         for ax in axs[row, :]:
             ax.set_xticks(sorted(roi_summary["timepoint"].unique()))
         axs[row, 0].set_ylabel(roi_display_name(roi))
+        if outside is not None:
+            _name_points(
+                axs[row, 1:],
+                categories,
+                outside[outside["roi"] == roi],
+                statistic,
+            )
 
     axs[0, 0].set_title(r"Mean $\pm$ SEM")
     for col, category in enumerate(categories, start=1):
         axs[0, col].set_title(str(category))
-    _add_figure_labels(fig, axs[0, 0], len(categories), statistic, signal)
+    _add_figure_labels(
+        fig,
+        axs[0, 0],
+        statistic,
+        signal,
+        sd_bands=cohort is not None,
+    )
 
     apply_row_ylims(axs, row_ylims)
     fig.draw_without_rendering()  # fix axes sizes for `_mark_significance`
@@ -283,7 +349,7 @@ def plot_roi_evolution_panels(
         shared = (min(lo for lo, _ in ylims), max(hi for _, hi in ylims))
         ylims = [shared] * len(ylims)
     apply_row_ylims(np.array(panels).reshape(-1, 1), ylims)
-    _add_figure_labels(fig, panels[0], len(categories), statistic, signal)
+    _add_figure_labels(fig, panels[0], statistic, signal)
     fig.draw_without_rendering()  # fix axes sizes for `_mark_significance`
     for ax, roi in zip(panels, rois):
         _mark_significance(

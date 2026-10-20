@@ -173,6 +173,60 @@ def summarize_groups_over_time(
     return stats
 
 
+def summarize_cohort_over_time(
+    long_df: pd.DataFrame,
+    facet: str,
+    value: str = "value",
+) -> pd.DataFrame:
+    """Mean and SD of `value` over all subjects, regardless of group, at each
+    time point, per `facet`.
+
+    The reference against which a single subject's curve can be judged an
+    outlier (`plot_roi_evolution_rows`'s SD bands). Returns columns
+    `facet`, `timepoint`, `mean`, `std`, `n`; `std` is 0.0 at `n == 1`.
+    """
+    stats = (
+        long_df.groupby([facet, "timepoint"])[value]
+        .agg(mean="mean", std="std", n="count")
+        .reset_index()
+    )
+    stats["std"] = stats["std"].fillna(0.0)
+    return stats
+
+
+def subjects_outside_sd(
+    long_df: pd.DataFrame,
+    cohort: pd.DataFrame,
+    facet: str,
+    value: str = "value",
+    n_sd: float = 3.0,
+) -> pd.DataFrame:
+    """Subjects with a point beyond the cohort mean +/- `n_sd` SD, per `facet`.
+
+    `cohort` is `summarize_cohort_over_time` output for the same `long_df`
+    (needs `subject`, `group`, `facet`, `timepoint`, `value`). One row per
+    such subject and facet value, at its most extreme point: columns
+    `facet`, `subject`, `group`, `timepoint`, `value`, `z`. With the sample
+    SD no point can exceed `(n - 1) / sqrt(n)` SD, so with 10 or fewer
+    subjects nothing is found at `n_sd = 3`.
+    """
+    columns = [facet, "subject", "group", "timepoint", value, "z"]
+    # Renamed: `long_df` may hold a `mean` statistic of its own.
+    reference = cohort[[facet, "timepoint", "mean", "std"]].rename(
+        columns={"mean": "_cohort_mean", "std": "_cohort_std"},
+    )
+    merged = long_df.dropna(subset=[value]).merge(reference, on=[facet, "timepoint"])
+    std = merged["_cohort_std"]
+    merged["z"] = (merged[value] - merged["_cohort_mean"]) / std.where(std > 0)
+    merged = merged.dropna(subset=["z"])
+    if merged.empty:
+        return pd.DataFrame(columns=columns)
+    worst = merged.loc[
+        merged["z"].abs().groupby([merged[facet], merged["subject"]]).idxmax()
+    ]
+    return worst.loc[worst["z"].abs() > n_sd, columns].reset_index(drop=True)
+
+
 def compare_groups_over_time(
     long_df: pd.DataFrame,
     categories: list[str],

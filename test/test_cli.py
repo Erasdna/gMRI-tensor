@@ -84,6 +84,7 @@ def test_cli_runs_every_command(
                 "--statistics",
                 "median",
                 "median_concentration",
+                "--sd-bands",
                 "--formats",
                 "png",
                 "--dpi",
@@ -94,6 +95,7 @@ def test_cli_runs_every_command(
     )
     assert "group differences" in capsys.readouterr().out
     assert (results / "roi_analysis" / "summary.csv").exists()
+    assert (results / "roi_analysis" / "cohort__median.parquet").exists()
 
     assert _run(["decompose", "run", *_fit_args(results, "decomposition")]) == 0
     model = results / "decomposition" / "parafac2_rank_1.h5"
@@ -135,6 +137,22 @@ def test_cli_runs_every_command(
         results / "figures" / "decomposition" / "parafac2_rank_1__mode_grid.png"
     ).exists()
     assert _run([*plot, "--time"]) == 0
+    capsys.readouterr()
+    outliers = [
+        *plot,
+        "--outliers",
+        "--outlier-alpha",
+        0.05,
+        "--input",
+        results / "data" / "roi_signal.parquet",
+    ]
+    assert _run(outliers) == 0
+    assert "Possible outliers (alpha 0.05)" in capsys.readouterr().out
+    assert (
+        results / "figures" / "decomposition" / "parafac2_rank_1__outliers.csv"
+    ).exists()
+    assert _run([*outliers[:-2], "--outlier-alpha", 1.5]) == 2
+    assert "outlier_alpha" in capsys.readouterr().err
 
 
 def test_cli_plot_subject_mode_variables(
@@ -262,6 +280,24 @@ def test_cli_reports_errors_on_one_line(
 
     assert _run(["decompose", "run", "--output-dir", results / "d"]) == 2
     assert "--input" in capsys.readouterr().err
+
+    statistics = [
+        "plot",
+        "statistics",
+        "--roi-signal",
+        results / "data" / "roi_signal.parquet",
+        "--subject-info",
+        synthetic_study.subject_info,
+        "--group-variable",
+        "diagnosis",
+        "--output-dir",
+        results,
+        "--layout",
+        "panels",
+        "--sd-bands",
+    ]
+    assert _run(statistics) == 2
+    assert "--sd-bands needs --layout rows" in capsys.readouterr().err
 
 
 def test_cli_cmf(synthetic_study: Any) -> None:

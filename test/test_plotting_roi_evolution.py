@@ -4,10 +4,12 @@ import numpy as np
 import pandas as pd
 import pytest
 from gMRItensor.group_statistics import compare_groups_over_time
+from gMRItensor.group_statistics import summarize_cohort_over_time
 from gMRItensor.group_statistics import summarize_groups_over_time
 from gMRItensor.plotting.roi_evolution import figure_path
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_panels
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_rows
+from gMRItensor.plotting.roi_evolution import SD_BAND_LABEL
 from gMRItensor.plotting.roi_evolution import statistic_label
 from gMRItensor.plotting.utils import get_color_palette
 from gMRItensor.plotting.utils import JOURNAL_WIDTHS
@@ -208,4 +210,82 @@ def test_plot_time_mode_one_row_per_component():
     assert [len(ax.lines) for ax in axs] == [1, 1, 1]
     np.testing.assert_array_equal(axs[0].lines[0].get_xdata(), [0, 6, 24, 48])
     assert axs[2].get_ylabel() == "Component 3"
+    plt.close(fig)
+
+
+def test_rows_layout_sd_bands_in_subject_columns_only(roi_tables):
+    stats, summary, significance = roi_tables
+    cohort = summarize_cohort_over_time(stats, facet="roi", value="median")
+
+    fig, axs = plot_roi_evolution_rows(
+        summary,
+        stats,
+        significance,
+        rois=["ventricles"],
+        statistic="median",
+        cohort=cohort,
+    )
+
+    ribbon_fills = len(axs[0, 0].collections)
+    assert ribbon_fills == 2  # one SEM ribbon per group, no bands
+    for ax in axs[0, 1:]:
+        assert len(ax.collections) == 3  # +/-1, 2, 3 SD
+        assert len(ax.lines) == 6 + 1  # subject curves + cohort mean
+    # The +/-3 SD band fits inside the shared row range.
+    ventricles = cohort[cohort["roi"] == "ventricles"]
+    low = (ventricles["mean"] - 3 * ventricles["std"]).min()
+    high = (ventricles["mean"] + 3 * ventricles["std"]).max()
+    ymin, ymax = axs[0, 1].get_ylim()
+    assert ymin <= low and high <= ymax
+    legend = [text.get_text() for text in fig.legends[0].get_texts()]
+    assert legend == ["A", "B", SD_BAND_LABEL]
+    plt.close(fig)
+
+
+def test_rows_layout_without_cohort_has_no_bands(roi_tables):
+    stats, summary, significance = roi_tables
+
+    fig, axs = plot_roi_evolution_rows(
+        summary,
+        stats,
+        significance,
+        rois=["ventricles"],
+        statistic="median",
+    )
+
+    assert all(len(ax.collections) == 0 for ax in axs[0, 1:])
+    assert len(fig.legends[0].get_texts()) == 2
+    plt.close(fig)
+
+
+def test_rows_layout_names_subjects_outside_3_sd(roi_tables):
+    stats, summary, significance = roi_tables
+    cohort = summarize_cohort_over_time(stats, facet="roi", value="median")
+    outside = pd.DataFrame(
+        {
+            "roi": ["ventricles", "ventricles", "thalamus"],
+            "subject": ["s1", "s8", "s2"],
+            "group": ["A", "B", "A"],
+            "timepoint": [1, 2, 0],
+            "median": [9.0, -9.0, 9.0],
+            "z": [3.5, -3.5, 3.5],
+        },
+    )
+
+    fig, axs = plot_roi_evolution_rows(
+        summary,
+        stats,
+        significance,
+        rois=["ventricles"],
+        statistic="median",
+        cohort=cohort,
+        outside=outside,
+    )
+
+    names_a = {t.get_text(): t for t in axs[0, 1].texts}
+    names_b = {t.get_text(): t for t in axs[0, 2].texts}
+    assert set(names_a) == {"s1"}  # thalamus is not drawn
+    assert set(names_b) == {"s8"}
+    assert names_a["s1"].xy == (1, 9.0)
+    assert names_a["s1"].get_va() == "bottom" and names_b["s8"].get_va() == "top"
     plt.close(fig)

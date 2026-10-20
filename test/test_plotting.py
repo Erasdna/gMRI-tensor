@@ -8,10 +8,12 @@ import pandas as pd
 import pytest
 from gMRItensor.group_statistics import compare_groups_over_time
 from gMRItensor.group_statistics import summarize_groups_over_time
+from gMRItensor.outliers import OutlierCutoffs
 from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
 from gMRItensor.plotting.evolving_mode import evolving_factors_to_numpy
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.mode_grid import plot_mode_grid
+from gMRItensor.plotting.outliers import plot_outliers
 from gMRItensor.plotting.reproducibility import plot_reproducibility
 from gMRItensor.plotting.spatial_mode import _percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
@@ -1835,4 +1837,69 @@ def test_plot_reproducibility_thins_tick_labels():
     fms, errors = make_reproducibility_fixture(50)
     fig, (_, fms_ax, _) = plot_reproducibility(fms, errors)
     assert len(fms_ax.get_xticks()) <= 20
+    plt.close(fig)
+
+
+# --- gMRItensor.plotting.outliers ---
+
+
+def make_outlier_table() -> tuple[pd.DataFrame, OutlierCutoffs]:
+    """Ten subjects; sub-03 has high leverage, sub-07 a high residual."""
+    leverage = np.full(10, 0.15)
+    leverage[3] = 0.9
+    residual = np.full(10, 0.05)
+    residual[7] = 0.4
+    cutoffs = OutlierCutoffs(leverage=0.6, residual=0.5, robust_residual=0.1)
+    table = pd.DataFrame(
+        {
+            "subject": [f"sub-{i:02d}" for i in range(10)],
+            "leverage": leverage,
+            "residual": residual,
+            "high_leverage": leverage > cutoffs.leverage,
+            "high_residual": residual > cutoffs.residual,
+            "high_residual_robust": residual > cutoffs.robust_residual,
+        },
+    )
+    return table, cutoffs
+
+
+def _texts(ax: matplotlib.axes.Axes) -> list[str]:
+    return [text.get_text() for text in ax.texts]
+
+
+def test_plot_outliers_cutoffs_labels_and_group_colors():
+    table, cutoffs = make_outlier_table()
+    groups = ["A", "B"] * 4 + [None, "A"]
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        fig, ax = plot_outliers(table, cutoffs, groups, "diagnosis")
+
+    lines = {line.get_label(): line for line in ax.get_lines()}
+    assert lines["Leverage cut-off"].get_xdata()[0] == pytest.approx(0.6)
+    assert lines["Residual cut-off"].get_ydata()[0] == pytest.approx(0.5)
+    assert lines["Robust residual cut-off"].get_ydata()[0] == pytest.approx(0.1)
+    assert lines["Robust residual cut-off"].get_linestyle() == ":"
+    # Flagged subjects are named; ordinary ones are not.
+    assert {"sub-03", "sub-07"} <= set(_texts(ax))
+    assert "sub-05" not in _texts(ax)
+    legend = [text.get_text() for text in fig.legends[0].get_texts()]
+    assert legend[:3] == ["A", "B", "No diagnosis"]
+    color_a, color_b = get_color_palette(2)
+    assert to_rgb(ax.collections[0].get_facecolor()[0]) == to_rgb(color_a)
+    assert to_rgb(ax.collections[1].get_facecolor()[0]) == to_rgb(color_b)
+    plt.close(fig)
+
+
+def test_plot_outliers_notes_an_off_scale_cutoff_instead_of_drawing_it():
+    table, _ = make_outlier_table()
+    cutoffs = OutlierCutoffs(leverage=None, residual=5.0, robust_residual=0.1)
+
+    fig, ax = plot_outliers(table, cutoffs, ["A"] * 10, "diagnosis")
+
+    labels = [line.get_label() for line in ax.get_lines()]
+    assert labels == ["Robust residual cut-off"]
+    assert ax.get_ylim()[1] < 1.0  # not stretched to 5
+    legend = [text.get_text() for text in fig.legends[0].get_texts()]
+    assert "Residual cut-off: 5 (off scale)" in legend
     plt.close(fig)

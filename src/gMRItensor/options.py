@@ -34,7 +34,7 @@ STATISTICS = (
 #: The statistics that need ΔR1 input and a relaxivity.
 CONCENTRATION_STATISTICS = STATISTICS[2:]
 #: The parts `gmri plot decomposition` can draw.
-DECOMPOSITION_PARTS = ("mode_grid", "subject_mode", "time", "spatial")
+DECOMPOSITION_PARTS = ("mode_grid", "subject_mode", "time", "spatial", "outliers")
 #: Runner options set by `FitOptions` fields rather than `extra`.
 #: Runner options that have their own flag or are set by the pipeline, so
 #: `--fit-option` cannot override them (`plan` would not see the override).
@@ -331,6 +331,8 @@ class StatisticsPlotOptions:
     as one ROI; `rois` are label ids plotted separately, or `"all"` labels.
     With neither, every preset region is used. `relaxivity` (default 3.2
     when a concentration statistic is requested) converts ΔR1 to mM.
+    `sd_bands` draws the cohort mean +/- 1, 2 and 3 SD behind the subject
+    curves (rows layout only).
     """
 
     roi_signal: Path
@@ -344,6 +346,7 @@ class StatisticsPlotOptions:
     alpha: float = 0.05
     min_group_n: int = 2
     layout: Literal["rows", "panels"] = "rows"
+    sd_bands: bool = False
     page_width: str | float = "double"
     formats: tuple[str, ...] = ("pdf", "png")
     dpi: int = 300
@@ -377,6 +380,10 @@ class StatisticsPlotOptions:
         _check(
             self.layout in ("rows", "panels"),
             f"layout must be rows or panels, got {self.layout!r}",
+        )
+        _check(
+            not self.sd_bands or self.layout == "rows",
+            "--sd-bands needs --layout rows (panels have no subject curves)",
         )
         _check_page_width(self.page_width)
         _check(self.dpi >= 1, f"dpi must be >= 1, got {self.dpi}")
@@ -412,7 +419,9 @@ class DecompositionPlotOptions:
     with `min_panel_width` (inches) that figure grows beyond `page_width`
     rather than squeezing its panels. A `subject_prefix` is prepended to
     that figure's name as `<prefix>_`, so runs with different variable sets
-    do not overwrite each other.
+    do not overwrite each other. The `outliers` part flags subjects at a
+    family-wise `outlier_alpha` (Bonferroni over subjects); it reloads the
+    model's input recorded in `decompose.json`, or `input` if given.
     """
 
     model: Path
@@ -431,6 +440,8 @@ class DecompositionPlotOptions:
     min_group_n: int = 2
     # PARAFAC2/CMF only: CP has no per-subject time curves to drop.
     min_subject_coefficient: float = NEGLIGIBLE_SUBJECT_WEIGHT
+    outlier_alpha: float = 0.01
+    input: Path | None = None
     page_width: str | float = "double"
     formats: tuple[str, ...] = ("pdf", "png")
     dpi: int = 300
@@ -457,6 +468,10 @@ class DecompositionPlotOptions:
             self.min_subject_coefficient >= 0,
             f"min_subject_coefficient must be >= 0, got {self.min_subject_coefficient}",
         )
+        _check(
+            0 < self.outlier_alpha < 1,
+            f"outlier_alpha must be in (0, 1), got {self.outlier_alpha}",
+        )
         _check_page_width(self.page_width)
         _check(self.dpi >= 1, f"dpi must be >= 1, got {self.dpi}")
         _require_file(self.model, "model")
@@ -468,7 +483,7 @@ class DecompositionPlotOptions:
                 self.group_variable: "--group-variable",
             },
         )
-        for name in ("segmentation", "background"):
+        for name in ("segmentation", "background", "input"):
             path = getattr(self, name)
             if path is not None:
                 _require_file(path, name)
