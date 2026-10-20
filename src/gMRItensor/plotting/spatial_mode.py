@@ -229,7 +229,6 @@ def plot_spatial_mode(
         n_components=n_components,
         n_columns=sum(width_ratios),
         page_width=page_width,
-        width_ratios=width_ratios[:-1],
         width_to_height_ratio=width_to_height_ratio,
     )
     for name, ids_mask in region_masks.items():

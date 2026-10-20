@@ -33,9 +33,8 @@ def evolving_factors_to_numpy(
 ) -> list[np.ndarray]:
     """Convert a model's `evolving_states` to numpy for plotting.
 
-    `run_PARAFAC2_decomposition_repeated` now returns each subject's time
-    course directly, so no reconstruction is needed -- this only bridges
-    torch to the numpy the rest of this module works in.
+    The states are each subject's time course as fitted, so this only
+    bridges torch to the numpy the rest of this module works in.
     """
     return [_to_numpy(factor) for factor in evolving_states]
 

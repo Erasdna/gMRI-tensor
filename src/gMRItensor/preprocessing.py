@@ -72,8 +72,14 @@ def _load_labeled_tracer_voxels(
     """Load the four aligned images and keep the labeled voxels inside the mask.
 
     The single image-reading step shared by every per-image output, so each
-    image is read once however many products are derived from it. See
-    `compute_tracer_from_image` for the canonicalization and filtering rules.
+    image is read once however many products are derived from it.
+
+    All four images are reoriented to the closest canonical (RAS+)
+    orientation, so an equivalent but differently stored axis order is not
+    rejected; nothing is resampled, so genuinely different grids raise
+    `ValueError`. The signal (`compute_tracer`) is kept inside `mask > 0`
+    and only for voxels with a real label (segmentation > 1e-6): background
+    voxels are always excluded.
 
     Returns `(tracer, segmentation, voxel_coords, voxel_volume_mm3)`: one
     entry (or `(ndim,)` coordinate row) per labeled voxel, with
@@ -129,7 +135,16 @@ def _tracer_rows(
     voxel_coords: np.ndarray,
     func: Callable | None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray] | np.ndarray]:
-    """Turn `_load_labeled_tracer_voxels` output into `compute_tracer_from_image` rows."""
+    """`_load_labeled_tracer_voxels` output as `(labels, values,
+    label_index, index_list)` rows: one per labeled voxel with `func` None,
+    else one per label, its voxels aggregated by `func`.
+
+    `(labels[i], label_index[i])` is unique even when a label repeats over
+    voxels: `label_index` ranks a row among earlier rows of its label (0
+    when aggregating). `index_list` holds each row's voxel coordinates:
+    one `(n_voxels, ndim)` array per voxel row, or a list with each label's
+    voxels when aggregating.
+    """
     if func is None:
         labels = np.rint(segmentation)
         return labels, tracer, _within_group_rank(labels), voxel_coords
@@ -152,63 +167,8 @@ def _tracer_rows(
     )
 
 
-def compute_tracer_from_image(
-    baseline_path: Path,
-    post_injection_path: Path,
-    signal_type: str,
-    mask_path: Path,
-    segmentation_path: Path,
-    func: Callable | None = np.nanmedian,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray] | np.ndarray]:
-    """Compute tracer signal per voxel or per ROI from aligned NIfTI images.
-
-    All four images are reoriented to the closest canonical (RAS+)
-    convention, so an equivalent-but-differently-stored axis order is not
-    falsely rejected. No resampling is done, so genuinely different grids
-    still raise.
-
-    The tracer signal (`compute_tracer`) is computed inside `mask > 0` and
-    restricted to voxels tagged with a real ROI (segmentation > 1e-6);
-    background voxels are always excluded.
-
-    `func` aggregates each ROI's voxels via
-    `scipy.ndimage.labeled_comprehension`. Pass None to skip aggregation and
-    get one row per voxel instead, each still tagged with its ROI id.
-
-    Returns
-    -------
-    tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray] | np.ndarray]
-        `(labels, values, label_index, index_list)`, all length-matched:
-
-        - `labels[i]`: the row's ROI id. Sorted unique ids when aggregating,
-          otherwise the i-th voxel's id (so it repeats).
-        - `values[i]`: the aggregated or single-voxel tracer signal.
-        - `label_index[i]`: 0-based rank among prior rows sharing that ROI
-          id, so `(labels[i], label_index[i])` is unique even in per-voxel
-          mode. Always 0 when aggregating. `prepare_tensor` pivots on the
-          pair, which avoids requiring contiguous ROI ids or the same ROIs
-          in every image.
-        - `index_list[i]`: `(n_i, ndim)` coordinates behind that row when
-          aggregating. Per-voxel, a single `(n_voxels, ndim)` array whose
-          row `i` is that voxel's coordinate.
-
-    Raises
-    ------
-    ValueError
-        If the images are not on the same affine grid.
-    """
-    tracer, segmentation, voxel_coords, _ = _load_labeled_tracer_voxels(
-        baseline_path,
-        post_injection_path,
-        signal_type,
-        mask_path,
-        segmentation_path,
-    )
-    return _tracer_rows(tracer, segmentation, voxel_coords, func)
-
-
 class TracerResult(NamedTuple):
-    """One image's `compute_tracer_from_image` output plus its subject/time point."""
+    """One image's `_tracer_rows` output plus its subject and time point."""
 
     subject: Any
     time_point: Any
@@ -216,19 +176,6 @@ class TracerResult(NamedTuple):
     values: np.ndarray
     label_index: np.ndarray
     index_list: list[np.ndarray] | np.ndarray
-
-
-def _compute_tracer_worker(
-    args: dict[str, Any],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray] | np.ndarray]:
-    return compute_tracer_from_image(
-        args["baseline_path"],
-        args["post_injection_path"],
-        args["signal_type"],
-        args["mask_path"],
-        args["segmentation_path"],
-        func=args["func"],
-    )
 
 
 def _iter_parallel(
@@ -270,49 +217,6 @@ def _iter_parallel(
             result = async_result.get()
             progress.update()
             yield args, result
-
-
-def iter_tracer_results(
-    args_list: list[dict[str, Any]],
-    n_procs: int = 5,
-) -> Iterator[TracerResult]:
-    """Lazily yield one `TracerResult` per `args_list` entry, in order.
-
-    Each entry holds `compute_tracer_from_image` keyword arguments plus
-    `"subject"`/`"time_point"`. Memory stays bounded as in `_iter_parallel`.
-    """
-    for args, result in _iter_parallel(
-        args_list,
-        _compute_tracer_worker,
-        n_procs,
-        desc="Computing tracer signal",
-    ):
-        yield TracerResult(args["subject"], args["time_point"], *result)
-
-
-def compute_tracer_parallel(
-    args_list: list[dict[str, Any]],
-    n_procs: int = 5,
-) -> tuple[pd.DataFrame, list[np.ndarray] | np.ndarray | None]:
-    """Run `compute_tracer_from_image` over `args_list`, sequentially or in parallel."""
-    frames = []
-    index_list: list[np.ndarray] | np.ndarray | None = None
-    for result in iter_tracer_results(args_list, n_procs):
-        if index_list is None:
-            index_list = result.index_list
-        frames.append(
-            pd.DataFrame(
-                {
-                    "labels": result.labels,
-                    "label_index": result.label_index,
-                    "values": result.values,
-                    "subject": result.subject,
-                    "time_point": result.time_point,
-                },
-            ),
-        )
-
-    return pd.concat(frames, ignore_index=True), index_list
 
 
 _TRACER_SCHEMA = pa.schema(
@@ -373,43 +277,6 @@ def _atomic_outputs(*paths: Path) -> Iterator[tuple[Path, ...]]:
     for tmp_path, path in zip(tmp_paths, paths):
         if tmp_path.exists():
             tmp_path.replace(path)
-
-
-def write_tracer_parquet(
-    args_list: list[dict[str, Any]],
-    output_path: Path | str,
-    n_procs: int = 5,
-) -> tuple[Path, Path | None]:
-    """Stream `iter_tracer_results` to parquet, one row group per image.
-
-    Writes the long-format frame `prepare_tensor` consumes while holding at
-    most a few images in memory. Read it back with `load_tensor_from_parquet`,
-    which builds the tensor without loading the whole frame. In
-    per-voxel mode (`func=None`) voxel coordinates also go to a
-    `.coords.parquet` sidecar, one `(labels, label_index, i, j, k)` row per
-    voxel, taken from the first image -- so all images are assumed to share
-    one template. ROI mode writes no sidecar, since one image's ROI voxels
-    need not describe any other's. Files are only moved into place on
-    success.
-
-    Returns `(tracer_path, coords_path)`, `coords_path` None in ROI mode.
-    """
-    if not args_list:
-        raise ValueError("args_list is empty; nothing to write")
-
-    per_voxel = args_list[0]["func"] is None
-    tracer_path = Path(output_path)
-    coords_path = tracer_path.with_suffix(".coords.parquet")
-
-    with _atomic_outputs(tracer_path, coords_path) as (tmp_tracer, tmp_coords):
-        with pq.ParquetWriter(tmp_tracer, _TRACER_SCHEMA) as writer:
-            for i, result in enumerate(iter_tracer_results(args_list, n_procs)):
-                if i == 0 and per_voxel:
-                    pq.write_table(_coords_table(result), tmp_coords)
-                table = _tracer_table(result)
-                writer.write_table(table, row_group_size=max(table.num_rows, 1))
-
-    return tracer_path, coords_path if per_voxel else None
 
 
 SIGNAL_TYPES = ("T1map", "R1map", "T1w")
@@ -591,16 +458,16 @@ def write_preprocessed_data(
 ) -> PreprocessedPaths:
     """Read every scan once and write the data products to `output_dir/data/`.
 
-    `args_list` entries are as in `write_tracer_parquet` (without `func`);
-    all must share one `signal_type`. The signal is ΔR1 in 1/s for T1map and
+    Each `args_list` entry holds a scan's `subject`, `time_point`,
+    `baseline_path`, `post_injection_path`, `mask_path`, `segmentation_path`
+    and `signal_type`; all must share one `signal_type`. The signal is ΔR1 in 1/s for T1map and
     R1map input (`delta_r1_per_second`, `time_unit` being the unit of the
     maps) and the post/baseline ratio for T1w.
 
     - `roi_signal.parquet`: `compute_roi_signal` per scan, with leading
       `subject`/`time_point` columns.
     - With `store_voxels`: `voxels.parquet` (one row per labeled voxel, in
-      the `write_tracer_parquet` per-voxel schema, for
-      `load_tensor_from_parquet`) and `voxels.coords.parquet` (each voxel's
+      the schema `load_tensor_from_parquet` reads) and `voxels.coords.parquet` (each voxel's
       `(labels, label_index)` key and `(i, j, k)` index, with the template
       `shape`/`affine` in its metadata). Every scan must have the same
       labeled voxels as the first -- one common template -- or `ValueError`.
@@ -697,8 +564,8 @@ def compute_roi_scaling(
     """Compute per-ROI `(mean, std)`, each shape `(labels,)`.
 
     Pools over every axis but the last, ignoring NaNs, so it accepts either
-    `prepare_tensor` output: the regular `(subjects, time_points, labels)`
-    array or the ragged list of per-subject slices.
+    tensor form: the regular `(subjects, time_points, labels)` array or the
+    ragged list of per-subject slices.
     """
     pooled = (
         data.reshape(-1, data.shape[-1])
@@ -716,9 +583,10 @@ def scale_tensor(
     mean: np.ndarray | None = None,
     std: np.ndarray | None = None,
 ) -> tuple[np.ndarray | list[np.ndarray], np.ndarray, np.ndarray]:
-    """Scale `prepare_tensor` output per ROI, over all subjects and time points.
+    """Scale a tensor per ROI, over all subjects and time points.
 
-    Accepts either `prepare_tensor` output; scaling is per-label (last axis),
+    Accepts either tensor form (see `compute_roi_scaling`); scaling is
+    per-label (last axis),
     pooling over every other, as `compute_roi_scaling` does. `center`
     subtracts the mean before dividing.
 
@@ -743,138 +611,9 @@ def scale_tensor(
     return scaled, mean, std
 
 
-def _pivot_tracer_df(
-    df: pd.DataFrame,
-    group_filtering: tuple[str, str] | None = None,
-) -> pd.DataFrame:
-    """Filter by group and pivot the long-format tracer DataFrame.
-
-    First step of `prepare_tensor`. Produces a frame indexed by (subject,
-    time_point) with one column per `(labels, label_index)` pair; only
-    observed (subject, time_point) combinations get a row.
-
-    Pivots on the pair rather than `labels` alone because in per-voxel mode
-    one ROI id spans many rows, where `aggfunc="first"` would silently keep
-    one arbitrary voxel. `label_index` is always 0 in ROI-aggregate mode, so
-    this stays equivalent to pivoting on `labels` there.
-    """
-    if group_filtering is not None:
-        df = df.query(f"{group_filtering[0]}=='{group_filtering[1]}'")
-
-    return df.pivot_table(
-        index=["subject", "time_point"],
-        columns=["labels", "label_index"],
-        values="values",
-        aggfunc="first",  # Safe: (labels, label_index) is unique per row.
-    )
-
-
-def prepare_tensor(
-    df: pd.DataFrame,
-    group_filtering: tuple[str, str] | None = None,
-    require_regular: bool = True,
-    min_timepoints: int = 1,
-):
-    """Prepare subject x time x label tensor data from a long-format tracer DataFrame.
-
-    Subjects need not share the same time points: only observed (subject,
-    time_point) combinations decide which labels to keep, so one subject's
-    missing scan does not drop a region for everyone. The label set must
-    still be complete across all observed combinations, since a value
-    missing at an observed time point cannot be recovered here.
-
-    Parameters
-    ----------
-    df : pd.DataFrame
-        Long-format tracer data from `compute_tracer_parallel`, with
-        `subject`, `time_point`, `labels`, `label_index`, `values` columns.
-    group_filtering : tuple[str, str] | None, optional
-        `(column, value)` to filter to a single group before pivoting.
-    require_regular : bool, optional
-        If True (default), returns a regular `(subjects, time_points,
-        labels)` array where unobserved combinations become NaN rows. That
-        array is **not** directly decomposable by `compute_CP_decomposition`
-        -- impute or mask the NaNs first.
-
-        If False, returns a ragged list of `(n_timepoints_i, n_labels)`
-        slices using only each subject's observed time points. This is what
-        `run_PARAFAC2_decomposition_repeated` expects.
-    min_timepoints : int, optional
-        Minimum observed time points to keep a subject; others are dropped
-        and reported. Consider raising to 2 for PARAFAC2, so every subject's
-        evolving factor has enough points to be meaningful.
-
-    Returns
-    -------
-    If `require_regular`:
-        `(tensor, subjects, time_points, labels, label_index)`, with
-        `tensor` of shape `(subjects, time_points, labels)`, possibly
-        containing NaN. `(labels[i], label_index[i])` identifies which
-        `compute_tracer_from_image` row -- and so which voxel coordinates in
-        `compute_tracer_parallel`'s `index_list` -- column `i` came from.
-    Otherwise:
-        `(slices, subjects, timepoints_per_subject, labels, label_index)`,
-        with `slices[i]` ordered by `timepoints_per_subject[i]`.
-    """
-    pivot_df = _pivot_tracer_df(df, group_filtering)
-
-    # Drop labels with a NaN among the *observed* rows only. A structurally
-    # missing time point is not a row here, so it cannot force an otherwise
-    # well-observed label to be dropped for everyone.
-    valid_pivot = pivot_df.dropna(axis=1, how="any")
-    # Columns are (labels, label_index) pairs -- see _pivot_tracer_df.
-    columns = valid_pivot.columns.tolist()
-    labels = np.array([c[0] for c in columns]).astype(int)
-    label_index = np.array([c[1] for c in columns]).astype(int)
-
-    subjects = []
-    timepoints_per_subject = []
-    slices = []
-    dropped_subjects = []
-    for subject, subject_df in valid_pivot.groupby(level="subject"):
-        time_points = subject_df.index.get_level_values("time_point").to_numpy()
-        order = np.argsort(time_points)
-        if len(order) < min_timepoints:
-            dropped_subjects.append((subject, len(order)))
-            continue
-        subjects.append(subject)
-        timepoints_per_subject.append(time_points[order].astype(int))
-        slices.append(subject_df.to_numpy()[order])
-
-    if dropped_subjects:
-        print(
-            f"prepare_tensor: dropped {len(dropped_subjects)} subject(s) with "
-            f"fewer than {min_timepoints} observed time points: {dropped_subjects}",
-        )
-
-    subjects_arr = np.array(subjects).astype(str)
-
-    if not require_regular:
-        return slices, subjects_arr, timepoints_per_subject, labels, label_index
-
-    # Unobserved subject/time_point combinations become NaN rather than
-    # being assumed to exist.
-    all_timepoints = sorted({t for tps in timepoints_per_subject for t in tps})
-    timepoint_index = {t: i for i, t in enumerate(all_timepoints)}
-    tensor = np.full((len(subjects), len(all_timepoints), len(labels)), np.nan)
-    for i, (subject_slice, time_points) in enumerate(
-        zip(slices, timepoints_per_subject),
-    ):
-        for row, t in zip(subject_slice, time_points):
-            tensor[i, timepoint_index[t]] = row
-
-    return (
-        tensor,
-        subjects_arr,
-        np.array(all_timepoints).astype(int),
-        labels,
-        label_index,
-    )
-
-
 # `(labels, label_index)` packed into one int64, so a column is a scalar
-# whose sort order matches `_pivot_tracer_df`'s lexicographic column order
-# (both parts non-negative, `label_index < 2**32`).
+# whose sort order matches the lexicographic order of the pairs (both parts
+# non-negative, `label_index < 2**32`).
 _KEY_SHIFT = 32
 _KEY_MASK = (1 << _KEY_SHIFT) - 1
 
@@ -994,8 +733,8 @@ def _scan_tracer_parquet(
 ) -> np.ndarray:
     """Sorted keys finite in every one of `sessions`.
 
-    The columns `prepare_tensor`'s `dropna` would keep if `sessions` were the
-    only observed rows; chunks of other sessions are ignored. `any_finite`
+    The columns with a finite value in every session of `sessions`; chunks
+    of other sessions are ignored. `any_finite`
     keeps the keys finite in at least one of `sessions` instead.
     """
     keys = np.empty(0, dtype=np.int64)
@@ -1068,21 +807,23 @@ def load_tensor_from_parquet(
     np.ndarray,
     np.ndarray,
 ]:
-    """Build `prepare_tensor`'s output directly from a `write_tracer_parquet` file.
+    """The subject x time x label tensor of a long-format tracer parquet.
 
-    Equivalent to `prepare_tensor(pd.read_parquet(path), ...)`, but streams
-    the file one row group at a time into a preallocated output, so the
-    long-format frame -- many times the tensor's size for per-voxel data --
-    is never held in memory. Three passes over the file: session validity,
-    columns to keep, then values.
+    The file has one row per scan and label (or voxel), as
+    `write_preprocessed_data` writes `voxels.parquet`. It is streamed one
+    row group at a time into a preallocated output, so the long-format
+    frame -- many times the tensor's size for per-voxel data -- is never
+    held in memory. Three passes over the file: session validity, columns
+    to keep, then values. Columns are the `(labels, label_index)` pairs,
+    sorted; subjects sort as text and each subject's time points
+    numerically.
 
     Sessions are judged before columns: a `(subject, time_point)` session
     whose non-finite fraction exceeds `max_invalid_fraction` is treated as
     unobserved, so one corrupt scan cannot veto every column. Subjects are
     then kept by their number of valid sessions, and only the kept sessions
-    decide which columns are finite everywhere. With `max_invalid_fraction=1`
-    and `min_timepoints=1` this matches `prepare_tensor` (except that
-    dropped subjects no longer veto columns).
+    decide which columns are finite everywhere: a column is dropped only if
+    it is non-finite in a kept session, so a dropped subject cannot veto it.
 
     `impute_missing` (`"cp"` only) relaxes the column rule: a column is kept
     if it is finite in at least one kept session, and its other entries stay
@@ -1093,15 +834,15 @@ def load_tensor_from_parquet(
     Parameters
     ----------
     path : Path | str
-        Long-format tracer parquet file, as written by `write_tracer_parquet`.
-        Any row-group layout works; `(subject, time_point, labels,
-        label_index)` is assumed unique, which that writer guarantees.
+        Long-format tracer parquet file (`subject`, `time_point`, `labels`,
+        `label_index`, `values`). Any row-group layout works; `(subject,
+        time_point, labels, label_index)` is assumed unique, which
+        `write_preprocessed_data` guarantees.
     model : {"cp", "parafac2"}
-        `"cp"` returns the regular `(subjects, time_points, labels)` tensor
-        (`prepare_tensor(require_regular=True)`), `"parafac2"` the ragged
-        per-subject slices (`require_regular=False`).
+        `"cp"` returns the regular `(subjects, time_points, labels)` tensor,
+        `"parafac2"` the ragged per-subject slices.
     group_filtering : tuple[str, str] | None, optional
-        As in `prepare_tensor`.
+        `(column, value)`: keep only the rows whose `column` equals `value`.
     min_timepoints : int | None, optional
         Minimum valid sessions to keep a subject. None (default) requires a
         valid session at every time point, so `"cp"` has no NaN rows and
@@ -1118,7 +859,11 @@ def load_tensor_from_parquet(
 
     Returns
     -------
-    Same tuples as `prepare_tensor` for the corresponding `require_regular`.
+    For `"cp"`: `(tensor, subjects, time_points, labels, label_index)`, the
+    tensor `(subjects, time_points, labels)`. For `"parafac2"`: `(slices,
+    subjects, timepoints_per_subject, labels, label_index)`, `slices[i]` of
+    shape `(len(timepoints_per_subject[i]), labels)`. Column `j` is the
+    pair `(labels[j], label_index[j])`.
     """
     if model not in ("cp", "parafac2"):
         raise ValueError(f"model must be 'cp' or 'parafac2', got {model!r}")

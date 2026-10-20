@@ -14,6 +14,7 @@ from typing import Literal
 import numpy as np
 import pandas as pd
 from gMRItensor.decomposition import _resolve_options
+from gMRItensor.decomposition import Method
 from gMRItensor.group_statistics import Aggregate
 from gMRItensor.group_statistics import AGGREGATES
 from gMRItensor.group_statistics import require_columns
@@ -57,7 +58,7 @@ _MANAGED_FIT_OPTIONS: dict[str, str] = {
 }
 
 #: `--method` values -> the restart machinery's method names.
-_RUNNER_METHODS = {"cp": "CP", "parafac2": "PARAFAC2", "cmf": "CMF"}
+RUNNER_METHODS: dict[str, Method] = {"cp": "CP", "parafac2": "PARAFAC2", "cmf": "CMF"}
 
 
 def _check(condition: bool, message: str) -> None:
@@ -224,7 +225,7 @@ def _check_fit(method: str, tensor: TensorOptions, fit: FitOptions) -> None:
     )
     # Unknown extra options fail here, before `plan` saves them.
     try:
-        _resolve_options(_RUNNER_METHODS[method], dict(fit.extra))  # type: ignore
+        _resolve_options(RUNNER_METHODS[method], dict(fit.extra))
     except TypeError as error:
         keys = sorted(fit.extra)
         raise ValueError(

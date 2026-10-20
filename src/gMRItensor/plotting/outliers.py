@@ -103,7 +103,11 @@ def plot_outliers(
     for draw, cutoff, largest, style, label in lines:
         if cutoff is None:
             continue
-        line_style = {"color": _NEUTRAL, "linestyle": style, "linewidth": 0.8}
+        line_style: dict[str, Any] = {
+            "color": _NEUTRAL,
+            "linestyle": style,
+            "linewidth": 0.8,
+        }
         if not _visible(cutoff, largest):
             # A legend entry only, with its value.
             off_scale.append(

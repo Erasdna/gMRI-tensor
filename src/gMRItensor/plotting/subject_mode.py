@@ -19,8 +19,6 @@ matplotlib.use("Agg")
 
 
 POOLED_LABEL = "All"
-# Wrapped tick label: one line does not fit next to the groups' labels.
-_POOLED_TICK = "All"
 # Hollow: the pooled box is no group, so it takes no palette colour (the
 # palette includes a grey).
 POOLED_COLOR = "white"
@@ -167,7 +165,7 @@ def make_subject_boxplot(
         required_xlim = rightmost_tick + 0.2 + 0.125 + legend_width
 
     ax.set_xticks(range(n_boxes))
-    ax.set_xticklabels([*labels, _POOLED_TICK] if pooled else labels)
+    ax.set_xticklabels([*labels, POOLED_LABEL] if pooled else labels)
     ax.set_xlabel(x_column)
 
     if required_xlim is None:
@@ -278,9 +276,8 @@ def _prepare_plotting_dataframe(
     """
     if subject_mode.shape[0] != len(subjects):
         raise ValueError(
-            f"""Number of subjects ({len(subjects)}) does not
-            match subject_mode rows ({subject_mode.shape[0]},
-        )""",
+            f"{len(subjects)} subjects for a subject mode of "
+            f"{subject_mode.shape[0]} rows",
         )
 
     requested = {
@@ -350,8 +347,8 @@ def _finalize_boxplot_axes(
 ) -> None:
     """Apply per-row y-limits and a shared x-limit to the boxplot columns.
 
-    Second-pass layout for `plot_subject_mode` and
-    `plot_subject_mode_correlation`: every axes in row i takes that row's
+    Second-pass layout for `plot_subject_mode_correlation`: every axes in
+    row i takes that row's
     boxplot y-limits, and every boxplot axes takes an x-limit wide enough
     for the widest legend in the figure.
 

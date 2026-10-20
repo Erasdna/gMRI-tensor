@@ -31,6 +31,7 @@ from pathlib import Path
 from typing import Any
 from typing import Protocol
 from typing import TYPE_CHECKING
+from typing import TypeVar
 from typing import Union
 
 import torch
@@ -101,17 +102,21 @@ def plan_replicability(
     ]
 
 
-def n_jobs(plan: Sequence[FitTask], tasks_per_job: int) -> int:
+#: A plan's item: a `FitTask`, or anything a caller schedules alongside it.
+_Item = TypeVar("_Item")
+
+
+def n_jobs(plan: Sequence[Any], tasks_per_job: int) -> int:
     """Number of jobs needed to run `plan` in blocks of `tasks_per_job`."""
     _check_positive("tasks_per_job", tasks_per_job)
     return math.ceil(len(plan) / tasks_per_job)
 
 
 def job_slice(
-    plan: Sequence[FitTask],
+    plan: Sequence[_Item],
     job_index: int,
     tasks_per_job: int,
-) -> list[FitTask]:
+) -> list[_Item]:
     """The tasks job `job_index` runs; the slices cover `plan` exactly once."""
     total = n_jobs(plan, tasks_per_job)
     if not 0 <= job_index < total:

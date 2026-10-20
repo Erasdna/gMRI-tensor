@@ -124,7 +124,7 @@ def _add_figure_labels(
 
 def _mark_significance(
     ribbon_ax: matplotlib.axes.Axes,
-    row_axes: Sequence[matplotlib.axes.Axes],
+    row_axes: Sequence[matplotlib.axes.Axes] | np.ndarray,
     roi_summary: pd.DataFrame,
     timepoints: list[float],
 ) -> None:
@@ -164,7 +164,7 @@ def _mark_significance(
 
 
 def _name_points(
-    group_axes: Sequence[matplotlib.axes.Axes],
+    group_axes: Sequence[matplotlib.axes.Axes] | np.ndarray,
     categories: list[str],
     points: pd.DataFrame,
     statistic: str,

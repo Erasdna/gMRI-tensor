@@ -7,7 +7,6 @@ the `gmri` command line or from a script.
 import dataclasses
 import hashlib
 import json
-import math
 import warnings
 from collections.abc import Hashable
 from collections.abc import Sequence
@@ -43,6 +42,8 @@ from gMRItensor.jobs import Data
 from gMRItensor.jobs import DirectoryStore
 from gMRItensor.jobs import FitTask
 from gMRItensor.jobs import GroupSummary
+from gMRItensor.jobs import job_slice
+from gMRItensor.jobs import n_jobs
 from gMRItensor.jobs import plan_replicability
 from gMRItensor.jobs import plan_restarts
 from gMRItensor.jobs import RestartResult
@@ -64,6 +65,7 @@ from gMRItensor.options import options_from_json
 from gMRItensor.options import options_to_json
 from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
+from gMRItensor.options import RUNNER_METHODS
 from gMRItensor.options import StatisticsPlotOptions
 from gMRItensor.options import TensorOptions
 from gMRItensor.outliers import data_slices
@@ -468,7 +470,7 @@ def _voxel_template(
     label_index: np.ndarray,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray, str | None]:
     """Coordinates of each tensor column, plus the template shape/affine and
-    the recorded template path (None for files written before it was)."""
+    the recorded template path (None if the file records none)."""
     coords_path = path.with_name(path.name.replace(".parquet", ".coords.parquet"))
     _require(coords_path, "preprocess --store-voxels")
     metadata = read_signal_metadata(coords_path)
@@ -549,11 +551,8 @@ def _numpy(value: Any) -> np.ndarray:
     return np.asarray(value)
 
 
-_METHODS: dict[str, Method] = {"cp": "CP", "parafac2": "PARAFAC2", "cmf": "CMF"}
-
-
 def _method(method: str) -> Method:
-    return _METHODS[method]
+    return RUNNER_METHODS[method]
 
 
 def _fit_options(fit: FitOptions, method: str) -> dict[str, Any]:
@@ -596,21 +595,20 @@ def _on_device(data: Data, device: torch.device) -> Data:
     return [s.to(device) for s in data]
 
 
-def _n_jobs(plan: Sequence[_RankTask], tasks_per_job: int) -> int:
-    return math.ceil(len(plan) / tasks_per_job)
-
-
 def _job_tasks(
     plan: Sequence[_RankTask],
     job: int,
     tasks_per_job: int,
 ) -> list[_RankTask]:
-    total = _n_jobs(plan, tasks_per_job)
-    if not 0 <= job < total:
-        raise ValueError(f"job {job} is out of range: the plan has {total} jobs")
-    start = job * tasks_per_job
-    stop = start + tasks_per_job
-    return list(plan[start:stop])
+    """Job `job`'s tasks (`jobs.job_slice`); an index outside the plan is
+    a `ValueError`, the CLI's user error, worded for `--job`."""
+    try:
+        return job_slice(plan, job, tasks_per_job)
+    except IndexError:
+        total = n_jobs(plan, tasks_per_job)
+        raise ValueError(
+            f"job {job} is out of range: the plan has {total} jobs",
+        ) from None
 
 
 #: Fit settings that do not change what one restart fits, so they may
@@ -724,8 +722,7 @@ def load_plan(output_dir: Path, expected: type) -> Any:
         raise FileNotFoundError(f"{path} not found; run `plan` first")
     try:
         options = options_from_json(json.loads(path.read_text()))
-    # ValueError: options that no longer validate, e.g. a fit option that
-    # was removed (`normalize`).
+    # ValueError: options that fail validation.
     except (json.JSONDecodeError, KeyError, TypeError, ValueError) as error:
         raise ValueError(
             f"{path} is not a valid plan ({type(error).__name__}: {error}); "
@@ -926,7 +923,7 @@ def plan_decomposition(options: DecompositionOptions) -> int:
             _check_parafac2_rank(data.data, rank)
     plan = _decomposition_plan(options, len(data.subjects))
     _write_plan(options)
-    return _n_jobs(plan, options.distributed.tasks_per_job)
+    return n_jobs(plan, options.distributed.tasks_per_job)
 
 
 def run_decomposition_job(output_dir: Path, job: int) -> int:
@@ -960,6 +957,8 @@ def collect_decomposition(output_dir: Path) -> list[Path]:
 
 
 REPRODUCIBILITY_STEM = "reproducibility"
+#: How `decompose run` and `collect` save each rank's reproducibility figure.
+REPRODUCIBILITY_FIGURE: dict[str, Any] = {"formats": ("pdf", "png"), "dpi": 300}
 
 
 def _finish_rank(
@@ -996,7 +995,7 @@ def _finish_rank(
     results = [cast(RestartResult, store.load(task)) for task in plan]
     csv = write_reproducibility(results, store.root)
     fig, _ = plot_reproducibility(*read_reproducibility(csv))
-    save_figure(fig, store.root / REPRODUCIBILITY_STEM)
+    save_figure(fig, store.root / REPRODUCIBILITY_STEM, **REPRODUCIBILITY_FIGURE)
     return _saved_decomposition(rank, best.model, best.error, data)
 
 
@@ -1153,7 +1152,7 @@ def plan_replicability_jobs(options: ReplicabilityOptions) -> int:
     data = _decomposition_input(options)
     plan = _flatten(_replicability_plans(options, data))
     _write_plan(options)
-    return _n_jobs(plan, options.distributed.tasks_per_job)
+    return n_jobs(plan, options.distributed.tasks_per_job)
 
 
 def run_replicability_job(output_dir: Path, job: int) -> int:
@@ -1593,6 +1592,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
         save(fig, "subject_mode", options.subject_prefix)
     if "time" in parts:
         if is_cp:
+            assert saved.time_mode is not None  # CP models always have one
             fig, _ = plot_time_mode(saved.time_mode, time_points, page_width=page_width)
             save(fig, "time_mode")
         else:

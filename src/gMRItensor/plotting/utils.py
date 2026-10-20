@@ -22,9 +22,8 @@ def scale_mode(arr: np.ndarray, rtol: float = 1e-10) -> np.ndarray:
 
     A column whose norm is negligible carries no shape, only solver residue,
     so normalizing it to unit norm would manufacture a full-amplitude curve
-    out of numerical noise. Such columns are returned as zeros instead --
-    which also avoids the divide-by-zero NaN a genuinely all-zero column
-    used to produce.
+    out of numerical noise. Such columns are returned as zeros instead, as
+    is an all-zero column (never NaN).
 
     `rtol` is relative to the largest column norm in the same array, not
     absolute. An absolute floor fails both ways: low enough to be safe and
@@ -44,9 +43,8 @@ def compute_figsize(
     n_components: int,
     n_columns: int,
     page_width: float,
-    width_ratios: list[float] | None = None,
     width_to_height_ratio: float = 1.618,
-    add_title_margin=True,
+    add_title_margin: bool = True,
 ) -> tuple[float, float]:
     """Compute a `(width, height)` figure size in inches for a subplot grid.
 
@@ -90,8 +88,8 @@ def scatter_to_volume(
 
     volume = np.zeros(shape)
     voxel_mask = np.zeros(shape, dtype=bool)
-    volume[*index_list.T] = values
-    voxel_mask[*index_list.T] = True
+    volume[tuple(index_list.T)] = values
+    voxel_mask[tuple(index_list.T)] = True
     return volume, voxel_mask
 
 
@@ -165,7 +163,7 @@ def expand_roi_mode_to_voxels(
     """Broadcast an ROI-level spatial mode out to every segmented voxel.
 
     For a decomposition computed on agglomerated ROIs (`roi_ids` is
-    `prepare_tensor`'s returned `labels`), gives every voxel the row
+    the `labels` of `load_tensor_from_parquet`), gives every voxel the row
     belonging to its region id, so the result plots like a genuinely
     per-voxel decomposition. Voxels whose region id is absent from `roi_ids`
     get `fill_value`.
@@ -177,7 +175,7 @@ def expand_roi_mode_to_voxels(
     `segmentation > 0`, ready for `plot_spatial_mode`.
     """
     index_list = np.argwhere(segmentation > 0)
-    voxel_region_ids = segmentation[*index_list.T].astype(int)
+    voxel_region_ids = segmentation[tuple(index_list.T)].astype(int)
     roi_ids = roi_ids.astype(int)
 
     max_id = max(int(roi_ids.max()), int(voxel_region_ids.max()))
@@ -205,7 +203,7 @@ def region_masks_from_segmentations(
     `region_masks`.
     """
     return {
-        name: segmentation[*index_list.T] > 0
+        name: segmentation[tuple(index_list.T)] > 0
         for name, segmentation in segmentations.items()
     }
 

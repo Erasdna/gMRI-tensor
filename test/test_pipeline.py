@@ -2,6 +2,7 @@ import dataclasses
 import json
 from pathlib import Path
 from typing import Any
+from typing import cast
 
 import matplotlib.pyplot as plt
 import nibabel as nib
@@ -583,6 +584,12 @@ def test_run_decomposition_saves_restarts_and_reproducibility(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls = stub_fits(monkeypatch)
+    # Both formats, as by default (conftest keeps only PNG for speed).
+    monkeypatch.setattr(
+        pipeline,
+        "REPRODUCIBILITY_FIGURE",
+        {"formats": ("pdf", "png"), "dpi": 50},
+    )
     preprocess(synthetic_study)
     options = decomposition_options(synthetic_study, ranks=(2,))
     run_decomposition(options)
@@ -1073,7 +1080,7 @@ def test_plot_cp_voxel_model_without_segmentation(
 
 def _segmentation_without(study: Any, labels: tuple[int, ...]) -> Path:
     """Copy of the study segmentation with `labels` set to background."""
-    image = nib.load(study.root / "images" / "seg.nii")
+    image = cast(nib.Nifti1Image, nib.load(study.root / "images" / "seg.nii"))
     data = np.array(image.get_fdata())
     data[np.isin(data, labels)] = 0
     path = study.root / "images" / "seg_subset.nii"
@@ -1384,7 +1391,10 @@ def test_plot_images_must_be_on_the_template_grid(
     # Regression test: an image on another grid was drawn silently (or
     # crashed with an IndexError) instead of being refused.
     model = _voxel_cp_model(synthetic_study, monkeypatch)
-    image = nib.load(synthetic_study.root / "images" / "seg.nii")
+    image = cast(
+        nib.Nifti1Image,
+        nib.load(synthetic_study.root / "images" / "seg.nii"),
+    )
     small = tmp_path / "small.nii"
     nib.save(nib.Nifti1Image(np.ones((5, 5, 5)), image.affine), small)
     shifted_affine = image.affine.copy()
@@ -1458,7 +1468,8 @@ def test_roi_spatial_maps_leave_unmodelled_labels_blank(
     )
 
     assert spatial is not None
-    labels = np.rint(nib.load(segmentation).get_fdata()).astype(int)
+    labels = np.rint(cast(nib.Nifti1Image, nib.load(segmentation)).get_fdata())
+    labels = labels.astype(int)
     placed = labels[tuple(spatial.index_list.T)]
     assert 4 not in placed
     assert len(placed) == np.count_nonzero(np.isin(labels, fewer.labels))

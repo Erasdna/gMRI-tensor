@@ -16,7 +16,6 @@ on:
 
 jobs:
   test_code:
-    # This code depends on the result of check-code
     runs-on: ${{ matrix.os }}
 
     strategy:
@@ -34,10 +33,10 @@ jobs:
           enable-cache: true
 
       - name: "Install gMRItensor"
-        run: uv sync --all-extras --python ${{ matrix.python-version }}
+        run: uv sync --python ${{ matrix.python-version }}
 
       - name: Run tests
-        run: uv run pytest -xvs
+        run: uv run pytest -n auto --runslow
 
       - name: Upload coverage report as artifact
         if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'

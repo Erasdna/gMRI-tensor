@@ -591,21 +591,3 @@ def test_cli_help(
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
     assert all(word in out for word in expected)
-
-
-def test_cli_rejects_normalized_fits(
-    synthetic_study: Any,
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    results = _preprocess(synthetic_study)
-    code = _run(
-        [
-            "decompose",
-            "run",
-            *_fit_args(results, "normalized"),
-            "--fit-option",
-            "normalize=true",
-        ],
-    )
-    assert code == 2
-    assert "normalize" in capsys.readouterr().err

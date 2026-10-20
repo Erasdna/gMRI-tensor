@@ -373,7 +373,7 @@ def evaluate_replicability_multiproc(
     method: Method = "CP",
     stratification: ArrayLike | None = None,
     n_procs: int = 1,
-    **CP_kwargs: Any,
+    **fit_kwargs: Any,
 ) -> list[tuple[Any, ...]]:
     """Evaluate replicability using repeated CP, PARAFAC2 or CMF fits.
 
@@ -390,7 +390,7 @@ def evaluate_replicability_multiproc(
         stratification: Optional stratification labels for splitting
         n_procs: Number of parallel processes, spread over every
             (group, seed) fit. Must be 1 on CUDA.
-        **CP_kwargs: run_CP_decomposition_repeated /
+        **fit_kwargs: run_CP_decomposition_repeated /
             run_PARAFAC2_decomposition_repeated options, with their defaults.
             `init_repeats` is the number of restarts per group. This is how
             PARAFAC2-only options reach the solver -- `solver="matcouply"`,
@@ -409,7 +409,7 @@ def evaluate_replicability_multiproc(
             parent are unreliable across driver setups, so this is rejected
             rather than silently falling back to one process.
     """
-    n_restarts = _resolve_options(method, CP_kwargs)["init_repeats"]
+    n_restarts = _resolve_options(method, fit_kwargs)["init_repeats"]
     plan = plan_replicability(
         replicability_engine,
         len(tensor),
@@ -417,6 +417,6 @@ def evaluate_replicability_multiproc(
         stratification,
     )
     store = InMemoryStore()
-    run_tasks(plan, tensor, rank, method, store, n_procs=n_procs, **CP_kwargs)
-    summaries = collect(plan, store, warn=True, method=method, **CP_kwargs)
+    run_tasks(plan, tensor, rank, method, store, n_procs=n_procs, **fit_kwargs)
+    summaries = collect(plan, store, warn=True, method=method, **fit_kwargs)
     return replicability_engine.compute_fms(summaries)

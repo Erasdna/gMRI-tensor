@@ -1,3 +1,5 @@
+from typing import cast
+
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -15,6 +17,7 @@ from gMRItensor.plotting.utils import get_color_palette
 from gMRItensor.plotting.utils import JOURNAL_WIDTHS
 from gMRItensor.plotting.utils import resolve_page_width
 from gMRItensor.plotting.utils import save_figure
+from matplotlib.text import Annotation
 
 matplotlib.use("Agg")
 
@@ -55,7 +58,9 @@ def roi_tables() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
 
 
 def _stars(ax: matplotlib.axes.Axes) -> list[float]:
-    return sorted(text.xy[0] for text in ax.texts if text.get_text() == "*")
+    return sorted(
+        cast(Annotation, text).xy[0] for text in ax.texts if text.get_text() == "*"
+    )
 
 
 def test_rows_layout_shape_stars_and_colors(roi_tables):

@@ -369,7 +369,7 @@ def _black_fits(ax: matplotlib.axes.Axes) -> list:
     return [
         line
         for line in ax.get_lines()
-        if len(line.get_xdata()) > 1
+        if np.size(line.get_xdata()) > 1
         and matplotlib.colors.same_color(line.get_color(), "black")
     ]
 
@@ -1571,6 +1571,15 @@ def test_plot_mode_grid_single_component():
         plt.close(fig)
 
 
+@pytest.mark.parametrize("mode", ["subject_mode", "spatial_mode", "time_mode"])
+def test_plot_mode_grid_refuses_modes_with_other_component_counts(mode: str) -> None:
+    kwargs = make_mode_grid_fixture(n_components=2)
+    kwargs[mode] = np.asarray(kwargs[mode])[:, :1]
+
+    with pytest.raises(ValueError, match="different numbers of components"):
+        plot_mode_grid(**kwargs)
+
+
 def test_plot_mode_grid_parafac2_length_mismatch():
     kwargs = make_mode_grid_parafac2_fixture()
     kwargs["time_points"] = kwargs["time_points"][:-1]
@@ -1884,13 +1893,14 @@ def test_variable_correlation_keeps_group_colours_when_a_group_has_no_values() -
     make_variable_correlation(ax, df, "age", "weight", "group")
 
     color_a, _, color_c = get_color_palette(3)
-    fits = [line for line in ax.get_lines() if len(line.get_xdata()) > 1]
+    fits = [line for line in ax.get_lines() if np.size(line.get_xdata()) > 1]
     assert [to_rgb(line.get_color()) for line in fits] == [
         to_rgb(color_a),
         to_rgb(color_c),
     ]
-    points = ax.collections[0].get_facecolors()[:, :3]  # A's 4, then C's 4
-    np.testing.assert_allclose(points[4:], [to_rgb(color_c)] * 4)
+    # A's 4 points, then C's 4.
+    points = np.asarray(ax.collections[0].get_facecolor(), dtype=float)[:, :3]
+    np.testing.assert_allclose(points[4:], np.tile(to_rgb(color_c), (4, 1)))
     plt.close(fig)
 
 

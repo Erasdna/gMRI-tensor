@@ -1,5 +1,3 @@
-docs/demo.ipynb
-
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
@@ -130,10 +128,6 @@ dmypy.json
 # Pyre type checker
 .pyre/
 
-build/
-**/__pycache__/
-*.py[cod]
-*$py.class
 CLAUDE.md
 .claude/
 

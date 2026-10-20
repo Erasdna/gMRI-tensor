@@ -3,6 +3,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from dataclasses import replace
 from pathlib import Path
+from typing import Any
 from typing import Literal
 
 import h5py
@@ -235,8 +236,8 @@ def _read_decomposition(path: Path) -> SavedDecomposition:
     """A `save_decomposition` file exactly as stored."""
     with h5py.File(path, "r") as file:
         method = str(file.attrs["method"])
-        arrays = {name: file[name][()] for name in _ARRAYS}
-        optional = {
+        arrays: dict[str, Any] = {name: file[name][()] for name in _ARRAYS}
+        optional: dict[str, Any] = {
             name: file[name][()] if name in file else None for name in _OPTIONAL_ARRAYS
         }
         subjects = np.asarray(file["subjects"].asstr()[()])

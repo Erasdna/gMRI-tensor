@@ -75,8 +75,7 @@ def run_replicability(procs):
     device = setup_backend()
     # This only exercises the multiproc/engine plumbing (task counts, result
     # shapes) -- not decomposition accuracy -- so keep the tensor, restart
-    # count and iteration budget small; a much bigger fit here previously
-    # made this test take several minutes for no added coverage.
+    # count and iteration budget small.
     tensor = torch.randn(10, 5, 6).to(device)
 
     CV_splits = 3
@@ -298,9 +297,3 @@ def test_compute_fms_skip_mode_ignores_that_mode():
         (weights, mixed),
         skip_mode=0,
     ) == pytest.approx(1.0)
-
-
-if __name__ == "__main__":
-    print("--- Debugging Test ---")
-    test_replicability_parallel()
-    print("--- Test Completed Successfully ---")

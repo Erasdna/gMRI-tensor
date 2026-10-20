@@ -108,8 +108,18 @@ def plot_mode_grid(
     per component, so color intensity is comparable between the two spatial
     columns; False (default) scales each column from its own values.
     """
-    # TODO: Verify the all inpute modes have same nb of components
     n_components = spatial_mode.shape[1]
+    time_components = (
+        {np.shape(state)[1] for state in time_mode}
+        if isinstance(time_mode, list)
+        else {np.shape(time_mode)[1]}
+    )
+    if {np.shape(subject_mode)[1]} | time_components != {n_components}:
+        raise ValueError(
+            f"the modes have different numbers of components: spatial "
+            f"{n_components}, subject {np.shape(subject_mode)[1]}, time "
+            f"{sorted(time_components)}",
+        )
 
     scaled_spatial_mode = scale_mode(spatial_mode)
     scaled_subject_mode = scale_mode(subject_mode)
@@ -191,7 +201,6 @@ def plot_mode_grid(
         n_components=n_components,
         n_columns=4,
         page_width=page_width,
-        width_ratios=width_ratios,
         width_to_height_ratio=image_with_colorbar_ratio
         / (sum(width_ratios) / len(width_ratios)),
     )

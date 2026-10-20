@@ -1,4 +1,4 @@
-name: Check package formatting
+name: Lint and type-check
 
 on:
   pull_request:
@@ -14,9 +14,6 @@ on:
     - cron: "0 8 * * *"
 jobs:
   check-code:
-    # This skips running the test if '[ci skip]' or '[skip ci]' is in the commit message
-    # if: "!(contains(github.event.head_commit.message, '[ci skip]') || contains(github.event.head_commit.message, '[skip ci]'))"
-
     # Choose which operating system to run on, for more options see:
     # https://docs.github.com/en/actions/using-github-hosted-runners/about-github-hosted-runners#supported-runners-and-hardware-resources
     runs-on: ubuntu-22.04
@@ -36,7 +33,7 @@ jobs:
           enable-cache: true
 
       - name: "Install code"
-        run: uv sync --all-extras --python ${{ matrix.python-version }}
+        run: uv sync --python ${{ matrix.python-version }}
 
       - name: Flake8 code
         run: uv run flake8

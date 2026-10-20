@@ -1,7 +1,9 @@
-# Copyright (C) 2022 Jørgen Schartum Dokken
-#
-# This file is part of my_package
-# SPDX-License-Identifier:    MIT
+"""Tensor decompositions of gadolinium-enhanced MRI time series.
+
+The `gmri` command line (`gMRItensor.cli`) runs the pipeline step by step;
+this namespace exports the decomposition and restart machinery for use from
+Python. See README.md and docs/cli.md.
+"""
 import importlib.metadata
 
 from . import _third_party_warnings  # noqa: F401

@@ -1,8 +1,11 @@
 import json
 import warnings
 from collections import Counter
+from collections.abc import Callable
+from collections.abc import Iterator
 from operator import itemgetter
 from pathlib import Path
+from typing import Any
 
 import nibabel as nib
 import numpy as np
@@ -12,24 +15,231 @@ import pyarrow.parquet as pq
 import pytest
 from gMRItensor import preprocessing
 from gMRItensor.preprocessing import _atomic_outputs
+from gMRItensor.preprocessing import _coords_table
 from gMRItensor.preprocessing import _iter_parallel
 from gMRItensor.preprocessing import _load_labeled_tracer_voxels
+from gMRItensor.preprocessing import _tracer_rows
+from gMRItensor.preprocessing import _TRACER_SCHEMA
+from gMRItensor.preprocessing import _tracer_table
 from gMRItensor.preprocessing import compute_roi_scaling
 from gMRItensor.preprocessing import compute_roi_signal
 from gMRItensor.preprocessing import compute_tracer
-from gMRItensor.preprocessing import compute_tracer_from_image
-from gMRItensor.preprocessing import compute_tracer_parallel
 from gMRItensor.preprocessing import delta_r1_per_second
-from gMRItensor.preprocessing import iter_tracer_results
 from gMRItensor.preprocessing import load_tensor_from_parquet
-from gMRItensor.preprocessing import prepare_tensor
 from gMRItensor.preprocessing import read_signal_metadata
 from gMRItensor.preprocessing import scale_tensor
+from gMRItensor.preprocessing import TracerResult
 from gMRItensor.preprocessing import write_preprocessed_data
-from gMRItensor.preprocessing import write_tracer_parquet
 from nibabel.orientations import axcodes2ornt
 from nibabel.orientations import io_orientation
 from nibabel.orientations import ornt_transform
+
+
+# --------------------------------------------------------------------------
+# Reference implementations
+#
+# The straightforward in-memory pipeline that `load_tensor_from_parquet`
+# streams: rows per image from the production loader (`tracer_rows`), a
+# long frame (`tracer_frame`), a pivot (`prepare_tensor`). The streaming
+# loader is checked against it.
+
+
+def tracer_rows(
+    baseline_path: Path,
+    post_injection_path: Path,
+    signal_type: str,
+    mask_path: Path,
+    segmentation_path: Path,
+    func: Callable | None = np.nanmedian,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, list[np.ndarray] | np.ndarray]:
+    """`(labels, values, label_index, index_list)` of one image: per ROI
+    (aggregated by `func`) or, with `func=None`, per voxel."""
+    tracer, segmentation, voxel_coords, _ = _load_labeled_tracer_voxels(
+        baseline_path,
+        post_injection_path,
+        signal_type,
+        mask_path,
+        segmentation_path,
+    )
+    return _tracer_rows(tracer, segmentation, voxel_coords, func)
+
+
+def _tracer_results(args_list: list[dict[str, Any]]) -> Iterator[TracerResult]:
+    for args in args_list:
+        image = {k: v for k, v in args.items() if k not in ("subject", "time_point")}
+        yield TracerResult(args["subject"], args["time_point"], *tracer_rows(**image))
+
+
+def tracer_frame(
+    args_list: list[dict[str, Any]],
+) -> tuple[pd.DataFrame, list[np.ndarray] | np.ndarray | None]:
+    """Every image's `tracer_rows` in one long frame (`subject`,
+    `time_point`, `labels`, `label_index`, `values`), plus the first
+    image's `index_list`."""
+    frames = []
+    index_list = None
+    for result in _tracer_results(args_list):
+        if index_list is None:
+            index_list = result.index_list
+        frames.append(
+            pd.DataFrame(
+                {
+                    "labels": result.labels,
+                    "label_index": result.label_index,
+                    "values": result.values,
+                    "subject": result.subject,
+                    "time_point": result.time_point,
+                },
+            ),
+        )
+    return pd.concat(frames, ignore_index=True), index_list
+
+
+def write_tracer_rows(
+    args_list: list[dict[str, Any]],
+    output_path: Path,
+) -> tuple[Path, Path | None]:
+    """`tracer_frame` as the parquet `load_tensor_from_parquet` reads, one
+    row group per image, plus the per-voxel `.coords.parquet` sidecar."""
+    per_voxel = args_list[0]["func"] is None
+    tracer_path = Path(output_path)
+    coords_path = tracer_path.with_suffix(".coords.parquet")
+    with pq.ParquetWriter(tracer_path, _TRACER_SCHEMA) as writer:
+        for i, result in enumerate(_tracer_results(args_list)):
+            if i == 0 and per_voxel:
+                pq.write_table(_coords_table(result), coords_path)
+            table = _tracer_table(result)
+            writer.write_table(table, row_group_size=max(table.num_rows, 1))
+    return tracer_path, coords_path if per_voxel else None
+
+
+def _pivot_tracer_df(
+    df: pd.DataFrame,
+    group_filtering: tuple[str, str] | None = None,
+) -> pd.DataFrame:
+    """Filter by group and pivot the long-format tracer DataFrame.
+
+    First step of `prepare_tensor`. Produces a frame indexed by (subject,
+    time_point) with one column per `(labels, label_index)` pair; only
+    observed (subject, time_point) combinations get a row.
+
+    Pivots on the pair rather than `labels` alone because in per-voxel mode
+    one ROI id spans many rows, where `aggfunc="first"` would silently keep
+    one arbitrary voxel. `label_index` is always 0 in ROI-aggregate mode, so
+    this stays equivalent to pivoting on `labels` there.
+    """
+    if group_filtering is not None:
+        df = df.query(f"{group_filtering[0]}=='{group_filtering[1]}'")
+
+    return df.pivot_table(
+        index=["subject", "time_point"],
+        columns=["labels", "label_index"],
+        values="values",
+        aggfunc="first",  # Safe: (labels, label_index) is unique per row.
+    )
+
+
+def prepare_tensor(
+    df: pd.DataFrame,
+    group_filtering: tuple[str, str] | None = None,
+    require_regular: bool = True,
+    min_timepoints: int = 1,
+) -> tuple[Any, ...]:
+    """Prepare subject x time x label tensor data from a long-format tracer DataFrame.
+
+    Subjects need not share the same time points: only observed (subject,
+    time_point) combinations decide which labels to keep, so one subject's
+    missing scan does not drop a region for everyone. The label set must
+    still be complete across all observed combinations, since a value
+    missing at an observed time point cannot be recovered here.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Long-format tracer data from `tracer_frame`, with
+        `subject`, `time_point`, `labels`, `label_index`, `values` columns.
+    group_filtering : tuple[str, str] | None, optional
+        `(column, value)` to filter to a single group before pivoting.
+    require_regular : bool, optional
+        If True (default), returns a regular `(subjects, time_points,
+        labels)` array where unobserved combinations become NaN rows. That
+        array is **not** directly decomposable by `compute_CP_decomposition`
+        -- impute or mask the NaNs first.
+
+        If False, returns a ragged list of `(n_timepoints_i, n_labels)`
+        slices using only each subject's observed time points. This is what
+        `run_PARAFAC2_decomposition_repeated` expects.
+    min_timepoints : int, optional
+        Minimum observed time points to keep a subject; others are dropped
+        and reported. Consider raising to 2 for PARAFAC2, so every subject's
+        evolving factor has enough points to be meaningful.
+
+    Returns
+    -------
+    If `require_regular`:
+        `(tensor, subjects, time_points, labels, label_index)`, with
+        `tensor` of shape `(subjects, time_points, labels)`, possibly
+        containing NaN. `(labels[i], label_index[i])` identifies which
+        `tracer_rows` row -- and so which voxel coordinates in
+        `tracer_frame`'s `index_list` -- column `i` came from.
+    Otherwise:
+        `(slices, subjects, timepoints_per_subject, labels, label_index)`,
+        with `slices[i]` ordered by `timepoints_per_subject[i]`.
+    """
+    pivot_df = _pivot_tracer_df(df, group_filtering)
+
+    # Drop labels with a NaN among the *observed* rows only. A structurally
+    # missing time point is not a row here, so it cannot force an otherwise
+    # well-observed label to be dropped for everyone.
+    valid_pivot = pivot_df.dropna(axis=1, how="any")
+    # Columns are (labels, label_index) pairs -- see _pivot_tracer_df.
+    columns = valid_pivot.columns.tolist()
+    labels = np.array([c[0] for c in columns]).astype(int)
+    label_index = np.array([c[1] for c in columns]).astype(int)
+
+    subjects = []
+    timepoints_per_subject = []
+    slices = []
+    dropped_subjects = []
+    for subject, subject_df in valid_pivot.groupby(level="subject"):
+        time_points = subject_df.index.get_level_values("time_point").to_numpy()
+        order = np.argsort(time_points)
+        if len(order) < min_timepoints:
+            dropped_subjects.append((subject, len(order)))
+            continue
+        subjects.append(subject)
+        timepoints_per_subject.append(time_points[order].astype(int))
+        slices.append(subject_df.to_numpy()[order])
+
+    if dropped_subjects:
+        print(
+            f"prepare_tensor: dropped {len(dropped_subjects)} subject(s) with "
+            f"fewer than {min_timepoints} observed time points: {dropped_subjects}",
+        )
+
+    subjects_arr = np.array(subjects).astype(str)
+
+    if not require_regular:
+        return slices, subjects_arr, timepoints_per_subject, labels, label_index
+
+    # Unobserved subject/time_point combinations become NaN rather than
+    # being assumed to exist.
+    all_timepoints = sorted({t for tps in timepoints_per_subject for t in tps})
+    timepoint_index = {t: i for i, t in enumerate(all_timepoints)}
+    tensor = np.full((len(subjects), len(all_timepoints), len(labels)), np.nan)
+    for i, (subject_slice, time_points) in enumerate(
+        zip(slices, timepoints_per_subject),
+    ):
+        for row, t in zip(subject_slice, time_points):
+            tensor[i, timepoint_index[t]] = row
+
+    return (
+        tensor,
+        subjects_arr,
+        np.array(all_timepoints).astype(int),
+        labels,
+        label_index,
+    )
 
 
 def make_long_df(timepoints_per_subject, labels=(10, 20, 30), missing=None, seed=0):
@@ -38,7 +248,7 @@ def make_long_df(timepoints_per_subject, labels=(10, 20, 30), missing=None, seed
     `timepoints_per_subject` maps subject -> list of observed time points.
     `missing` is an optional set of (subject, time_point, label) triples whose
     value should be NaN, simulating one region not being observed.
-    `label_index` (as `compute_tracer_from_image` would produce it) is
+    `label_index` (as `tracer_rows` would produce it) is
     derived from each label's position in `labels`, consistently across
     every subject/time_point row.
     """
@@ -225,7 +435,7 @@ def _as_las(img: nib.Nifti1Image) -> nib.Nifti1Image:
     return img.as_reoriented(transform)
 
 
-def test_compute_tracer_from_image_allows_equivalent_orientation(tmp_path):
+def test_tracer_rows_allows_equivalent_orientation(tmp_path):
     # Regression test: baseline/post-injection/mask on the same physical
     # grid, but post-injection stored in a different (LAS) axis convention
     # than baseline's RAS+. This used to raise a false-positive "not
@@ -251,7 +461,7 @@ def test_compute_tracer_from_image_allows_equivalent_orientation(tmp_path):
     nib.save(mask_img, mask_path)
     nib.save(segmentation_img, segmentation_path)
 
-    _, tracer, _, _ = compute_tracer_from_image(
+    _, tracer, _, _ = tracer_rows(
         baseline_path,
         post_injection_path,
         "R1map",
@@ -264,7 +474,7 @@ def test_compute_tracer_from_image_allows_equivalent_orientation(tmp_path):
     np.testing.assert_allclose(tracer, expected)
 
 
-def test_compute_tracer_from_image_rejects_different_grid(tmp_path):
+def test_tracer_rows_rejects_different_grid(tmp_path):
     # Images that are genuinely on different grids (different voxel size)
     # must still be rejected after canonicalization -- reorientation only
     # normalizes axis order/flips, it doesn't resample.
@@ -291,7 +501,7 @@ def test_compute_tracer_from_image_rejects_different_grid(tmp_path):
     nib.save(segmentation_img, segmentation_path)
 
     with pytest.raises(ValueError, match="not aligned"):
-        compute_tracer_from_image(
+        tracer_rows(
             baseline_path,
             post_injection_path,
             "R1map",
@@ -302,7 +512,7 @@ def test_compute_tracer_from_image_rejects_different_grid(tmp_path):
 
 def _make_two_roi_images(tmp_path):
     """Build baseline/post-injection/mask/segmentation fixtures shared by the
-    ROI-aggregate and per-voxel `compute_tracer_from_image` tests below.
+    ROI-aggregate and per-voxel `tracer_rows` tests below.
 
     `(2, 2, 2)` volume, `baseline=1` everywhere and `post_injection` one
     more than `post_injection_flat`, so the R1map tracer is
@@ -339,14 +549,14 @@ def _make_two_roi_images(tmp_path):
     }
 
 
-def test_compute_tracer_from_image_aggregates_per_roi_and_excludes_background(tmp_path):
+def test_tracer_rows_aggregates_per_roi_and_excludes_background(tmp_path):
     # Two real ROIs (labels 1 and 2) plus unlabeled background (label 0)
     # voxels that must be excluded from aggregation entirely -- if they
     # leaked in, their deliberately out-of-range values would corrupt the
     # per-ROI median.
     paths = _make_two_roi_images(tmp_path)
 
-    labels, values, label_index, index_list = compute_tracer_from_image(
+    labels, values, label_index, index_list = tracer_rows(
         paths["baseline_path"],
         paths["post_injection_path"],
         "R1map",
@@ -371,13 +581,13 @@ def test_compute_tracer_from_image_aggregates_per_roi_and_excludes_background(tm
         )
 
 
-def test_compute_tracer_from_image_per_voxel_matches_own_label_and_value(tmp_path):
+def test_tracer_rows_per_voxel_matches_own_label_and_value(tmp_path):
     # func=None: one row per voxel instead of one per ROI, but background
     # voxels (label 0) must still be excluded, and each returned label must
     # correspond to that same voxel's own value, in order.
     paths = _make_two_roi_images(tmp_path)
 
-    labels, values, label_index, index_list = compute_tracer_from_image(
+    labels, values, label_index, index_list = tracer_rows(
         paths["baseline_path"],
         paths["post_injection_path"],
         "R1map",
@@ -416,7 +626,7 @@ def test_compute_tracer_from_image_per_voxel_matches_own_label_and_value(tmp_pat
     )
 
 
-def test_compute_tracer_parallel_returns_shared_index_list(tmp_path):
+def test_tracer_frame_returns_shared_index_list(tmp_path):
     paths = _make_two_roi_images(tmp_path)
     args = {
         "baseline_path": paths["baseline_path"],
@@ -432,18 +642,18 @@ def test_compute_tracer_parallel_returns_shared_index_list(tmp_path):
         {**args, "subject": "s1", "time_point": 1},
     ]
 
-    df, index_list = compute_tracer_parallel(args_list, n_procs=1)
+    df, index_list = tracer_frame(args_list)
 
     assert "label_index" in df.columns
     assert len(df) == 2 * 2  # 2 time points x 2 ROIs
 
-    direct_labels, _, _, direct_index_list = compute_tracer_from_image(**args)
+    direct_labels, _, _, direct_index_list = tracer_rows(**args)
     assert len(index_list) == len(direct_labels)
     for got, expected in zip(index_list, direct_index_list):
         np.testing.assert_array_equal(got, expected)
 
 
-def test_compute_tracer_parallel_tolerates_roi_missing_in_some_images(tmp_path):
+def test_tracer_frame_tolerates_roi_missing_in_some_images(tmp_path):
     # Real per-subject/native-space segmentations can legitimately differ in
     # which ROIs they capture -- this must not be treated as an error, and
     # prepare_tensor's existing dropna step should tolerate it exactly as it
@@ -484,7 +694,7 @@ def test_compute_tracer_parallel_tolerates_roi_missing_in_some_images(tmp_path):
         },
     ]
 
-    df, _ = compute_tracer_parallel(args_list, n_procs=1)
+    df, _ = tracer_frame(args_list)
     tensor, _, _, labels, label_index = prepare_tensor(df)
 
     # ROI 2 is missing at time point 1 -> dropped everywhere; only ROI 1
@@ -494,17 +704,16 @@ def test_compute_tracer_parallel_tolerates_roi_missing_in_some_images(tmp_path):
     assert tensor.shape[-1] == 1
 
 
-def test_compute_tracer_parallel_keeps_label_index_zero_when_segmentation_differs(
+def test_tracer_frame_keeps_label_index_zero_when_segmentation_differs(
     tmp_path,
 ):
     # Invariant: every ROI-aggregate row gets the same label_index (0),
     # regardless of which ROI it is -- label_index only needs to
     # distinguish rows *within* one (subject, time_point, labels) group
     # (needed for per-voxel mode's repeated ROI ids), not to distinguish
-    # one ROI from another. That's independent of whether segmentation_path
-    # is shared across images or not (compute_tracer_parallel no longer
-    # special-cases that); this test just uses two different segmentation
-    # files (same ROI content, different paths) as one concrete case of it.
+    # one ROI from another, whether or not segmentation_path is shared
+    # across images; this test uses two different segmentation files (same
+    # ROI content, different paths) as one concrete case of it.
     paths = _make_two_roi_images(tmp_path)
     other_dir = tmp_path / "other"
     other_dir.mkdir()
@@ -536,17 +745,16 @@ def test_compute_tracer_parallel_keeps_label_index_zero_when_segmentation_differ
         },
     ]
 
-    df, _ = compute_tracer_parallel(args_list, n_procs=1)
+    df, _ = tracer_frame(args_list)
 
     assert set(df["labels"]) == {1, 2}
     np.testing.assert_array_equal(df["label_index"].to_numpy(), 0)
 
 
 def test_prepare_tensor_per_voxel_style_labels_are_not_collapsed():
-    # Regression test for the bug this whole redesign fixes: two distinct
-    # label_index values (0 and 1) sharing the same labels ROI id (as
-    # func=None per-voxel output would produce for two voxels of one ROI)
-    # must survive as two separate tensor columns, not be silently
+    # Two distinct label_index values (0 and 1) sharing the same labels ROI
+    # id (as func=None per-voxel output would produce for two voxels of one
+    # ROI) must survive as two separate tensor columns, not be silently
     # collapsed into one by pivot_table's aggfunc="first".
     rows = []
     for subject in ("s1", "s2"):
@@ -614,50 +822,10 @@ def _direct_kwargs(args):
     return {k: v for k, v in args.items() if k not in ("subject", "time_point")}
 
 
-@pytest.mark.parametrize("n_procs", [1, 2])
-@pytest.mark.parametrize("func", [np.nanmedian, None])
-def test_iter_tracer_results_yields_in_order_matching_direct_calls(
-    tmp_path,
-    n_procs,
-    func,
-):
-    # 5 images with n_procs=2 means a 4-wide in-flight window that has to be
-    # refilled, exercising the bounded-submission path.
-    args_list = _make_streaming_args_list(tmp_path, func, n_images=5)
-
-    results = list(iter_tracer_results(args_list, n_procs=n_procs))
-
-    assert len(results) == len(args_list)
-    for result, args in zip(results, args_list):
-        assert result.subject == args["subject"]
-        assert result.time_point == args["time_point"]
-        labels, values, label_index, index_list = compute_tracer_from_image(
-            **_direct_kwargs(args),
-        )
-        np.testing.assert_array_equal(result.labels, labels)
-        np.testing.assert_allclose(result.values, values)
-        np.testing.assert_array_equal(result.label_index, label_index)
-        if func is None:
-            np.testing.assert_array_equal(result.index_list, index_list)
-
-
-def test_iter_tracer_results_is_lazy(tmp_path):
-    # A missing file in the second entry must only fail once that entry is
-    # actually consumed -- proof that results are computed on demand.
-    args_list = _make_streaming_args_list(tmp_path, None, n_images=2)
-    args_list[1]["post_injection_path"] = tmp_path / "does_not_exist.nii"
-
-    results = iter_tracer_results(args_list, n_procs=1)
-    first = next(results)
-    assert first.subject == "s0"
-    with pytest.raises(FileNotFoundError):
-        next(results)
-
-
-def test_compute_tracer_parallel_per_voxel_returns_coordinate_array(tmp_path):
+def test_tracer_frame_per_voxel_returns_coordinate_array(tmp_path):
     args_list = _make_streaming_args_list(tmp_path, None, n_images=2)
 
-    df, index_list = compute_tracer_parallel(args_list, n_procs=1)
+    df, index_list = tracer_frame(args_list)
 
     assert isinstance(index_list, np.ndarray)
     assert index_list.shape == (6, 3)
@@ -665,14 +833,13 @@ def test_compute_tracer_parallel_per_voxel_returns_coordinate_array(tmp_path):
 
 
 @pytest.mark.parametrize("func", [np.nanmedian, None])
-def test_write_tracer_parquet_round_trips_to_same_tensor(tmp_path, func):
+def test_load_tensor_from_parquet_round_trips_the_reference_frame(tmp_path, func):
     args_list = _make_streaming_args_list(tmp_path, func)
-    expected_df, expected_index_list = compute_tracer_parallel(args_list, n_procs=1)
+    expected_df, expected_index_list = tracer_frame(args_list)
 
-    tracer_path, coords_path = write_tracer_parquet(
+    tracer_path, coords_path = write_tracer_rows(
         args_list,
         tmp_path / "tracer.parquet",
-        n_procs=1,
     )
 
     # One row group per image, so the file can later be read image by image.
@@ -717,36 +884,6 @@ def test_write_tracer_parquet_round_trips_to_same_tensor(tmp_path, func):
     )
 
 
-def test_write_tracer_parquet_leaves_no_tmp_files(tmp_path):
-    args_list = _make_streaming_args_list(tmp_path, None, n_images=2)
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-
-    write_tracer_parquet(args_list, out_dir / "tracer.parquet", n_procs=1)
-
-    assert sorted(p.name for p in out_dir.iterdir()) == [
-        "tracer.coords.parquet",
-        "tracer.parquet",
-    ]
-
-
-def test_write_tracer_parquet_cleans_up_on_failure(tmp_path):
-    args_list = _make_streaming_args_list(tmp_path, None, n_images=2)
-    args_list[1]["post_injection_path"] = tmp_path / "does_not_exist.nii"
-    out_dir = tmp_path / "out"
-    out_dir.mkdir()
-
-    with pytest.raises(FileNotFoundError):
-        write_tracer_parquet(args_list, out_dir / "tracer.parquet", n_procs=1)
-
-    assert list(out_dir.iterdir()) == []
-
-
-def test_write_tracer_parquet_rejects_empty_args_list(tmp_path):
-    with pytest.raises(ValueError, match="empty"):
-        write_tracer_parquet([], tmp_path / "tracer.parquet")
-
-
 def _assert_matches_prepare_tensor(got, df, model, **kwargs):
     expected = prepare_tensor(df, require_regular=model == "cp", **kwargs)
     for got_part, expected_part in zip(got, expected):
@@ -771,10 +908,9 @@ def _write_long_df(df, path, row_group_size=None):
 @pytest.mark.parametrize("func", [np.nanmedian, None])
 def test_load_tensor_from_parquet_matches_prepare_tensor(tmp_path, model, func):
     args_list = _make_streaming_args_list(tmp_path, func)
-    tracer_path, _ = write_tracer_parquet(
+    tracer_path, _ = write_tracer_rows(
         args_list,
         tmp_path / "tracer.parquet",
-        n_procs=1,
     )
 
     got = load_tensor_from_parquet(tracer_path, model)
@@ -945,8 +1081,8 @@ def test_load_tensor_from_parquet_raises_without_surviving_data(tmp_path):
 def test_load_labeled_tracer_voxels_matches_per_voxel_tracer_and_voxel_volume(
     tmp_path,
 ):
-    # The shared loader must give exactly what per-voxel
-    # compute_tracer_from_image returns, plus the voxel volume from the
+    # The shared loader must give exactly what per-voxel `tracer_rows`
+    # returns, plus the voxel volume from the
     # affine (2 x 3 x 4 mm voxels -> 24 mm^3), which ROI totals need.
     affine = np.diag([2.0, 3.0, 4.0, 1.0])
     paths = _make_two_roi_images(tmp_path)
@@ -968,7 +1104,7 @@ def test_load_labeled_tracer_voxels_matches_per_voxel_tracer_and_voxel_volume(
     tracer, segmentation, voxel_coords, voxel_volume_mm3 = _load_labeled_tracer_voxels(
         **image_kwargs,
     )
-    labels, values, _, index_list = compute_tracer_from_image(
+    labels, values, _, index_list = tracer_rows(
         **image_kwargs,
         func=None,
     )
@@ -1132,10 +1268,9 @@ def test_write_preprocessed_data_store_voxels(tmp_path, n_procs):
     args_list = _make_streaming_args_list(tmp_path, None)
     reference = tmp_path / "reference"
     reference.mkdir()
-    expected_tracer, expected_coords = write_tracer_parquet(
+    expected_tracer, expected_coords = write_tracer_rows(
         args_list,
         reference / "tracer.parquet",
-        n_procs=1,
     )
 
     paths = write_preprocessed_data(

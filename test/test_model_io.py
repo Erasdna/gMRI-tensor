@@ -2,6 +2,7 @@ from dataclasses import fields
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
+from typing import cast
 
 import numpy as np
 import pytest
@@ -121,7 +122,7 @@ def test_save_is_atomic(tmp_path: Path) -> None:
         time_mode=rng.random((1, 2)),
         **_common(2, rng),
     )
-    broken = replace(saved, weights=object())  # not storable
+    broken = replace(saved, weights=cast(Any, object()))  # not storable
 
     with pytest.raises(TypeError):
         save_decomposition(tmp_path / "rank_2.h5", broken)  # type: ignore[arg-type]
