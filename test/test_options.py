@@ -69,6 +69,7 @@ def test_fit_tolerance_defaults_to_the_solvers() -> None:
         ("restart_procs", "--restart-procs"),
         ("rank", "--ranks"),
         ("allow_nan_imputation", "pipeline"),
+        ("compute_device", "GMRITENSOR_USE_GPU"),
     ],
 )
 def test_fit_options_cannot_override_the_flags(key: str, flag: str) -> None:
@@ -161,6 +162,23 @@ def test_replicability_rules(tmp_path: Path) -> None:
         ReplicabilityOptions(**common, engine="cv", repeats=1, splits=2)
     with pytest.raises(ValueError, match="stratify_by"):
         ReplicabilityOptions(**common, engine="halfhalf", repeats=1, stratify_by="x")
+    # Settings that would be accepted and then ignored are refused.
+    with pytest.raises(ValueError, match="splits applies to engine cv only"):
+        ReplicabilityOptions(**common, engine="halfhalf", repeats=1, splits=3)
+    with pytest.raises(ValueError, match="subject_info is only read with"):
+        ReplicabilityOptions(
+            **common,
+            engine="halfhalf",
+            repeats=1,
+            subject_info=_subject_info(tmp_path),
+        )
+    with pytest.raises(ValueError, match="restart_procs applies to decompose"):
+        ReplicabilityOptions(
+            **common,
+            engine="halfhalf",
+            repeats=1,
+            fit=FitOptions(restart_procs=2),
+        )
 
 
 def _subject_info(tmp_path: Path) -> Path:

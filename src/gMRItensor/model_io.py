@@ -21,6 +21,20 @@ _OPTIONAL_ARRAYS = (
 #: Methods saved with a ragged, per-subject evolving mode.
 _EVOLVING_METHODS = ("parafac2", "cmf")
 
+#: The model file in each model directory, `<method>_rank_<r>/`.
+MODEL_FILE = "model.h5"
+
+
+def resolve_model(model: Path) -> tuple[Path, str]:
+    """`(model file, model name)` for a model directory, its `MODEL_FILE`,
+    or any other saved `.h5` file, which is named after its stem."""
+    model = Path(model)
+    if model.is_dir():
+        return model / MODEL_FILE, model.name
+    if model.name == MODEL_FILE:
+        return model, model.parent.name
+    return model, model.stem
+
 
 @dataclass(frozen=True)
 class SavedDecomposition:

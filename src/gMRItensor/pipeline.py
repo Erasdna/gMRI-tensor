@@ -5,6 +5,7 @@ previous stage wrote, so each can be run (and rerun) on its own -- from
 the `gmri` command line or from a script.
 """
 import dataclasses
+import hashlib
 import json
 import math
 import warnings
@@ -23,6 +24,7 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
+from gMRItensor.decomposition import _check_parafac2_rank
 from gMRItensor.decomposition import CMFModel
 from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.decomposition import Method
@@ -47,6 +49,8 @@ from gMRItensor.jobs import RestartResult
 from gMRItensor.jobs import run_tasks
 from gMRItensor.model_io import component_weights
 from gMRItensor.model_io import load_decomposition
+from gMRItensor.model_io import MODEL_FILE
+from gMRItensor.model_io import resolve_model
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
 from gMRItensor.model_io import select_subjects
@@ -63,6 +67,7 @@ from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import StatisticsPlotOptions
 from gMRItensor.options import TensorOptions
 from gMRItensor.outliers import data_slices
+from gMRItensor.outliers import FLAG_COLUMNS
 from gMRItensor.outliers import outlier_table
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.mode_grid import plot_mode_grid
@@ -110,14 +115,33 @@ MANIFEST_COLUMNS = (
 _PATH_COLUMNS = MANIFEST_COLUMNS[2:]
 
 
+def _absolute_paths(value: Any) -> Any:
+    """`value` with every `Path` in it made absolute, through dicts, lists
+    and tuples."""
+    if isinstance(value, Path):
+        return str(value.resolve())
+    if isinstance(value, dict):
+        return {key: _absolute_paths(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_absolute_paths(item) for item in value]
+    return value
+
+
 def write_provenance(output_dir: Path, command: str, options: Any) -> Path:
-    """Record a stage's settings as `<output_dir>/<command>.json`."""
+    """Record a stage's settings as `<output_dir>/<command>.json`.
+
+    Paths are recorded absolute, so a record is still valid when read from
+    another working directory.
+    """
     from gMRItensor import __version__
 
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     path = output_dir / f"{command}.json"
-    record = {"gMRItensor": __version__, "options": dataclasses.asdict(options)}
+    record = {
+        "gMRItensor": __version__,
+        "options": _absolute_paths(dataclasses.asdict(options)),
+    }
     path.write_text(json.dumps(record, indent=2, default=str))
     return path
 
@@ -245,6 +269,27 @@ def format_significance_summary(summary: pd.DataFrame, alpha: float) -> str:
     )
 
 
+def _subject_groups(
+    subjects: list[str],
+    subject_info: Path,
+    group_variable: str,
+) -> dict[str, Any]:
+    """Each subject's `group_variable` value. Subjects with a blank value
+    are left out, with a note; one missing from `subject_info` raises."""
+    groups = resolve_subject_groups(
+        subjects,
+        _read_subject_info(subject_info),
+        group_variable,
+    )
+    blank = [s for s, group in zip(subjects, groups) if pd.isna(group)]
+    if blank:
+        print(
+            f"Leaving out {len(blank)} subject(s) without a '{group_variable}' "
+            f"value: {', '.join(map(str, blank))}",
+        )
+    return {s: group for s, group in zip(subjects, groups) if pd.notna(group)}
+
+
 def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult:
     """`gmri plot statistics`: ROI signal -> group tables, summary, figures.
 
@@ -282,15 +327,15 @@ def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult
     frame = aggregate_roi_signal(roi_signal, regions, options.label_ids())
     if wants_concentration:
         frame = add_concentration(frame, options.relaxivity or DEFAULT_RELAXIVITY)
-    subjects = sorted(frame["subject"].unique())
-    groups = resolve_subject_groups(
-        subjects,
-        _read_subject_info(options.subject_info),
+    groups = _subject_groups(
+        sorted(frame["subject"].unique()),
+        options.subject_info,
         options.group_variable,
     )
-    frame["group"] = frame["subject"].map(dict(zip(subjects, groups)))
+    frame = frame[frame["subject"].isin(groups)].copy()
+    frame["group"] = frame["subject"].map(groups)
     frame = frame.rename(columns={"time_point": "timepoint"})
-    categories = sorted(frame["group"].unique())
+    categories = sorted(set(groups.values()))
 
     tables_dir = Path(options.output_dir) / "roi_analysis"
     tables_dir.mkdir(parents=True, exist_ok=True)
@@ -568,56 +613,95 @@ def _job_tasks(
     return list(plan[start:stop])
 
 
+#: Fit settings that do not change what one restart fits, so they may
+#: differ between `plan`, its jobs and `collect` (the rank has its own
+#: store, and the restart count only adds or drops restarts).
+_RUNTIME_SETTINGS = ("output_dir", "ranks", "distributed", "n_procs")
+_RUNTIME_FIT_SETTINGS = ("restarts", "restart_procs")
+_RUNTIME_FIT_EXTRAS = ("progress_bar", "verbose_level")
+
+
+def settings_fingerprint(options: DecompositionOptions | ReplicabilityOptions) -> str:
+    """A short hash of every setting that changes what a restart fits: the
+    input, statistic, tensor and fit options (the splits are checked per
+    restart by `DirectoryStore.load`)."""
+    values = {
+        key: value
+        for key, value in options_to_json(options)["options"].items()
+        if key not in _RUNTIME_SETTINGS
+    }
+    fit = {
+        key: value
+        for key, value in values["fit"].items()
+        if key not in _RUNTIME_FIT_SETTINGS
+    }
+    fit["extra"] = {
+        key: value
+        for key, value in fit["extra"].items()
+        if key not in _RUNTIME_FIT_EXTRAS
+    }
+    values["fit"] = fit
+    text = json.dumps(values, sort_keys=True, default=str)
+    return hashlib.sha256(text.encode()).hexdigest()[:16]
+
+
+def _store(
+    options: DecompositionOptions | ReplicabilityOptions,
+    rank: int,
+) -> DirectoryStore:
+    """Rank `rank`'s restarts, `<store_dir>/<method>_rank_<r>/`, tied to the
+    fit settings of `options`: restarts fitted with other settings are
+    refused rather than reused."""
+    return DirectoryStore(
+        options.store_dir / _model_name(options.method, rank),
+        settings=settings_fingerprint(options),
+    )
+
+
 def _run_job_tasks(
     tasks: Sequence[_RankTask],
     data: DecompositionInput,
-    method: str,
-    store_dir: Path,
+    options: DecompositionOptions | ReplicabilityOptions,
     n_procs: int,
-    options: dict[str, Any],
+    fit_kwargs: dict[str, Any],
     resume: bool = True,
 ) -> None:
-    """Fit `tasks` rank by rank into `<store_dir>/<method>_rank_<r>/`.
+    """Fit `tasks` rank by rank into each rank's store (`_store`).
 
     `resume=False` refits tasks the store already holds (see `run_tasks`).
     The fits run on `setup_backend()`'s device (`GMRITENSOR_USE_GPU`).
     """
-    options = dict(options)
-    progress_bar = bool(options.pop("progress_bar", False))
+    fit_kwargs = dict(fit_kwargs)
+    progress_bar = bool(fit_kwargs.pop("progress_bar", False))
     tensor = _on_device(data.data, setup_backend())
     for rank, rank_tasks in groupby(tasks, key=lambda item: item[0]):
         run_tasks(
             [task for _, task in rank_tasks],
             tensor,
             rank,
-            _method(method),
-            DirectoryStore(store_dir / _model_name(method, rank)),
+            _method(options.method),
+            _store(options, rank),
             n_procs=n_procs,
             progress_bar=progress_bar,
             resume=resume,
-            **options,
+            **fit_kwargs,
         )
 
 
 def _collect_rank(
     plan: Sequence[FitTask],
-    store_dir: Path,
+    options: DecompositionOptions | ReplicabilityOptions,
     rank: int,
-    method: str,
-    options: dict[str, Any],
+    fit_kwargs: dict[str, Any],
 ) -> dict[Hashable, GroupSummary]:
     """Gather one rank's restarts; refuse if any restart has no result yet."""
-    summaries = collect(
-        plan,
-        DirectoryStore(store_dir / _model_name(method, rank)),
-        method=_method(method),
-        **options,
-    )
+    store = _store(options, rank)
+    summaries = collect(plan, store, method=_method(options.method), **fit_kwargs)
     missing = sum(len(summary.missing) for summary in summaries.values())
     if missing:
         raise ValueError(
             f"rank {rank}: {missing} of {len(plan)} restarts missing from "
-            f"{store_dir}; run every `run --job` first",
+            f"{store.root}; run every `run --job` first",
         )
     return summaries
 
@@ -708,31 +792,55 @@ def _saved_decomposition(
 
 
 def _model_name(method: str, rank: int) -> str:
-    """`<method>_rank_<r>`: the model file's stem, and everything named after
-    it (figures, the restart store), so methods never overwrite each other."""
+    """`<method>_rank_<r>`: the model directory's name, and everything named
+    after it (figures, the restart store), so fits never overwrite each
+    other."""
     return f"{method}_rank_{rank}"
+
+
+def _update_fits_table(path: Path, fits: list[SavedDecomposition]) -> None:
+    """Add `fits` to the `fits.csv` at `path`, one row per method and rank,
+    replacing earlier rows for the same method and rank."""
+    rows = pd.DataFrame(
+        {
+            "method": [s.method for s in fits],
+            "rank": [s.rank for s in fits],
+            "error": [s.error for s in fits],
+            "model": [f"{_model_name(s.method, s.rank)}/{MODEL_FILE}" for s in fits],
+        },
+    )
+    if path.exists():
+        earlier = pd.read_csv(path)
+        replaced = set(zip(rows["method"], rows["rank"]))
+        kept = [
+            (method, rank) not in replaced
+            for method, rank in zip(earlier["method"], earlier["rank"])
+        ]
+        rows = pd.concat([earlier[kept], rows], ignore_index=True)
+    rows.sort_values(["method", "rank"]).to_csv(path, index=False)
 
 
 def _write_decompositions(
     options: DecompositionOptions,
     fits: list[SavedDecomposition],
 ) -> list[Path]:
-    """`<method>_rank_<r>.h5` per fit, `fits.csv` and the provenance record."""
+    """One directory per fit, `<output_dir>/<method>_rank_<r>/`, holding
+    `model.h5` and `decompose.json` (the settings of that fit), and
+    `fits.csv` in `output_dir`, one row per model there."""
     output_dir = Path(options.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     written = []
     for saved in fits:
-        path = output_dir / f"{_model_name(saved.method, saved.rank)}.h5"
-        save_decomposition(path, saved)
-        written.append(path)
-    pd.DataFrame(
-        {
-            "method": [s.method for s in fits],
-            "rank": [s.rank for s in fits],
-            "error": [s.error for s in fits],
-        },
-    ).to_csv(output_dir / "fits.csv", index=False)
-    write_provenance(output_dir, "decompose", options)
+        model_dir = output_dir / _model_name(saved.method, saved.rank)
+        model_dir.mkdir(exist_ok=True)
+        save_decomposition(model_dir / MODEL_FILE, saved)
+        write_provenance(
+            model_dir,
+            "decompose",
+            dataclasses.replace(options, ranks=(saved.rank,)),
+        )
+        written.append(model_dir / MODEL_FILE)
+    _update_fits_table(output_dir / "fits.csv", fits)
     return written
 
 
@@ -751,10 +859,10 @@ def run_decomposition(options: DecompositionOptions) -> list[Path]:
     """`gmri decompose run`: one fit per rank, in this process.
 
     Every restart is saved to the store, as a distributed run saves them,
-    and refitted even if the store already holds it. Writes
-    `<method>_rank_<r>.h5`, `fits.csv`, `decompose.json` and each rank's
-    reproducibility files (see `_finish_rank`); returns the model paths in
-    `ranks` order.
+    and refitted even if the store already holds it. Writes each
+    rank's model directory and `fits.csv` (see `_write_decompositions`) and
+    its reproducibility files (see `_finish_rank`); returns the `model.h5`
+    paths in `ranks` order.
     """
     data = _decomposition_input(options)
     fit_kwargs = _fit_options(options.fit, options.method)
@@ -762,17 +870,38 @@ def run_decomposition(options: DecompositionOptions) -> list[Path]:
     _run_job_tasks(
         [(rank, task) for rank in options.ranks for task in plan],
         data,
-        options.method,
-        options.store_dir,
+        options,
         options.fit.restart_procs,
         fit_kwargs,
         resume=False,
     )
-    fits = [
-        _finish_rank(plan, options.store_dir, rank, options.method, fit_kwargs, data)
-        for rank in options.ranks
-    ]
-    return _write_decompositions(options, fits)
+    return _finish_ranks(options, plan, fit_kwargs, data)
+
+
+def _finish_ranks(
+    options: DecompositionOptions,
+    plan: Sequence[FitTask],
+    fit_kwargs: dict[str, Any],
+    data: DecompositionInput,
+) -> list[Path]:
+    """Write every rank that converged (`_finish_rank`,
+    `_write_decompositions`); then raise `ConvergenceError` naming the
+    ranks that did not, so one failed rank does not lose the others."""
+    fits, failed = [], []
+    for rank in options.ranks:
+        try:
+            fits.append(_finish_rank(plan, options, rank, fit_kwargs, data))
+        except ConvergenceError as error:
+            failed.append(error)
+    written = _write_decompositions(options, fits) if fits else []
+    if failed:
+        kept = (
+            f"; the other ranks were written to {options.output_dir}" if written else ""
+        )
+        raise ConvergenceError(
+            "; ".join(str(error) for error in failed) + kept,
+        ) from failed[-1]
+    return written
 
 
 def _decomposition_plan(
@@ -787,8 +916,14 @@ def _decomposition_plan(
 
 
 def plan_decomposition(options: DecompositionOptions) -> int:
-    """`gmri decompose plan`: save `plan.json`; return the number of jobs."""
+    """`gmri decompose plan`: save `plan.json`; return the number of jobs.
+
+    An impossible PARAFAC2 rank is refused here, before any job runs.
+    """
     data = _decomposition_input(options)
+    if options.method == "parafac2":
+        for rank in options.ranks:
+            _check_parafac2_rank(data.data, rank)
     plan = _decomposition_plan(options, len(data.subjects))
     _write_plan(options)
     return _n_jobs(plan, options.distributed.tasks_per_job)
@@ -807,8 +942,7 @@ def run_decomposition_job(output_dir: Path, job: int) -> int:
     _run_job_tasks(
         tasks,
         data,
-        options.method,
-        options.store_dir,
+        options,
         options.fit.restart_procs,
         _fit_options(options.fit, options.method),
     )
@@ -822,11 +956,7 @@ def collect_decomposition(output_dir: Path) -> list[Path]:
     data = _decomposition_input(options)
     fit_kwargs = _fit_options(options.fit, options.method)
     plan = plan_restarts(len(data.subjects), options.fit.restarts)
-    fits = [
-        _finish_rank(plan, options.store_dir, rank, options.method, fit_kwargs, data)
-        for rank in options.ranks
-    ]
-    return _write_decompositions(options, fits)
+    return _finish_ranks(options, plan, fit_kwargs, data)
 
 
 REPRODUCIBILITY_STEM = "reproducibility"
@@ -834,9 +964,8 @@ REPRODUCIBILITY_STEM = "reproducibility"
 
 def _finish_rank(
     plan: Sequence[FitTask],
-    store_dir: Path,
+    options: DecompositionOptions,
     rank: int,
-    method: str,
     fit_kwargs: dict[str, Any],
     data: DecompositionInput,
 ) -> SavedDecomposition:
@@ -854,7 +983,7 @@ def _finish_rank(
     with warnings.catch_warnings():
         # Raised as a ConvergenceError below instead, on one line.
         warnings.filterwarnings("ignore", message=r"Group .* restarts converged")
-        summary = _collect_rank(plan, store_dir, rank, method, fit_kwargs)["full"]
+        summary = _collect_rank(plan, options, rank, fit_kwargs)["full"]
     best = summary.best
     if best is None or best.model is None or best.error is None:
         raise ConvergenceError(
@@ -863,12 +992,11 @@ def _finish_rank(
         ) from summary.tally.last_failure
 
     # _collect_rank refuses missing restarts, so every task has a result.
-    rank_dir = store_dir / _model_name(method, rank)
-    store = DirectoryStore(rank_dir)
+    store = _store(options, rank)
     results = [cast(RestartResult, store.load(task)) for task in plan]
-    csv = write_reproducibility(results, rank_dir)
+    csv = write_reproducibility(results, store.root)
     fig, _ = plot_reproducibility(*read_reproducibility(csv))
-    save_figure(fig, rank_dir / REPRODUCIBILITY_STEM)
+    save_figure(fig, store.root / REPRODUCIBILITY_STEM)
     return _saved_decomposition(rank, best.model, best.error, data)
 
 
@@ -906,6 +1034,12 @@ def _stratification(
         _read_subject_info(options.subject_info),
         options.stratify_by,
     )
+    blank = [str(s) for s, group in zip(subjects, groups) if pd.isna(group)]
+    if blank:
+        raise ValueError(
+            f"subject(s) without a '{options.stratify_by}' value to stratify "
+            f"by: {', '.join(blank)}",
+        )
     codes, _ = pd.factorize(pd.Series(groups))
     return torch.as_tensor(codes)
 
@@ -1032,8 +1166,7 @@ def run_replicability_job(output_dir: Path, job: int) -> int:
     _run_job_tasks(
         tasks,
         data,
-        options.method,
-        options.store_dir,
+        options,
         options.n_procs,
         _fit_options(options.fit, options.method),
     )
@@ -1048,13 +1181,7 @@ def collect_replicability(output_dir: Path) -> Path:
     fit_kwargs = _fit_options(options.fit, options.method)
     rows = []
     for rank, plan in _replicability_plans(options, data).items():
-        summaries = _collect_rank(
-            plan,
-            options.store_dir,
-            rank,
-            options.method,
-            fit_kwargs,
-        )
+        summaries = _collect_rank(plan, options, rank, fit_kwargs)
         rows.extend(_score_rows(options, rank, _engine(options).compute_fms(summaries)))
     return _write_replicability(options, rows)
 
@@ -1127,11 +1254,12 @@ def _spatial_inputs(
     segmentation_path: Path | None,
     background_path: Path | None,
     slices: tuple[int, int, int] | None,
-    fill_value: float = 0.0,
+    fill_value: float | None = None,
 ) -> _Spatial | None:
     """Voxel layout of `label_mode` (one row per `space.labels` entry); None
     for ROI data without a segmentation to map onto. Segmented voxels whose
-    label is not in `space.labels` get `fill_value`.
+    label is not in `space.labels` get `fill_value`, or with None are left
+    out of the layout, so they show only the background.
 
     Every image given is checked against the grid it is drawn on: voxel
     data's template (its stored shape and affine), or the segmentation of
@@ -1156,8 +1284,11 @@ def _spatial_inputs(
             label_mode,
             space.labels,
             segmentation,
-            fill_value=fill_value,
+            fill_value=0.0 if fill_value is None else fill_value,
         )
+        if fill_value is None:
+            modelled = np.isin(segmentation[tuple(index_list.T)], space.labels)
+            mode, index_list = mode[modelled], index_list[modelled]
         voxel_labels = segmentation[tuple(index_list.T)]
         shape = tuple(segmentation.shape)
         grid_affine = segmentation_affine
@@ -1225,6 +1356,21 @@ def _component_weights_table(weights: np.ndarray) -> pd.DataFrame:
     )
 
 
+def _same_values(a: Any, b: Any) -> bool:
+    """Whether two saved fields hold the same values: None only equals
+    None, ragged lists compare element by element, numbers to 1e-5."""
+    if a is None or b is None:
+        return a is None and b is None
+    if isinstance(a, (list, tuple)) and any(np.ndim(item) > 0 for item in a):
+        return len(a) == len(b) and all(map(_same_values, a, b))
+    a, b = np.asarray(a), np.asarray(b)
+    if a.shape != b.shape:
+        return False
+    if a.dtype.kind in "biufc" and b.dtype.kind in "biufc":
+        return bool(np.allclose(a, b, rtol=1e-5, equal_nan=True))
+    return bool((a.astype(str) == b.astype(str)).all())
+
+
 def load_model_data(
     model: Path,
     saved: SavedDecomposition,
@@ -1233,14 +1379,31 @@ def load_model_data(
     """The data `model` was fitted to, one array per subject, in the space
     of the fit (same subjects, scaling and centring).
 
-    Settings come from the `decompose.json` next to the model; the input
-    path from there unless `input_override` is given. Raises
-    `FileNotFoundError` if either file is missing and `ValueError` if the
-    reloaded subjects are not the model's.
+    `model` is anything `resolve_model` accepts. Settings come from the
+    `decompose.json` next to the model file; the input path from there
+    unless `input_override` is given.
+
+    Raises
+    ------
+    FileNotFoundError
+        If the record or the input is missing.
+    ValueError
+        If the record is not this model's (method, rank), or the reloaded
+        data differs from what the model was fitted to: its subjects,
+        labels, time points, centring or scaling.
     """
-    record_path = Path(model).with_name("decompose.json")
+    record_path = resolve_model(model)[0].with_name("decompose.json")
     _require(record_path, "decompose")
     record = json.loads(record_path.read_text())["options"]
+    if record.get("method") != saved.method or saved.rank not in record.get(
+        "ranks",
+        (),
+    ):
+        raise ValueError(
+            f"{record_path} records a {record.get('method')} fit at rank(s) "
+            f"{record.get('ranks')}, not this {saved.method} rank-{saved.rank} "
+            "model",
+        )
     path = Path(input_override or record["input"])
     if not path.exists():
         raise FileNotFoundError(
@@ -1252,10 +1415,21 @@ def load_model_data(
         TensorOptions(**record["tensor"]),
         record["statistic"],
     )
-    if [str(s) for s in data.subjects] != [str(s) for s in saved.subjects]:
+    fields = {
+        "subjects": ([str(s) for s in data.subjects], [str(s) for s in saved.subjects]),
+        "labels": (data.labels, saved.labels),
+        "label_index": (data.label_index, saved.label_index),
+        "timepoints": (data.timepoints, saved.timepoints),
+        "centred": (bool(data.centered), bool(saved.centered)),
+        "scale_mean": (data.scale_mean, saved.scale_mean),
+        "scale_std": (data.scale_std, saved.scale_std),
+    }
+    differ = [name for name, (a, b) in fields.items() if not _same_values(a, b)]
+    if differ:
         raise ValueError(
-            f"the subjects in {path} are not those of {model}; was the input "
-            "preprocessed again after the fit?",
+            f"the data reloaded from {path} differs from what {model} was "
+            f"fitted to ({', '.join(differ)}); was the input preprocessed "
+            "again after the fit?",
         )
     return data_slices(data.data)
 
@@ -1264,11 +1438,12 @@ def _optional_groups(
     subjects: list[str],
     subject_info: pd.DataFrame,
     group_variable: str,
-) -> list[str | None]:
-    """Each subject's group as text, None if it has none."""
-    lookup = subject_info.set_index("subjects")[group_variable]
+) -> list[Any]:
+    """Each subject's group value, None if it has none."""
+    lookup = subject_info.drop_duplicates("subjects").set_index("subjects")
+    lookup = lookup[group_variable]
     return [
-        str(lookup[s]) if s in lookup.index and pd.notna(lookup[s]) else None
+        lookup[s] if s in lookup.index and pd.notna(lookup[s]) else None
         for s in subjects
     ]
 
@@ -1292,20 +1467,24 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
 
     The outlier part reloads the data the model was fitted to
     (`load_model_data`) and scores every fitted subject, also those without
-    a group (`outlier_table`, written as `<model>__outliers.csv`); without
-    that data it is skipped with a note if no part was chosen explicitly.
+    a group (`outlier_table`, written as `<model>__outliers.csv`). If that
+    data cannot be reloaded as fitted, the part is skipped with a note if
+    no part was chosen explicitly, and raises otherwise.
+
+    `<model>` is the model's name: its directory, or the stem of any other
+    model file (`resolve_model`).
 
     Returns the figure files only: the CSVs (component weights, evolving-mode
     significance, outliers) are written next to them but not listed.
     """
-    saved = load_decomposition(options.model)
+    model_file, stem = resolve_model(options.model)
+    saved = load_decomposition(model_file)
     # Of the full fit, before any subjects are left out below.
     weights = component_weights(saved)
     subject_info = _read_subject_info(options.subject_info)
     subjects = [str(s) for s in saved.subjects]
     page_width = resolve_page_width(options.page_width)
     out_dir = Path(options.output_dir) / "figures" / "decomposition"
-    stem = Path(options.model).stem
     parts = list(options.selected_parts())
 
     spatial = None
@@ -1334,7 +1513,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
         # residuals are relative to the model as fitted.
         try:
             observed = load_model_data(options.model, saved, options.input)
-        except FileNotFoundError as error:
+        except (FileNotFoundError, ValueError) as error:
             if options.parts:
                 raise
             print(f"Skipping the outlier part: {error}")
@@ -1460,12 +1639,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
         )
         save(fig, "outliers")
         table.to_csv(out_dir / f"{stem}__outliers.csv", index=False)
-        flagged = table.loc[
-            table[["high_leverage", "high_residual", "high_residual_robust"]].any(
-                axis=1,
-            ),
-            "subject",
-        ]
+        flagged = table.loc[table[list(FLAG_COLUMNS)].any(axis=1), "subject"]
         print(
             f"Possible outliers (alpha {options.outlier_alpha}): "
             f"{', '.join(flagged) if len(flagged) else 'none'}.",
@@ -1571,16 +1745,10 @@ def group_averages(options: GroupMapPlotOptions) -> GroupAverages:
         .to_pandas()
         .drop_duplicates()
     )
-    subjects = sorted(scans_index["subject"].unique())
-    subject_groups = dict(
-        zip(
-            subjects,
-            resolve_subject_groups(
-                subjects,
-                _read_subject_info(options.subject_info),
-                options.group_variable,
-            ),
-        ),
+    subject_groups = _subject_groups(
+        sorted(scans_index["subject"].unique()),
+        options.subject_info,
+        options.group_variable,
     )
     groups = sorted(set(subject_groups.values()))
     timepoints = _selected_timepoints(

@@ -2,6 +2,7 @@ import dataclasses
 import inspect
 import os
 import warnings
+from collections.abc import Callable
 from typing import Any
 
 import numpy as np
@@ -225,6 +226,65 @@ def test_init_restart_worker_backend_caps_threads():
         torch.set_num_threads(original)
 
 
+def test_init_restart_worker_backend_registers_the_parents_mttkrp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: spawned restart workers fell back to TensorLy's default
+    MTTKRP, since the registration is process-local."""
+    from gMRItensor import decomposition
+
+    registered: list[bool] = []
+    monkeypatch.setattr(
+        decomposition,
+        "_maybe_register_memory_efficient_khatri_rao",
+        registered.append,
+    )
+    original = torch.get_num_threads()
+    try:
+        _init_restart_worker_backend(1, memory_efficient=True)
+    finally:
+        torch.set_num_threads(original)
+    assert registered == [True]
+
+
+def test_PARAFAC2_tensorly_rejects_a_fit_that_ran_out_of_iterations() -> None:
+    """Regression: TensorLy's line search replaces errors instead of adding
+    them, so counting them never detected the iteration limit."""
+    slices = make_parafac2_slices(setup_backend())
+
+    with pytest.raises(ConvergenceError) as raised:
+        compute_PARAFAC2_decomposition(
+            slices,
+            rank=2,
+            PARAFAC2_max_iter=20,
+            PARAFAC2_tolerance=1e-30,
+            solver="tensorly",
+        )
+    assert raised.value.reason == "max_iter"
+
+
+@pytest.mark.parametrize(
+    ("compute", "argument"),
+    [
+        ("CP", "CP_tolerance"),
+        ("PARAFAC2", "PARAFAC2_tolerance"),
+        ("PARAFAC2", "aoadmm_loss_tolerance"),
+        ("CMF", "CMF_tolerance"),
+    ],
+)
+def test_compute_rejects_a_zero_tolerance(compute: str, argument: str) -> None:
+    slices = make_parafac2_slices(torch.device("cpu"))
+    functions: dict[str, tuple[Callable[..., Any], Any]] = {
+        "CP": (compute_CP_decomposition, make_low_rank_tensor()),
+        "PARAFAC2": (compute_PARAFAC2_decomposition, slices),
+        "CMF": (compute_CMF_decomposition, slices),
+    }
+    function, data = functions[compute]
+
+    with pytest.raises(ValueError, match=f"{argument} must be > 0"):
+        function(data, 2, **{argument: 0.0})
+
+
 def test_CP_restart_procs_parallel_converges_as_well_as_sequential():
     # Splitting restarts across worker processes should reach comparably low
     # reconstruction error to running them sequentially in-process. Not
@@ -378,16 +438,13 @@ def test_PARAFAC2_repeated_checks_rank_before_fitting(
 
 
 def test_PARAFAC2_rank_equal_to_smallest_dimension_is_accepted() -> None:
-    setup_backend()
+    from gMRItensor.decomposition import _check_parafac2_rank
+
     slices = [torch.rand(n, 3, dtype=torch.float64) for n in (5, 3, 4)]
 
-    model, _, _ = compute_PARAFAC2_decomposition(
-        slices,
-        rank=3,
-        PARAFAC2_max_iter=20,
-        nn_modes=None,
-    )
-    assert model.label_mode.shape == (3, 3)
+    _check_parafac2_rank(slices, 3)  # the smallest slice has 3 rows
+    with pytest.raises(ValueError):
+        _check_parafac2_rank(slices, 4)
 
 
 # ---------------------------------------------------------------------------

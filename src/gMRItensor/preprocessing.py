@@ -36,7 +36,8 @@ def compute_tracer(baseline: np.ndarray, post_injection: np.ndarray, signal_type
             "(1 / post_injection) - (1 / baseline))"
         )
     elif signal_type == "R1map":
-        expr = "post_injection - baseline"
+        # 0 marks a voxel the mapping failed on, as in T1 maps.
+        expr = "where((post_injection == 0) | (baseline == 0), nan, post_injection - baseline)"
     elif signal_type == "T1w":
         expr = "where(abs(baseline) < 1e-6, nan, post_injection / baseline)"
     else:

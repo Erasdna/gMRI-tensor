@@ -18,6 +18,7 @@ from gMRItensor.group_statistics import Aggregate
 from gMRItensor.group_statistics import AGGREGATES
 from gMRItensor.group_statistics import require_columns
 from gMRItensor.model_io import NEGLIGIBLE_SUBJECT_WEIGHT
+from gMRItensor.model_io import resolve_model
 from gMRItensor.plotting.utils import JOURNAL_WIDTHS
 from gMRItensor.preprocessing import SIGNAL_TYPES
 from gMRItensor.roi_groups import get_roi_presets
@@ -35,7 +36,6 @@ STATISTICS = (
 CONCENTRATION_STATISTICS = STATISTICS[2:]
 #: The parts `gmri plot decomposition` can draw.
 DECOMPOSITION_PARTS = ("mode_grid", "subject_mode", "time", "spatial", "outliers")
-#: Runner options set by `FitOptions` fields rather than `extra`.
 #: Runner options that have their own flag or are set by the pipeline, so
 #: `--fit-option` cannot override them (`plan` would not see the override).
 _MANAGED_FIT_OPTIONS: dict[str, str] = {
@@ -49,6 +49,7 @@ _MANAGED_FIT_OPTIONS: dict[str, str] = {
     "solver": "--solver",
     "rank": "--ranks",
     "device": "the pipeline (GMRITENSOR_USE_GPU)",
+    "compute_device": "the pipeline (GMRITENSOR_USE_GPU)",
     "return_diagnostics": "the pipeline",
     "method": "--method",
     "n_procs": "--n-procs",
@@ -301,9 +302,20 @@ class ReplicabilityOptions:
                 self.splits is not None and self.splits >= 3,
                 f"engine cv needs splits >= 3, got {self.splits}",
             )
+        else:
+            _check(self.splits is None, "splits applies to engine cv only")
         _check(
             self.stratify_by is None or self.subject_info is not None,
             "stratify_by needs subject_info",
+        )
+        _check(
+            self.subject_info is None or self.stratify_by is not None,
+            "subject_info is only read with stratify_by",
+        )
+        _check(
+            self.fit.restart_procs == 1,
+            "restart_procs applies to decompose; replicability spreads its "
+            "fits with n_procs",
         )
         if self.stratify_by is not None:
             _check_subject_columns(
@@ -421,7 +433,9 @@ class DecompositionPlotOptions:
     that figure's name as `<prefix>_`, so runs with different variable sets
     do not overwrite each other. The `outliers` part flags subjects at a
     family-wise `outlier_alpha` (Bonferroni over subjects); it reloads the
-    model's input recorded in `decompose.json`, or `input` if given.
+    model's input recorded in the `decompose.json` next to it, or `input` if
+    given. `model` is a model directory (`<method>_rank_<r>/`), its
+    `model.h5`, or any other saved model file.
     """
 
     model: Path
@@ -474,7 +488,7 @@ class DecompositionPlotOptions:
         )
         _check_page_width(self.page_width)
         _check(self.dpi >= 1, f"dpi must be >= 1, got {self.dpi}")
-        _require_file(self.model, "model")
+        _require_file(resolve_model(self.model)[0], "model")
         _check_subject_columns(
             self.subject_info,
             {

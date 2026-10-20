@@ -1867,6 +1867,33 @@ def _texts(ax: matplotlib.axes.Axes) -> list[str]:
     return [text.get_text() for text in ax.texts]
 
 
+def test_variable_correlation_keeps_group_colours_when_a_group_has_no_values() -> (
+    None
+):
+    """Regression: with group B missing a numerical variable, C's points
+    and fit took B's colour."""
+    df = pd.DataFrame(
+        {
+            "group": ["A"] * 4 + ["B"] * 4 + ["C"] * 4,
+            "age": [1.0, 2.0, 3.0, 4.0] + [np.nan] * 4 + [1.0, 2.0, 3.0, 4.0],
+            "weight": np.arange(12.0),
+        },
+    )
+    fig, ax = plt.subplots()
+
+    make_variable_correlation(ax, df, "age", "weight", "group")
+
+    color_a, _, color_c = get_color_palette(3)
+    fits = [line for line in ax.get_lines() if len(line.get_xdata()) > 1]
+    assert [to_rgb(line.get_color()) for line in fits] == [
+        to_rgb(color_a),
+        to_rgb(color_c),
+    ]
+    points = ax.collections[0].get_facecolors()[:, :3]  # A's 4, then C's 4
+    np.testing.assert_allclose(points[4:], [to_rgb(color_c)] * 4)
+    plt.close(fig)
+
+
 def test_plot_outliers_cutoffs_labels_and_group_colors():
     table, cutoffs = make_outlier_table()
     groups = ["A", "B"] * 4 + [None, "A"]
@@ -1888,6 +1915,23 @@ def test_plot_outliers_cutoffs_labels_and_group_colors():
     color_a, color_b = get_color_palette(2)
     assert to_rgb(ax.collections[0].get_facecolor()[0]) == to_rgb(color_a)
     assert to_rgb(ax.collections[1].get_facecolor()[0]) == to_rgb(color_b)
+    plt.close(fig)
+
+
+def test_plot_outliers_orders_numeric_groups_by_value():
+    """Group 2 before 10, as in the other figures (not "10" before "2")."""
+    table, cutoffs = make_outlier_table()
+
+    fig, ax = plot_outliers(table, cutoffs, [10, 2] * 5, "apoe")
+
+    legend = [text.get_text() for text in fig.legends[0].get_texts()]
+    assert legend[:2] == ["2", "10"]
+    color_2, _ = get_color_palette(2)
+    assert to_rgb(ax.collections[0].get_facecolor()[0]) == to_rgb(color_2)
+    np.testing.assert_allclose(
+        ax.collections[0].get_offsets()[:, 0],
+        table["leverage"].iloc[1::2],
+    )
     plt.close(fig)
 
 

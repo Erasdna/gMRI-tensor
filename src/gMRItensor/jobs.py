@@ -18,6 +18,8 @@ import dataclasses
 import math
 import os
 import re
+import socket
+import uuid
 import warnings
 from collections.abc import Callable
 from collections.abc import Hashable
@@ -305,12 +307,22 @@ class DirectoryStore:
 
     Files live at `root/<group>/seed_<NNNN>.pt` and hold only tensors and
     plain values, so they load with `weights_only=True`. Writes go to a
-    temporary file first and are renamed into place, so a job killed
-    mid-write never leaves a half-written result for `collect` to read.
+    temporary file named after this host and process, are synced to disk
+    and then renamed into place, so neither a job killed mid-write nor two
+    jobs writing the same task leave a half-written result for `collect`.
+
+    `settings` (any string, e.g. a hash of the fit options) is saved with
+    every result; a store with `settings` refuses results saved with other
+    ones instead of reusing fits made under different options.
     """
 
-    def __init__(self, root: str | os.PathLike[str]) -> None:
+    def __init__(
+        self,
+        root: str | os.PathLike[str],
+        settings: str | None = None,
+    ) -> None:
         self.root = Path(root)
+        self.settings = settings
 
     def path(self, task: FitTask) -> Path:
         return self.root / _group_slug(task.group) / f"seed_{task.seed:04d}.pt"
@@ -320,6 +332,7 @@ class DirectoryStore:
         path.parent.mkdir(parents=True, exist_ok=True)
         task = result.task
         record = {
+            "settings": self.settings,
             "task": {
                 "group": task.group,
                 "indices": list(task.indices),
@@ -337,15 +350,38 @@ class DirectoryStore:
             "failure_level": result.failure_level,
             "failure_suggested_max_iter": result.failure_suggested_max_iter,
         }
-        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
-        torch.save(record, tmp)
+        writer = f"{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex}"
+        tmp = path.with_name(f".{path.name}.{writer}.tmp")
+        with open(tmp, "wb") as file:
+            torch.save(record, file)
+            file.flush()
+            os.fsync(file.fileno())
         os.replace(tmp, path)
 
     def load(self, task: FitTask) -> RestartResult | None:
+        """The stored result for `task`, or None if it is missing.
+
+        Raises `ValueError` if the file cannot be read, holds another task,
+        or was saved with other `settings`.
+        """
         path = self.path(task)
         if not path.exists():
             return None
-        record = torch.load(path, weights_only=True)
+        try:
+            record = torch.load(path, weights_only=True)
+        except Exception as error:  # any unpickling failure: a damaged file
+            # Only the type: torch's message spans lines and suggests
+            # weights_only=False, which would run code from the file.
+            raise ValueError(
+                f"{path} cannot be read ({type(error).__name__}); delete it to "
+                "fit that restart again",
+            ) from None
+        if self.settings is not None and record.get("settings") != self.settings:
+            raise ValueError(
+                f"{path} was fitted with other settings (input, tensor or fit "
+                f"options) than now; use a fresh store, or delete {self.root} "
+                "to fit again",
+            )
         stored = record["task"]
         stored_task = FitTask(
             stored["group"],

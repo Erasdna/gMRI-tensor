@@ -8,6 +8,7 @@ import pytest
 from gMRItensor.model_io import SavedDecomposition
 from gMRItensor.outliers import _robust_residual_cutoff
 from gMRItensor.outliers import data_slices
+from gMRItensor.outliers import leverage
 from gMRItensor.outliers import outlier_table
 from gMRItensor.outliers import reconstruct_slices
 from gMRItensor.outliers import subject_residuals
@@ -214,3 +215,49 @@ def test_data_must_match_the_model_subjects() -> None:
 
     with pytest.raises(ValueError, match="19 data slices for a model of 20"):
         outlier_table(saved, reconstruct_slices(saved)[:-1])
+
+
+def test_leverage_matches_tlviz_at_full_rank() -> None:
+    saved = make_model("cp")
+
+    np.testing.assert_allclose(
+        leverage(saved.subject_mode),
+        compute_leverage(saved.subject_mode),
+    )
+
+
+@pytest.mark.parametrize("deficiency", ["dead component", "more components"])
+def test_rank_deficient_subject_mode_gets_leverage_but_no_cutoff(
+    deficiency: str,
+) -> None:
+    """A component no subject expresses, or more components than subjects,
+    makes `AᵀA` singular: leverage stays defined (`diag(A A⁺)`, summing to
+    the numerical rank) and only its cut-off is dropped."""
+    if deficiency == "dead component":
+        saved = make_model("cp")
+        subject_mode = saved.subject_mode.copy()
+        subject_mode[:, 1] = 0.0
+        expected_rank = 1
+    else:
+        saved = make_model("cp", rank=3)
+        subject_mode = saved.subject_mode[:2]
+        expected_rank = 2
+    dead = dataclasses.replace(
+        saved,
+        subject_mode=subject_mode,
+        subjects=saved.subjects[: len(subject_mode)],
+    )
+
+    table, cutoffs = outlier_table(dead, reconstruct_slices(dead))
+
+    assert cutoffs.leverage is None
+    assert not table["high_leverage"].any()
+    assert table["leverage"].sum() == pytest.approx(expected_rank)
+
+
+def test_residuals_refuse_slices_of_another_shape() -> None:
+    with pytest.raises(ValueError, match="subject 1: data of shape"):
+        subject_residuals(
+            [np.zeros((3, 4)), np.zeros((4, 4))],
+            [np.zeros((3, 4)), np.zeros((3, 4))],
+        )

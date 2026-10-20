@@ -16,6 +16,7 @@ from gMRItensor.preprocessing import _iter_parallel
 from gMRItensor.preprocessing import _load_labeled_tracer_voxels
 from gMRItensor.preprocessing import compute_roi_scaling
 from gMRItensor.preprocessing import compute_roi_signal
+from gMRItensor.preprocessing import compute_tracer
 from gMRItensor.preprocessing import compute_tracer_from_image
 from gMRItensor.preprocessing import compute_tracer_parallel
 from gMRItensor.preprocessing import delta_r1_per_second
@@ -231,7 +232,7 @@ def test_compute_tracer_from_image_allows_equivalent_orientation(tmp_path):
     # aligned" ValueError; canonicalizing before comparing affines should
     # now recover the same values as if both had been stored identically.
     affine = np.diag([2.0, 2.0, 2.0, 1.0])
-    baseline_data = np.arange(27, dtype=float).reshape(3, 3, 3)
+    baseline_data = np.arange(1, 28, dtype=float).reshape(3, 3, 3)
     post_injection_data = np.arange(27, 100, dtype=float)[:27].reshape(3, 3, 3)
     mask_data = np.ones((3, 3, 3))
     segmentation_data = np.ones((3, 3, 3))  # single ROI covering every voxel
@@ -303,16 +304,18 @@ def _make_two_roi_images(tmp_path):
     """Build baseline/post-injection/mask/segmentation fixtures shared by the
     ROI-aggregate and per-voxel `compute_tracer_from_image` tests below.
 
-    `(2, 2, 2)` volume, `baseline=0` everywhere so R1map tracer ==
-    `post_injection` directly (trivial expected values); two real ROIs (`1`,
+    `(2, 2, 2)` volume, `baseline=1` everywhere and `post_injection` one
+    more than `post_injection_flat`, so the R1map tracer is
+    `post_injection_flat` (trivial expected values; R1 = 0 would mark an
+    invalid voxel); two real ROIs (`1`,
     `2`) plus background (`0`) voxels deliberately holding out-of-range
     values (`999`) so a filtering bug would be obvious.
     """
     affine = np.eye(4)
     shape = (2, 2, 2)
-    baseline_data = np.zeros(shape)
+    baseline_data = np.ones(shape)
     post_injection_flat = np.array([10, 20, 100, 200, 300, 999, 999, 30], dtype=float)
-    post_injection_data = post_injection_flat.reshape(shape)
+    post_injection_data = (post_injection_flat + 1).reshape(shape)
     mask_data = np.ones(shape)
     segmentation_flat = np.array([1, 1, 2, 2, 2, 0, 0, 1], dtype=float)
     segmentation_data = segmentation_flat.reshape(shape)
@@ -1263,3 +1266,15 @@ def test_load_tensor_from_parquet_impute_missing_without_nan_is_silent(tmp_path)
         got = load_tensor_from_parquet(path, "cp", impute_missing=True)
 
     _assert_matches_prepare_tensor(got, df, "cp")
+
+
+def test_zero_in_an_r1_map_is_not_a_valid_voxel() -> None:
+    """A 0 marks a failed fit in R1 maps as in T1 maps; it must not count as
+    ΔR1 = -R1_baseline (or +R1_post)."""
+    baseline = np.array([0.0, 0.5, 0.5])
+    post = np.array([0.7, 0.0, 0.7])
+
+    tracer = compute_tracer(baseline, post, "R1map")
+
+    assert np.isnan(tracer[:2]).all()
+    assert tracer[2] == pytest.approx(0.2)

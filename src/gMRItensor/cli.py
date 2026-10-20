@@ -42,6 +42,16 @@ Distributed restarts (e.g. a SLURM array):
 """
 
 
+class _Parser(argparse.ArgumentParser):
+    """An `ArgumentParser` that takes no abbreviations: `--tol` must not
+    pass for `--tolerance`, or `run --job` could not refuse it. Subparsers
+    inherit the class."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+
 def _non_negative_modes(value: str) -> Any:
     """`auto`, `none` or comma-separated mode indices (0 subject, 1 time,
     2 label)."""
@@ -143,8 +153,13 @@ def _add_preprocess(commands: Any) -> None:
     )
 
 
-def _add_fit_arguments(parser: argparse.ArgumentParser, required: bool) -> None:
-    """Input, tensor and fit arguments shared by decompose and replicability."""
+def _add_fit_arguments(
+    parser: argparse.ArgumentParser,
+    required: bool,
+    replicability: bool,
+) -> None:
+    """Input, tensor and fit arguments shared by decompose and replicability
+    (which spreads its fits with `--n-procs` instead of `--restart-procs`)."""
     parser.add_argument(
         "--input",
         type=Path,
@@ -215,12 +230,13 @@ def _add_fit_arguments(parser: argparse.ArgumentParser, required: bool) -> None:
         type=float,
         help="convergence tolerance (default: the solver's own)",
     )
-    fit.add_argument(
-        "--restart-procs",
-        type=int,
-        default=1,
-        help="parallel restart processes (decompose) (default: 1)",
-    )
+    if not replicability:
+        fit.add_argument(
+            "--restart-procs",
+            type=int,
+            default=1,
+            help="parallel restart processes (default: 1)",
+        )
     fit.add_argument(
         "--non-negative-modes",
         type=_non_negative_modes,
@@ -323,7 +339,7 @@ def _add_fit_command(
         metavar="N",
         help="0-based job index, e.g. $SLURM_ARRAY_TASK_ID",
     )
-    _add_fit_arguments(run, required=False)
+    _add_fit_arguments(run, required=False, replicability=replicability)
     if replicability:
         _add_replicability_arguments(run, required=False)
     # With --job every setting comes from plan.json, so these are refused.
@@ -349,7 +365,7 @@ def _add_fit_command(
         required=True,
         help="results directory",
     )
-    _add_fit_arguments(plan, required=True)
+    _add_fit_arguments(plan, required=True, replicability=replicability)
     if replicability:
         _add_replicability_arguments(plan, required=True)
     collect = actions.add_parser(
@@ -470,7 +486,8 @@ def _add_plot(commands: Any) -> None:
         "--model",
         type=Path,
         required=True,
-        help="<method>_rank_<r>.h5 from gmri decompose",
+        help="model directory <method>_rank_<r>/ from gmri decompose (or its "
+        "model.h5)",
     )
     decomposition.add_argument(
         "--subject-info",
@@ -532,7 +549,9 @@ def _add_plot(commands: Any) -> None:
         type=int,
         nargs=3,
         metavar=("I", "J", "K"),
-        help="slice indices (default: centre of mass)",
+        help="voxel indices of the volume reoriented to RAS (nibabel's "
+        "as_closest_canonical), not of the file as stored (default: centre of "
+        "mass)",
     )
     decomposition.add_argument(
         "--categorical",
@@ -595,7 +614,8 @@ def _add_plot(commands: Any) -> None:
         "--input",
         type=Path,
         help="data the model was fitted to, for --outliers (default: the input "
-        "recorded in decompose.json next to the model)",
+        "recorded in the model's decompose.json); the other settings always "
+        "come from that record",
     )
     _output_options(decomposition)
 
@@ -666,7 +686,9 @@ def _add_plot(commands: Any) -> None:
         type=int,
         nargs=3,
         metavar=("I", "J", "K"),
-        help="slice indices (default: centre of mass)",
+        help="voxel indices of the volume reoriented to RAS (nibabel's "
+        "as_closest_canonical), not of the file as stored (default: centre of "
+        "mass)",
     )
     group_maps.add_argument(
         "--timepoints",
@@ -705,7 +727,7 @@ def _slices(values: list[int] | None) -> tuple[int, int, int] | None:
 
 
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(
+    parser = _Parser(
         prog="gmri",
         description=(
             "gMRI tensor pipeline. Each command reads only the files earlier "
@@ -756,7 +778,7 @@ def _fit_settings(args: argparse.Namespace) -> dict[str, Any]:
             restarts=args.restarts,
             max_iter=args.max_iter,
             tolerance=args.tolerance,
-            restart_procs=args.restart_procs,
+            restart_procs=getattr(args, "restart_procs", 1),
             non_negative_modes=args.non_negative_modes,
             solver=args.solver,
             extra=dict(args.fit_option),
@@ -802,10 +824,13 @@ def _run_preprocess(args: argparse.Namespace) -> None:
     )
 
 
+def _given_flags(args: argparse.Namespace) -> list[str]:
+    return [token.split("=", 1)[0] for token in args.argv if token.startswith("--")]
+
+
 def _refuse_planned_flags(args: argparse.Namespace) -> None:
     """Raise if `run --job` was given any setting that plan.json owns."""
-    given = [token.split("=", 1)[0] for token in args.argv if token.startswith("--")]
-    refused = [flag for flag in given if flag in args.planned_flags]
+    refused = [flag for flag in _given_flags(args) if flag in args.planned_flags]
     if refused:
         raise ValueError(
             f"{refused[0]} cannot be used with --job: a planned job takes its "
@@ -838,6 +863,11 @@ def _run_fit_command(args: argparse.Namespace) -> None:
         )(
             args.output_dir,
             args.job,
+        )
+    elif "--tasks-per-job" in _given_flags(args):
+        raise ValueError(
+            "--tasks-per-job sets the job size of `plan`; `run` without --job "
+            "fits everything in this process",
         )
     elif decompose:
         pipeline.run_decomposition(_decomposition_options(args))

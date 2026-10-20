@@ -228,6 +228,14 @@ _CMF_MANAGED_OPTIONS: dict[str, str] = {
 _AOADMM_DEFAULT_FEASIBILITY_TOL: float = 1e-4
 
 
+def _check_tolerances(**tolerances: float | None) -> None:
+    """Raise `ValueError` unless each tolerance is None (the solver's
+    default) or > 0: at 0 no fit can converge."""
+    for name, value in tolerances.items():
+        if value is not None and not value > 0:
+            raise ValueError(f"{name} must be > 0 (or None), got {value}")
+
+
 def _solver_default(function: Callable[..., Any], name: str = "tol") -> float:
     """`function`'s own default for `name`, read from its signature.
 
@@ -287,6 +295,7 @@ def compute_CP_decomposition(
     `tol` for the chosen solver. The factors are not normalised, so the
     weights are ones (see `PARAFAC2Model`).
     """
+    _check_tolerances(CP_tolerance=CP_tolerance)
     mask = None
     has_nan = bool(torch.isnan(tensor).any())
     if allow_nan_imputation and has_nan:
@@ -829,19 +838,22 @@ def _compute_PARAFAC2_tensorly(
         init=init,
         nn_modes=list(nn_modes) if nn_modes else None,
     )
-    if len(errors) > max_iter - 1:
+    rec_errors = [float(error) for error in errors]
+    # TensorLy stops exactly when two successive recorded errors differ by
+    # less than `tol`, so that is the convergence test. Counting the errors
+    # is not: its line-search iterations replace the last error instead of
+    # adding one, so a fit can exhaust `max_iter` with far fewer recorded.
+    delta = abs(rec_errors[-2] - rec_errors[-1]) if len(rec_errors) >= 2 else math.inf
+    if not delta < tolerance:
         raise ConvergenceError(
             "Decomposition did not converge within the maximum iteration count",
             reason="max_iter",
         )
-
-    rec_errors = [float(error) for error in errors]
-    delta = abs(rec_errors[-2] - rec_errors[-1]) if len(rec_errors) >= 2 else math.inf
     diagnostics = PARAFAC2Diagnostics(
         solver="tensorly",
         n_iter=len(errors),
         max_iter=max_iter,
-        reached_max_iter=len(errors) > max_iter - 1,
+        reached_max_iter=False,
         relative_reconstruction_error=rec_errors[-1],
         reconstruction_error_change=delta,
         reconstruction_tolerance=tolerance,
@@ -935,6 +947,10 @@ def compute_PARAFAC2_decomposition(
         The acceptance gate failed, matcouply's constraints were left
         infeasible, or the result is degenerate.
     """
+    _check_tolerances(
+        PARAFAC2_tolerance=PARAFAC2_tolerance,
+        aoadmm_loss_tolerance=aoadmm_loss_tolerance,
+    )
     _check_parafac2_rank(tensor_slices, rank)
     slices_to_check = (
         tensor_slices if isinstance(tensor_slices, list) else [tensor_slices]
@@ -1123,6 +1139,10 @@ def compute_CMF_decomposition(
     ConvergenceError
         The constraints were left infeasible, or the fit did not converge.
     """
+    _check_tolerances(
+        CMF_tolerance=CMF_tolerance,
+        aoadmm_loss_tolerance=aoadmm_loss_tolerance,
+    )
     slices = _as_slices(tensor_slices)
     if any(torch.isnan(s).any() for s in slices):
         raise ValueError(
@@ -1371,10 +1391,14 @@ def _release_cuda_cache(device: torch.device) -> None:
         torch.cuda.empty_cache()
 
 
-def _init_restart_worker_backend(num_threads: int) -> None:
-    """Pool initializer: set TensorLy's backend and cap this worker's threads.
+def _init_restart_worker_backend(
+    num_threads: int,
+    memory_efficient: bool = False,
+) -> None:
+    """Pool initializer: set TensorLy's backend, cap this worker's threads
+    and register the memory-efficient MTTKRP if the parent did.
 
-    Both settings are process-local and so do not survive "spawn".
+    All three are process-local and so do not survive "spawn".
     Without the thread cap each worker falls back to a thread pool sized to
     all visible cores, so `restart_procs` workers oversubscribe the CPU
     badly. `_repeat_with_restarts` picks `num_threads` to keep
@@ -1382,15 +1406,16 @@ def _init_restart_worker_backend(num_threads: int) -> None:
     """
     tl.set_backend("pytorch")
     torch.set_num_threads(num_threads)
+    _maybe_register_memory_efficient_khatri_rao(memory_efficient)
 
 
 def _in_worker_process() -> bool:
     """True if already running inside a multiprocessing worker.
 
-    Used to refuse restart-level multiprocessing inside e.g.
-    `evaluate_replicability_multiproc`'s pool: a second layer of processes
-    adds startup and backend-init overhead without real parallelism, since
-    the outer pool already uses all requested workers.
+    Used to refuse restart-level multiprocessing inside another pool (a
+    caller's own): a second layer of processes adds startup and
+    backend-init overhead without real parallelism, since the outer pool
+    already uses all requested workers.
     """
     return current_process().name != "MainProcess"
 
@@ -1593,6 +1618,7 @@ def _repeat_with_restarts(
     verbose_level: int,
     progress_bar: bool,
     restart_procs: int = 1,
+    memory_efficient: bool = False,
 ) -> tuple[Any, torch.Tensor, Any, "RestartTally"]:
     """Run repeated random restarts and keep the best result.
 
@@ -1624,7 +1650,11 @@ def _repeat_with_restarts(
 
         Each worker is pinned to `torch.get_num_threads() // restart_procs`
         threads, so this splits the caller's existing CPU budget rather than
-        adding to it.
+        adding to it. Results are compared in seed order either way, so an
+        exact tie picks the same restart as `jobs.collect`.
+    memory_efficient : bool, optional
+        Whether the caller registered the memory-efficient MTTKRP; workers
+        register it too.
 
     Returns
     -------
@@ -1653,9 +1683,8 @@ def _repeat_with_restarts(
         if verbose_level > 0:
             print(
                 f"restart_procs={restart_procs} requested, but already running "
-                "inside a worker process (e.g. evaluate_replicability_multiproc's "
-                "own pool) -- falling back to restart_procs=1 to avoid nesting "
-                "process pools.",
+                "inside a worker process -- falling back to restart_procs=1 to "
+                "avoid nesting process pools.",
             )
         restart_procs = 1
 
@@ -1683,10 +1712,10 @@ def _repeat_with_restarts(
         with get_context("spawn").Pool(
             restart_procs,
             initializer=_init_restart_worker_backend,
-            initargs=(threads_per_proc,),
+            initargs=(threads_per_proc, memory_efficient),
         ) as pool:
             for outcome in tqdm(
-                pool.imap_unordered(_fit_one, task_args),
+                pool.imap(_fit_one, task_args),
                 total=init_repeats,
                 disable=not progress_bar,
             ):
@@ -1771,6 +1800,7 @@ def run_CP_decomposition_repeated(
         verbose_level,
         progress_bar,
         restart_procs=restart_procs,
+        memory_efficient=use_memory_efficient_khatri_rao,
     )
 
     return best_weights, best_factors, best_error
@@ -2113,6 +2143,7 @@ def run_PARAFAC2_decomposition_repeated(
         verbose_level,
         progress_bar,
         restart_procs=restart_procs,
+        memory_efficient=use_memory_efficient_khatri_rao,
     )
 
     _warn_parafac2_outcome(
@@ -2239,6 +2270,7 @@ def run_CMF_decomposition_repeated(
         verbose_level,
         progress_bar,
         restart_procs=restart_procs,
+        memory_efficient=False,
     )
 
     _warn_parafac2_outcome(

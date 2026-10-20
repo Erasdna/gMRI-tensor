@@ -193,8 +193,10 @@ def make_variable_correlation(
     needs at least 3 points and a non-constant x. The legend carries each
     fit's R2 and p-value.
     """
-    df = df.dropna(subset=[x_column, y_column, category])
+    # Levels before rows missing x or y are dropped, so a group without
+    # values for this variable does not shift the others' colours.
     categories = _levels(df[category])
+    df = df.dropna(subset=[x_column, y_column, category])
     if colors is None:
         colors = get_color_palette(len(categories))
 
@@ -246,18 +248,15 @@ def make_variable_correlation(
             fontsize="x-small",
         )
         for p_val, text in zip(pvalue_list, leg.get_texts()):
-            try:
-                if p_val < 0.05:
-                    text.set_bbox(
-                        dict(
-                            facecolor="none",  # (0.5, 0.5, 0.5, 0.2),
-                            edgecolor="black",
-                            linewidth=0.5,
-                            boxstyle="square,pad=0.2",
-                        ),
-                    )
-            except ValueError:
-                pass  # Skip if the text doesn't contain a parseable p-value
+            if p_val < 0.05:
+                text.set_bbox(
+                    dict(
+                        facecolor="none",
+                        edgecolor="black",
+                        linewidth=0.5,
+                        boxstyle="square,pad=0.2",
+                    ),
+                )
     ax.set_xlabel("")
     ax.set_ylabel("")
 

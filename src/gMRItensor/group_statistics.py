@@ -241,7 +241,7 @@ def compare_groups_over_time(
     smallest `n` at which these rank-based tests are non-degenerate. Two
     groups use a two-sided Mann-Whitney U (as
     `subject_mode.make_subject_boxplot` does); more use Kruskal-Wallis;
-    fewer are not tested at all.
+    fewer are not tested at all, nor are time points where every value ties.
 
     P-values are Benjamini-Hochberg FDR corrected *per facet value*, so each
     facet's time points form one hypothesis family rather than the whole
@@ -272,6 +272,11 @@ def compare_groups_over_time(
                 )
             else:
                 _, p_value = kruskal(*group_values)
+            if not np.isfinite(p_value):
+                # Every value tied (e.g. a t=0 scan used as its own
+                # baseline): untestable, and a NaN would make BH return
+                # NaN for every other time point of this facet.
+                continue
             facet_records.append(
                 {facet: facet_value, "timepoint": timepoint, "p_value": p_value},
             )

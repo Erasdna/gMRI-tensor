@@ -4,32 +4,33 @@ Draws `gMRItensor.outliers.outlier_table` output; nothing here computes
 diagnostics. Layout follows Fida et al. (2022, Fig. 8).
 """
 from collections.abc import Sequence
+from typing import Any
 
 import matplotlib
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import scienceplots  # noqa: F401
-from gMRItensor.outliers import OutlierCutoffs
-from gMRItensor.plotting.utils import compute_figsize
-from gMRItensor.plotting.utils import get_color_palette
-from gMRItensor.plotting.utils import resolve_page_width
-from matplotlib.lines import Line2D
+
+matplotlib.use("Agg")  # Prevent GUI display errors in containers/terminals
+import matplotlib.pyplot as plt  # noqa: E402
+import pandas as pd  # noqa: E402
+import scienceplots  # noqa: F401,E402
+from gMRItensor.outliers import FLAG_COLUMNS  # noqa: E402
+from gMRItensor.outliers import OutlierCutoffs  # noqa: E402
+from gMRItensor.plotting.utils import compute_figsize  # noqa: E402
+from gMRItensor.plotting.utils import get_color_palette  # noqa: E402
+from gMRItensor.plotting.utils import resolve_page_width  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 
 plt.style.use(["science", "no-latex"])
-matplotlib.use("Agg")
 
 #: Colour of subjects without a group and of the cut-off lines.
 _NEUTRAL = "0.5"
 #: A cut-off beyond this multiple of the largest value is noted, not drawn,
 #: so it does not squash the subjects into a corner.
 _MAX_AXIS_STRETCH = 1.5
-_FLAG_COLUMNS = ("high_leverage", "high_residual", "high_residual_robust")
 
 
 def _labelled(table: pd.DataFrame) -> pd.Index:
     """Flagged subjects plus the highest on each axis."""
-    flagged = table.index[table[list(_FLAG_COLUMNS)].any(axis=1)]
+    flagged = table.index[table[list(FLAG_COLUMNS)].any(axis=1)]
     return flagged.union([table["leverage"].idxmax(), table["residual"].idxmax()])
 
 
@@ -40,7 +41,7 @@ def _visible(cutoff: float | None, largest: float) -> bool:
 def plot_outliers(
     table: pd.DataFrame,
     cutoffs: OutlierCutoffs,
-    groups: Sequence[str | None],
+    groups: Sequence[Any],
     group_variable: str,
     page_width: str | float = "single",
     width_to_height_ratio: float = 1.3,
@@ -48,8 +49,9 @@ def plot_outliers(
     """Scatter each subject's leverage against its normalised residual.
 
     `table` and `cutoffs` are `outlier_table` output; `groups` holds each
-    row's group (None: no group), coloured as in the other figures (sorted
-    groups, `get_color_palette`), subjects without one grey. Dashed lines
+    row's group value (None: no group), coloured as in the other figures
+    (groups sorted by value, `get_color_palette`), subjects without one
+    grey. Dashed lines
     mark the leverage and tlviz residual cut-offs, a dotted line the robust
     residual cut-off; one far beyond all subjects is only listed, with its
     value, in the legend above the axes. Flagged subjects and the highest on each axis are
@@ -64,19 +66,22 @@ def plot_outliers(
         ),
         layout="compressed",
     )
-    group_array = np.array([g if g is not None else "" for g in groups], dtype=object)
     categories = sorted({g for g in groups if g is not None})
-    colors = dict(zip(categories, get_color_palette(len(categories))))
-    for category in [*categories, ""]:
-        rows = group_array == category
-        if not rows.any():
+    colors = get_color_palette(len(categories))
+    series = [
+        (str(category), color, [g == category for g in groups])
+        for category, color in zip(categories, colors)
+    ]
+    series.append((f"No {group_variable}", _NEUTRAL, [g is None for g in groups]))
+    for label, color, rows in series:
+        if not any(rows):
             continue
         ax.scatter(
             table.loc[rows, "leverage"],
             table.loc[rows, "residual"],
             s=12,
-            color=colors.get(category, _NEUTRAL),
-            label=category or f"No {group_variable}",
+            color=color,
+            label=label,
             zorder=3,
         )
 

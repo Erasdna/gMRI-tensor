@@ -14,6 +14,7 @@ from gMRItensor import decomposition
 from gMRItensor import pipeline
 from gMRItensor import preprocessing
 from gMRItensor import replicability
+from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.jobs import FitTask
 from gMRItensor.jobs import RestartResult
 from gMRItensor.model_io import _read_decomposition
@@ -350,18 +351,28 @@ def test_run_decomposition_from_roi_signal(
     written = run_decomposition(options)
 
     out = options.output_dir
-    assert written == [out / "parafac2_rank_1.h5", out / "parafac2_rank_2.h5"]
+    assert written == [
+        out / "parafac2_rank_1" / "model.h5",
+        out / "parafac2_rank_2" / "model.h5",
+    ]
     fits = pd.read_csv(out / "fits.csv")
     assert list(fits["rank"]) == [1, 2]
     assert list(fits["method"]) == ["parafac2", "parafac2"]
-    saved = load_decomposition(out / "parafac2_rank_2.h5")
+    assert list(fits["model"]) == [
+        "parafac2_rank_1/model.h5",
+        "parafac2_rank_2/model.h5",
+    ]
+    saved = load_decomposition(out / "parafac2_rank_2" / "model.h5")
     assert saved.method == "parafac2"
     assert saved.evolving_states is not None and len(saved.evolving_states) == 6
     assert saved.label_mode.shape == (5, 2)
     np.testing.assert_array_equal(saved.labels, [2, 4, 10, 41, 49])
     assert saved.voxel_coords is None
-    assert (out / "decompose.json").exists()
-    _assert_saved_largest_first(out / "parafac2_rank_2.h5")
+    record = json.loads((out / "parafac2_rank_2" / "decompose.json").read_text())
+    assert record["options"]["ranks"] == [2]
+    assert Path(record["options"]["input"]).is_absolute()
+    assert not (out / "decompose.json").exists()
+    _assert_saved_largest_first(out / "parafac2_rank_2" / "model.h5")
 
 
 def _assert_saved_largest_first(path: Path) -> None:
@@ -410,7 +421,7 @@ def test_run_decomposition_from_voxels_keeps_coordinates(
 
     run_decomposition(options)
 
-    saved = load_decomposition(options.output_dir / "parafac2_rank_2.h5")
+    saved = load_decomposition(options.output_dir / "parafac2_rank_2" / "model.h5")
     assert saved.label_mode.shape == (6**3, 2)
     assert saved.voxel_coords is not None and saved.voxel_coords.shape == (6**3, 3)
     np.testing.assert_array_equal(saved.template_shape, [6, 6, 6])
@@ -439,7 +450,7 @@ def test_cp_wiring_and_center(
     np.testing.assert_allclose(tensor.mean(axis=(0, 1)), 0.0, atol=1e-5)
     assert n_tasks == 4 and kwargs["non_negative"] is False
     assert kwargs["allow_nan_imputation"] is True
-    saved = load_decomposition(options.output_dir / "cp_rank_3.h5")
+    saved = load_decomposition(options.output_dir / "cp_rank_3" / "model.h5")
     assert saved.time_mode is not None and saved.time_mode.shape == (3, 3)
     assert saved.centered is True and saved.scale_std is None
 
@@ -466,7 +477,7 @@ def test_cp_imputes_a_missing_session(synthetic_study: Any) -> None:
     with pytest.warns(UserWarning, match=r"1 missing session.*\('sub-01', 6\)"):
         run_decomposition(options)
 
-    saved = load_decomposition(options.output_dir / "cp_rank_2.h5")
+    saved = load_decomposition(options.output_dir / "cp_rank_2" / "model.h5")
     assert "sub-01" in saved.subjects and len(saved.subjects) == 6
     assert saved.time_mode is not None
     for factor in (saved.subject_mode, saved.time_mode, saved.label_mode):
@@ -542,17 +553,17 @@ def test_distributed_decomposition_matches_centralised(
         run_decomposition_job(distributed.output_dir, job)
     written = collect_decomposition(distributed.output_dir)
 
-    assert [path.name for path in written] == [
-        "parafac2_rank_1.h5",
-        "parafac2_rank_2.h5",
+    assert [path.parent.name for path in written] == [
+        "parafac2_rank_1",
+        "parafac2_rank_2",
     ]
     pd.testing.assert_frame_equal(
         pd.read_csv(distributed.output_dir / "fits.csv"),
         pd.read_csv(central.output_dir / "fits.csv"),
     )
-    for name in ("parafac2_rank_1.h5", "parafac2_rank_2.h5"):
-        got = load_decomposition(distributed.output_dir / name)
-        expected = load_decomposition(central.output_dir / name)
+    for name in ("parafac2_rank_1", "parafac2_rank_2"):
+        got = load_decomposition(distributed.output_dir / name / "model.h5")
+        expected = load_decomposition(central.output_dir / name / "model.h5")
         np.testing.assert_allclose(got.label_mode, expected.label_mode, rtol=1e-5)
     assert (distributed.output_dir / "plan.json").exists()
     # Regression: both paths keep every restart and score them the same.
@@ -663,7 +674,7 @@ def test_distributed_plan_is_independent_of_the_working_directory(
         run_decomposition_job(output_dir, job)
     written = collect_decomposition(output_dir)
 
-    assert written == [output_dir / "parafac2_rank_1.h5"]
+    assert written == [output_dir / "parafac2_rank_1" / "model.h5"]
 
 
 # Replicability ------------------------------------------------------------
@@ -1126,6 +1137,36 @@ def group_map_options(study: Any, **overrides: Any) -> GroupMapPlotOptions:
     return GroupMapPlotOptions(**values)
 
 
+@pytest.mark.parametrize("numeric", [False, True])
+def test_statistics_leave_out_subjects_without_a_group(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+    numeric: bool,
+) -> None:
+    """Regression: a blank group cell became a group of its own with no
+    data, so nothing was tested (numeric groups) or sorting the groups
+    raised (text groups)."""
+    preprocess(synthetic_study, store_voxels=True)
+    info = pd.read_csv(synthetic_study.subject_info)
+    if numeric:
+        info["diagnosis"] = (info["diagnosis"] == "PD").astype(float)
+    info.loc[0, "diagnosis"] = None
+    info.to_csv(synthetic_study.subject_info, index=False)
+    capsys.readouterr()
+
+    run_statistics_plots(statistics_options(synthetic_study))
+
+    note = "Leaving out 1 subject(s) without a 'diagnosis' value: sub-00"
+    assert note in capsys.readouterr().out
+    tables = synthetic_study.root / "results" / "roi_analysis"
+    assert not pd.read_csv(tables / "significance__median.csv").empty
+    frame = pd.read_parquet(tables / "roi_statistics.parquet")
+    assert "sub-00" not in set(frame["subject"])
+    averages = group_averages(group_map_options(synthetic_study))
+    assert averages.groups == (["0.0", "1.0"] if numeric else ["Control", "PD"])
+    np.testing.assert_array_equal(averages.n_subjects[:, -1], [2, 2, 2])
+
+
 def test_group_averages_of_voxels_match_a_direct_mean(synthetic_study: Any) -> None:
     results = preprocess(synthetic_study, store_voxels=True)
 
@@ -1387,6 +1428,40 @@ def test_csf_is_offset_ventricles_and_label_24(
     assert spatial is not None
     # Labels 4 (a ventricle), 10002 and 24 are CSF; 10 and 49 are not.
     np.testing.assert_array_equal(spatial.csf, np.isin(labels, [4, 10002, 24]))
+
+
+def test_roi_spatial_maps_leave_unmodelled_labels_blank(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: voxels of a label the model has no row for (e.g. an ROI
+    dropped for missing data) were drawn as loading 0, like no uptake."""
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
+    saved = load_decomposition(model)
+    keep = saved.labels != 4
+    fewer = dataclasses.replace(
+        saved,
+        labels=saved.labels[keep],
+        label_index=saved.label_index[keep],
+        label_mode=saved.label_mode[keep],
+    )
+    segmentation = synthetic_study.root / "images" / "seg.nii"
+
+    spatial = pipeline._spatial_inputs(
+        fewer.label_mode,
+        pipeline._model_label_space(fewer),
+        segmentation,
+        None,
+        None,
+    )
+
+    assert spatial is not None
+    labels = np.rint(nib.load(segmentation).get_fdata()).astype(int)
+    placed = labels[tuple(spatial.index_list.T)]
+    assert 4 not in placed
+    assert len(placed) == np.count_nonzero(np.isin(labels, fewer.labels))
 
 
 def test_plots_sort_models_saved_unsorted(
@@ -1731,8 +1806,177 @@ def test_plot_outliers_rejects_data_with_other_subjects(
     saved = load_decomposition(model)
     fewer = select_subjects(saved, list(range(len(saved.subjects) - 1)))
 
-    with pytest.raises(ValueError, match="not those of"):
+    with pytest.raises(ValueError, match=r"differs from what .* \(subjects"):
         pipeline.load_model_data(model, fewer)
+
+
+def test_replanning_with_other_settings_refuses_the_stored_restarts(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: `plan` again with another --max-iter (or solver, scaling,
+    ...) made `collect` return the restarts fitted under the old settings."""
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    options = decomposition_options(synthetic_study, ranks=(1,))
+    for job in range(plan_decomposition(options)):
+        run_decomposition_job(options.output_dir, job)
+
+    more = dataclasses.replace(
+        options,
+        fit=dataclasses.replace(options.fit, restarts=3),
+        distributed=DistributedOptions(tasks_per_job=2),
+    )
+    for job in range(plan_decomposition(more)):
+        run_decomposition_job(options.output_dir, job)
+    # More restarts or another job size keep what is stored.
+    collect_decomposition(options.output_dir)
+
+    changed = dataclasses.replace(
+        more,
+        fit=dataclasses.replace(more.fit, max_iter=more.fit.max_iter + 1),
+    )
+    plan_decomposition(changed)
+    with pytest.raises(ValueError, match="fitted with other settings"):
+        collect_decomposition(options.output_dir)
+
+
+def test_a_rank_that_does_not_converge_keeps_the_others(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    options = decomposition_options(synthetic_study, ranks=(1, 2))
+    finish_rank = pipeline._finish_rank
+
+    def rank_2_fails(plan: Any, options: Any, rank: int, *args: Any) -> Any:
+        if rank == 2:
+            raise ConvergenceError(f"No decomposition converged at rank {rank}")
+        return finish_rank(plan, options, rank, *args)
+
+    monkeypatch.setattr(pipeline, "_finish_rank", rank_2_fails)
+
+    with pytest.raises(ConvergenceError, match="rank 2.*other ranks were written"):
+        run_decomposition(options)
+    assert (options.output_dir / "parafac2_rank_1" / "model.h5").exists()
+    assert list(pd.read_csv(options.output_dir / "fits.csv")["rank"]) == [1]
+
+
+def test_plan_refuses_an_impossible_parafac2_rank(synthetic_study: Any) -> None:
+    preprocess(synthetic_study)
+
+    with pytest.raises(ValueError, match="rank"):
+        plan_decomposition(decomposition_options(synthetic_study, ranks=(2, 50)))
+    assert not (
+        synthetic_study.root / "results" / "decompositions" / "test" / "plan.json"
+    ).exists()
+
+
+def test_stratifying_by_a_column_with_blanks_is_refused(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    info = pd.read_csv(synthetic_study.subject_info)
+    info.loc[0, "diagnosis"] = None
+    info.to_csv(synthetic_study.subject_info, index=False)
+
+    with pytest.raises(ValueError, match="without a 'diagnosis' value.*sub-00"):
+        run_replicability(replicability_options(synthetic_study))
+
+
+def test_models_in_one_output_dir_keep_their_own_record(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: one shared decompose.json made outliers of the first
+    model reload the data with the second model's settings."""
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    (parafac2,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
+    (cp,) = run_decomposition(
+        decomposition_options(
+            synthetic_study,
+            method="cp",
+            ranks=(2,),
+            tensor=TensorOptions(scale=False),
+        ),
+    )
+
+    fits = pd.read_csv(parafac2.parent.parent / "fits.csv")
+    assert list(zip(fits["method"], fits["rank"])) == [("cp", 2), ("parafac2", 2)]
+    for model in (parafac2, cp):
+        # Each reloads its own data: the scaling checks would raise otherwise.
+        pipeline.load_model_data(model, load_decomposition(model))
+
+
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("method", "cp", "records a cp fit"),
+        ("ranks", [3], r"at rank\(s\) \[3\]"),
+        ("tensor", {"scale": True, "center": True}, "centred"),
+    ],
+)
+def test_plot_outliers_rejects_a_record_that_does_not_match_the_fit(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: Any,
+    message: str,
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
+    record = model.with_name("decompose.json")
+    data = json.loads(record.read_text())
+    data["options"][field] = (
+        {**data["options"][field], **value} if isinstance(value, dict) else value
+    )
+    record.write_text(json.dumps(data))
+
+    with pytest.raises(ValueError, match=message):
+        run_decomposition_plots(
+            plot_options(synthetic_study, model, parts=("outliers",)),
+        )
+    # By default the other parts are still drawn.
+    capsys.readouterr()
+    names = [
+        p.name for p in run_decomposition_plots(plot_options(synthetic_study, model))
+    ]
+    assert "parafac2_rank_2__outliers.png" not in names
+    assert "parafac2_rank_2__subject_mode.png" in names
+    assert "Skipping the outlier part" in capsys.readouterr().out
+
+
+def test_plot_outliers_from_another_working_directory(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a relative --input was recorded as given, so plotting
+    from another directory could not find the data."""
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    monkeypatch.chdir(synthetic_study.root)
+    options = dataclasses.replace(
+        decomposition_options(synthetic_study, ranks=(2,)),
+        input=Path("results/data/roi_signal.parquet"),
+        output_dir=Path("results/decompositions/test"),
+    )
+    (model,) = run_decomposition(options)
+    model_dir = (synthetic_study.root / model).parent
+    elsewhere = synthetic_study.root / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+
+    written = run_decomposition_plots(
+        plot_options(synthetic_study, model_dir, parts=("outliers",)),
+    )
+
+    assert [p.name for p in written] == ["parafac2_rank_2__outliers.png"]
 
 
 def test_run_statistics_plots_sd_bands_write_the_cohort_table(

@@ -98,7 +98,7 @@ def test_cli_runs_every_command(
     assert (results / "roi_analysis" / "cohort__median.parquet").exists()
 
     assert _run(["decompose", "run", *_fit_args(results, "decomposition")]) == 0
-    model = results / "decomposition" / "parafac2_rank_1.h5"
+    model = results / "decomposition" / "parafac2_rank_1"
     assert model.exists()
 
     replicability = [
@@ -165,7 +165,7 @@ def test_cli_plot_subject_mode_variables(
         "plot",
         "decomposition",
         "--model",
-        results / "decomposition" / "parafac2_rank_1.h5",
+        results / "decomposition" / "parafac2_rank_1",
         "--subject-info",
         synthetic_study.subject_info,
         "--group-variable",
@@ -235,7 +235,9 @@ def test_cli_plan_run_collect(
         )
     assert _run([command, "collect", "--output-dir", results / command]) == 0
 
-    output = "parafac2_rank_1.h5" if command == "decompose" else "replicability.csv"
+    output = (
+        "parafac2_rank_1/model.h5" if command == "decompose" else "replicability.csv"
+    )
     assert (results / command / output).exists()
 
 
@@ -306,7 +308,7 @@ def test_cli_cmf(synthetic_study: Any) -> None:
     args[args.index("parafac2")] = "cmf"
     assert _run(["decompose", "run", *args, "--tolerance", "1e-4"]) == 0
 
-    model = results / "cmf" / "cmf_rank_1.h5"
+    model = results / "cmf" / "cmf_rank_1"
     plot = [
         "plot",
         "decomposition",
@@ -360,6 +362,60 @@ def test_cli_planned_jobs_take_settings_only_from_the_plan(
         assert code == 2
         err = capsys.readouterr().err
         assert "cannot be used with --job" in err and "plan.json" in err
+
+
+def test_cli_refuses_abbreviated_flags(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Regression: argparse expanded `--tol` to `--tolerance`, so `run --job`
+    accepted a planned setting it should refuse, and then ignored it."""
+    results = _preprocess(synthetic_study)
+    assert _run(["decompose", "plan", *_fit_args(results, "planned")]) == 0
+    capsys.readouterr()
+
+    with pytest.raises(SystemExit) as raised:
+        _run(
+            [
+                "decompose",
+                "run",
+                "--output-dir",
+                results / "planned",
+                "--job",
+                0,
+                "--tol",
+                "1e-3",
+            ],
+        )
+    assert raised.value.code == 2
+    assert "unrecognized arguments: --tol" in capsys.readouterr().err
+
+
+def test_cli_refuses_arguments_that_would_be_ignored(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _preprocess(synthetic_study)
+    capsys.readouterr()
+
+    assert (
+        _run(["decompose", "run", *_fit_args(results, "x"), "--tasks-per-job", 2]) == 2
+    )
+    assert "--tasks-per-job sets the job size of `plan`" in capsys.readouterr().err
+    replicability = [
+        "replicability",
+        "plan",
+        *_fit_args(results, "y"),
+        "--engine",
+        "halfhalf",
+        "--repeats",
+        1,
+    ]
+    with pytest.raises(SystemExit):
+        _run([*replicability, "--restart-procs", 2])
+    assert "unrecognized arguments: --restart-procs" in capsys.readouterr().err
+    assert _run([*replicability, "--splits", 3]) == 2
+    assert "splits applies to engine cv only" in capsys.readouterr().err
 
 
 def test_cli_convergence_failure_and_bad_plan_are_one_line(

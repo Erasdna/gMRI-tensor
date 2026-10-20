@@ -359,3 +359,25 @@ def test_subjects_outside_sd_finds_nothing_in_a_small_cohort():
     cohort = summarize_cohort_over_time(long_df, facet="roi", value="median")
 
     assert subjects_outside_sd(long_df, cohort, facet="roi", value="median").empty
+
+
+def test_a_time_point_where_every_value_ties_is_not_tested() -> None:
+    """Regression: one all-tied time point (a t=0 scan used as its own
+    baseline) gave p = NaN, and BH then made every p_adj of that ROI NaN."""
+    rows = []
+    for i in range(5):
+        for group, shift in (("A", 0.0), ("B", 3.0)):
+            rows.append({"roi": "r", "timepoint": 0, "group": group, "value": 0.0})
+            rows.append(
+                {"roi": "r", "timepoint": 6, "group": group, "value": shift + i},
+            )
+
+    table = compare_groups_over_time(
+        pd.DataFrame(rows),
+        ["A", "B"],
+        facet="roi",
+        value="value",
+    )
+
+    assert list(table["timepoint"]) == [6]
+    assert np.isfinite(table["p_adj"].astype(float)).all()

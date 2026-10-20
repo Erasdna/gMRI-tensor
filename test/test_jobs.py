@@ -1,5 +1,4 @@
 import math
-import os
 from typing import Any
 
 import numpy as np
@@ -31,8 +30,8 @@ from gMRItensor.replicability import HalfHalfEngine
 
 
 @pytest.fixture(autouse=True)
-def cpu_backend() -> None:
-    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+def cpu_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("GMRITENSOR_USE_GPU", "FALSE")
     setup_backend()
 
 
@@ -337,6 +336,45 @@ def test_directory_store_rejects_another_plans_result(tmp_path):
     store.save(RestartResult(FitTask("full", (0, 1), 0), fake_model(1.0), 0.1))
     with pytest.raises(ValueError, match="different plan"):
         store.load(FitTask("full", (0, 2), 0))
+
+
+def test_directory_store_refuses_results_saved_with_other_settings(tmp_path):
+    task = FitTask("full", (0, 1), 0)
+    DirectoryStore(tmp_path, settings="a").save(
+        RestartResult(task, fake_model(1.0), 0.1),
+    )
+
+    assert DirectoryStore(tmp_path, settings="a").load(task) is not None
+    assert DirectoryStore(tmp_path).load(task) is not None  # no settings: no check
+    with pytest.raises(ValueError, match="fitted with other settings"):
+        DirectoryStore(tmp_path, settings="b").load(task)
+
+
+def test_run_tasks_refuses_to_resume_from_results_with_other_settings(tmp_path):
+    """Regression: re-planning with other fit options silently reused the
+    restarts already in the store."""
+    plan = plan_restarts(4, 1)
+    run_tasks(plan, make_slices(), 2, "PARAFAC2", DirectoryStore(tmp_path, "a"))
+
+    with pytest.raises(ValueError, match="fitted with other settings"):
+        run_tasks(plan, make_slices(), 2, "PARAFAC2", DirectoryStore(tmp_path, "b"))
+
+
+def test_directory_store_reports_a_damaged_file(tmp_path):
+    store = DirectoryStore(tmp_path)
+    task = FitTask("full", (0, 1), 0)
+    store.save(RestartResult(task, fake_model(1.0), 0.1))
+    store.path(task).write_bytes(b"not a torch file")
+
+    with pytest.raises(ValueError, match="cannot be read.*delete it"):
+        store.load(task)
+
+
+def test_directory_store_leaves_no_temporary_files(tmp_path):
+    store = DirectoryStore(tmp_path)
+    store.save(RestartResult(FitTask("full", (0, 1), 0), fake_model(1.0), 0.1))
+
+    assert [p.name for p in (tmp_path / "full").iterdir()] == ["seed_0000.pt"]
 
 
 def test_directory_store_rejects_unnameable_group(tmp_path):
