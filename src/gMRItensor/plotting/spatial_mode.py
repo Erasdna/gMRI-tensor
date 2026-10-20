@@ -1,3 +1,7 @@
+"""Spatial modes on brain slices: one figure per region (parenchyma, CSF),
+one row per component, three orthogonal slices each.
+"""
+from collections.abc import Iterator
 from collections.abc import Mapping
 from collections.abc import Sequence
 
@@ -8,8 +12,8 @@ import scienceplots  # noqa: F401
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import create_colorbar_with_offset
 from gMRItensor.plotting.utils import scale_mode
-from gMRItensor.plotting.utils import scatter_to_volume
 from gMRItensor.plotting.utils import SPATIAL_COLORBAR_LABEL
+from gMRItensor.volumes import scatter_to_volume
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 matplotlib.use("Agg")
@@ -17,14 +21,19 @@ plt.style.use(["science", "no-latex"])
 
 
 def plot_enhancement_with_background(
-    ax,
-    background,
-    signal,
-    cmap,
-    vmin,
-    vmax,
-    mask=None,
-):
+    ax: matplotlib.axes.Axes,
+    background: np.ndarray,
+    signal: np.ndarray,
+    cmap: str | matplotlib.colors.Colormap,
+    vmin: float,
+    vmax: float,
+    mask: np.ndarray | None = None,
+) -> matplotlib.collections.QuadMesh:
+    """Draw one 2-D `signal` slice over a grey `background`, voxel-aligned.
+
+    Only voxels in `mask` (or, without one, the nonzero ones) are coloured.
+    Returns the colour mesh, for a colorbar.
+    """
     ax.imshow(
         background,
         cmap="gray",
@@ -54,17 +63,20 @@ def plot_enhancement_with_background(
 
 
 def plot_brain(
-    fig,
-    ax,
-    signal,
-    background,
-    cmap,
-    slices,
-    vmin=0,
-    vmax=2,
-    label="Coefficient",
-    mask=None,
-):
+    fig: matplotlib.figure.Figure,
+    ax: Sequence[matplotlib.axes.Axes],
+    signal: np.ndarray,
+    background: np.ndarray,
+    cmap: str | matplotlib.colors.Colormap,
+    slices: Sequence[int],
+    vmin: float = 0,
+    vmax: float = 2,
+    label: str = "Coefficient",
+    mask: np.ndarray | None = None,
+) -> None:
+    """Draw a 3-D `signal` on the sagittal, coronal and axial slices
+    `slices` (i, j, k) in `ax[0:3]`, with a colorbar labelled `label` in
+    `ax[3]`; only voxels in `mask` are coloured."""
     # Extract mask slices if mask is provided
     mask_0 = np.flip(np.rot90(mask[slices[0]], 1), 1) if mask is not None else None
     mask_1 = np.rot90(mask[:, slices[1]]) if mask is not None else None
@@ -125,7 +137,7 @@ def plot_brain(
         ax[jj].set_yticks([])
 
 
-def _percentile_vlim(
+def percentile_vlim(
     values: np.ndarray,
     low: float = 5,
     high: float = 95,
@@ -157,7 +169,7 @@ def plot_spatial_mode(
     row_labels: Sequence[str] | None = None,
     colorbar_label: str = SPATIAL_COLORBAR_LABEL,
     vlims: Mapping[str, tuple[float, float]] | None = None,
-):
+) -> Iterator[tuple[matplotlib.figure.Figure, np.ndarray, str]]:
     """Plot spatial mode components mapped onto brain slices.
 
     Works the same way whether `spatial_mode` was computed directly on
@@ -221,7 +233,7 @@ def plot_spatial_mode(
         for ids_mask in region_masks.values():
             combined_mask |= ids_mask
         shared_vlims = [
-            _percentile_vlim(scaled_spatial_mode[combined_mask, component])
+            percentile_vlim(scaled_spatial_mode[combined_mask, component])
             for component in range(n_components)
         ]
 
@@ -254,7 +266,7 @@ def plot_spatial_mode(
             elif shared_vlims is not None:
                 vmin, vmax = shared_vlims[component]
             else:
-                vmin, vmax = _percentile_vlim(spatial_component)
+                vmin, vmax = percentile_vlim(spatial_component)
             plot_brain(
                 big_fig,
                 big_ax[component],

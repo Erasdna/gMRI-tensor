@@ -21,11 +21,11 @@ from gMRItensor import fit_task
 from gMRItensor import FitTask
 from gMRItensor import run_PARAFAC2_decomposition_repeated
 from gMRItensor import setup_backend
-from gMRItensor.decomposition import _FitBackend
-from gMRItensor.decomposition import _fits_on_numpy
-from gMRItensor.decomposition import _init_restart_worker_backend
 from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.decomposition import FIT_BACKEND_VARIABLE
+from gMRItensor.decomposition._backend import _FitBackend
+from gMRItensor.decomposition._backend import _fits_on_numpy
+from gMRItensor.decomposition._backend import _init_restart_worker_backend
 from threadpoolctl import threadpool_info
 
 CUDA = torch.device("cuda")
@@ -225,15 +225,18 @@ def test_gpu_fits_always_run_on_pytorch(monkeypatch: pytest.MonkeyPatch) -> None
 def test_a_gpu_fit_backend_converts_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
     """On the GPU every value passes through untouched: no numpy conversion
     and no change of TensorLy backend."""
-    from gMRItensor import decomposition
+    from gMRItensor.decomposition import _backend
 
     def no_conversion(*args: Any) -> Any:
-        raise AssertionError("converted for a GPU fit")
+        raise AssertionError("converted")
 
-    monkeypatch.setattr(decomposition, "_solver_input", no_conversion)
-    monkeypatch.setattr(decomposition, "_solver_output", no_conversion)
+    monkeypatch.setattr(_backend, "_solver_input", no_conversion)
+    monkeypatch.setattr(_backend, "_solver_output", no_conversion)
     backend = _FitBackend(CUDA)
     value = torch.ones(2)
+    # The patch is live: a CPU backend does convert, and so trips it.
+    with pytest.raises(AssertionError, match="converted"):
+        _FitBackend(CPU).input(value)
 
     assert backend.input(value) is value
     assert backend.call(lambda: tl.get_backend()) == tl.get_backend()

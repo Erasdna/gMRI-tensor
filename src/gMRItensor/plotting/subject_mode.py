@@ -259,7 +259,7 @@ def make_variable_correlation(
     ax.set_ylabel("")
 
 
-def _prepare_plotting_dataframe(
+def prepare_plotting_dataframe(
     subject_mode: np.ndarray,
     subjects: list[str],
     subject_info: pd.DataFrame,
@@ -396,7 +396,7 @@ def plot_subject_mode(
         dict.fromkeys(c for c in categorical_variables if c != group_variable),
     )
     numerical = list(numerical_variables)
-    plotting_df = _prepare_plotting_dataframe(
+    plotting_df = prepare_plotting_dataframe(
         subject_mode,
         subjects,
         subject_info,
@@ -488,7 +488,7 @@ def plot_subject_mode_correlation(
     group. See `compute_figsize` for the sizing arguments. Raises
     `ValueError` if the inputs do not line up.
     """
-    plotting_df = _prepare_plotting_dataframe(
+    plotting_df = prepare_plotting_dataframe(
         subject_mode,
         subjects,
         subject_info,

@@ -381,13 +381,55 @@ def _add_fit_command(
     )
 
 
-def _add_plot(commands: Any) -> None:
-    parser = commands.add_parser(
-        "plot",
-        help="ROI statistics, decomposition, group-average or reproducibility figures",
+def _add_subject_arguments(parser: argparse.ArgumentParser, group_help: str) -> None:
+    """`--subject-info`, `--group-variable` and `--output-dir`, required."""
+    parser.add_argument(
+        "--subject-info",
+        type=Path,
+        required=True,
+        help="CSV with a subjects column",
     )
-    kinds = parser.add_subparsers(dest="action", required=True)
-    statistics = kinds.add_parser(
+    parser.add_argument("--group-variable", required=True, help=group_help)
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="results directory",
+    )
+
+
+def _add_map_arguments(parser: argparse.ArgumentParser, segmentation_help: str) -> None:
+    """`--segmentation`, `--background` and `--slices` of the brain maps."""
+    parser.add_argument("--segmentation", type=Path, help=segmentation_help)
+    parser.add_argument(
+        "--background",
+        type=Path,
+        help="image to draw on (default: segmentation mask)",
+    )
+    parser.add_argument(
+        "--slices",
+        type=int,
+        nargs=3,
+        metavar=("I", "J", "K"),
+        help="voxel indices of the volume reoriented to RAS (nibabel's "
+        "as_closest_canonical), not of the file as stored (default: centre of "
+        "mass)",
+    )
+
+
+def _add_test_arguments(parser: argparse.ArgumentParser, alpha_help: str) -> None:
+    """`--alpha` and `--min-group-n` of the group tests."""
+    parser.add_argument("--alpha", type=float, default=0.05, help=alpha_help)
+    parser.add_argument(
+        "--min-group-n",
+        type=int,
+        default=2,
+        help="subjects per group to test (default: 2)",
+    )
+
+
+def _add_statistics_plot(kinds: Any) -> None:
+    parser = kinds.add_parser(
         "statistics",
         help="group differences per ROI over time, one figure per ROI",
         description=(
@@ -397,30 +439,14 @@ def _add_plot(commands: Any) -> None:
             "present in the data is used."
         ),
     )
-    statistics.add_argument(
+    parser.add_argument(
         "--roi-signal",
         type=Path,
         required=True,
         help="roi_signal.parquet from gmri preprocess",
     )
-    statistics.add_argument(
-        "--subject-info",
-        type=Path,
-        required=True,
-        help="CSV with a subjects column",
-    )
-    statistics.add_argument(
-        "--group-variable",
-        required=True,
-        help="subject-info column to compare, e.g. diagnosis",
-    )
-    statistics.add_argument(
-        "--output-dir",
-        type=Path,
-        required=True,
-        help="results directory",
-    )
-    statistics.add_argument(
+    _add_subject_arguments(parser, "subject-info column to compare, e.g. diagnosis")
+    parser.add_argument(
         "--region",
         action="append",
         default=[],
@@ -430,83 +456,59 @@ def _add_plot(commands: Any) -> None:
             "(e.g. mine=17,53,1001-1035); repeatable"
         ),
     )
-    statistics.add_argument(
+    parser.add_argument(
         "--rois",
         nargs="+",
         metavar="ROI",
         help="'all' labels, or label ids to plot separately",
     )
-    statistics.add_argument(
+    parser.add_argument(
         "--statistics",
         nargs="+",
         choices=STATISTICS,
         default=["median"],
         help="statistics to compute, each in its own table (default: median)",
     )
-    statistics.add_argument(
+    parser.add_argument(
         "--relaxivity",
         type=float,
         help="r1 in 1/(mM s) for concentrations (default: 3.2; not for T1w)",
     )
-    statistics.add_argument(
-        "--alpha",
-        type=float,
-        default=0.05,
-        help="FDR-adjusted p threshold (default: 0.05)",
-    )
-    statistics.add_argument(
-        "--min-group-n",
-        type=int,
-        default=2,
-        help="subjects per group to test (default: 2)",
-    )
-    statistics.add_argument(
+    _add_test_arguments(parser, "FDR-adjusted p threshold (default: 0.05)")
+    parser.add_argument(
         "--layout",
         choices=("rows", "panels"),
         default="rows",
         help="figure layout (default: rows)",
     )
-    statistics.add_argument(
+    parser.add_argument(
         "--sd-bands",
         action="store_true",
         help="draw the cohort mean +/- 1, 2 and 3 SD behind the subject curves, "
         "to spot outlying subjects (rows layout only)",
     )
-    _output_options(statistics)
+    _output_options(parser)
 
-    decomposition = kinds.add_parser(
+
+def _add_decomposition_plot(kinds: Any) -> None:
+    parser = kinds.add_parser(
         "decomposition",
         help="mode grid, subject, time and spatial modes and outliers of one model",
         description=(
-            "Plot a saved <method>_rank_<r>.h5. Without part flags every part is drawn; "
-            "spatial parts of a per-ROI model need --segmentation."
+            "Plot a saved model (<method>_rank_<r>/ from gmri decompose). Without "
+            "part flags every part is drawn; spatial parts of a per-ROI model "
+            "need --segmentation."
         ),
     )
-    decomposition.add_argument(
+    parser.add_argument(
         "--model",
         type=Path,
         required=True,
         help="model directory <method>_rank_<r>/ from gmri decompose (or its "
         "model.h5)",
     )
-    decomposition.add_argument(
-        "--subject-info",
-        type=Path,
-        required=True,
-        help="CSV with a subjects column",
-    )
-    decomposition.add_argument(
-        "--group-variable",
-        required=True,
-        help="subject-info column to colour by",
-    )
-    decomposition.add_argument(
-        "--output-dir",
-        type=Path,
-        required=True,
-        help="results directory",
-    )
-    parts = decomposition.add_argument_group("parts (default: all)")
+    _add_subject_arguments(parser, "subject-info column to colour by")
+    parts = parser.add_argument_group("parts (default: all)")
     parts.add_argument(
         "--mode-grid",
         action="store_true",
@@ -534,26 +536,11 @@ def _add_plot(commands: Any) -> None:
         help="leverage against residual per subject, with Bonferroni cut-offs; "
         "reloads the data the model was fitted to",
     )
-    decomposition.add_argument(
-        "--segmentation",
-        type=Path,
-        help="label volume in the decomposition's label space (CSF ids +10000)",
+    _add_map_arguments(
+        parser,
+        "label volume in the decomposition's label space (CSF ids +10000)",
     )
-    decomposition.add_argument(
-        "--background",
-        type=Path,
-        help="image to draw on (default: segmentation mask)",
-    )
-    decomposition.add_argument(
-        "--slices",
-        type=int,
-        nargs=3,
-        metavar=("I", "J", "K"),
-        help="voxel indices of the volume reoriented to RAS (nibabel's "
-        "as_closest_canonical), not of the file as stored (default: centre of "
-        "mass)",
-    )
-    decomposition.add_argument(
+    parser.add_argument(
         "--categorical",
         nargs="+",
         default=[],
@@ -561,40 +548,29 @@ def _add_plot(commands: Any) -> None:
         help="subject-info columns to box-plot the subject mode by, besides "
         "--group-variable (values are categories, also numeric codes)",
     )
-    decomposition.add_argument(
+    parser.add_argument(
         "--numerical",
         nargs="+",
         default=[],
         metavar="COLUMN",
         help="numeric subject-info columns to scatter the subject mode against",
     )
-    decomposition.add_argument(
+    parser.add_argument(
         "--min-panel-width",
         type=float,
         metavar="INCHES",
         help="widen the subject-mode figure beyond --page-width so no panel is "
         "narrower (default: fit --page-width)",
     )
-    decomposition.add_argument(
+    parser.add_argument(
         "--subject-prefix",
         default="",
         metavar="PREFIX",
         help="prepended as PREFIX_ to the subject-mode figure name, to keep "
         "figures for different variable sets apart",
     )
-    decomposition.add_argument(
-        "--alpha",
-        type=float,
-        default=0.05,
-        help="evolving-mode significance (default: 0.05)",
-    )
-    decomposition.add_argument(
-        "--min-group-n",
-        type=int,
-        default=2,
-        help="subjects per group to test (default: 2)",
-    )
-    decomposition.add_argument(
+    _add_test_arguments(parser, "evolving-mode significance (default: 0.05)")
+    parser.add_argument(
         "--min-subject-coefficient",
         type=float,
         default=NEGLIGIBLE_SUBJECT_WEIGHT,
@@ -603,23 +579,25 @@ def _add_plot(commands: Any) -> None:
         "ribbon and tests when |subject mode| < C (default: %(default)g; 0 "
         "drops only loadings the fit set to zero; ignored for CP)",
     )
-    decomposition.add_argument(
+    parser.add_argument(
         "--outlier-alpha",
         type=float,
         default=0.01,
         help="family-wise p for the outlier cut-offs, Bonferroni-corrected over "
         "subjects (default: %(default)g)",
     )
-    decomposition.add_argument(
+    parser.add_argument(
         "--input",
         type=Path,
         help="data the model was fitted to, for --outliers (default: the input "
         "recorded in the model's decompose.json); the other settings always "
         "come from that record",
     )
-    _output_options(decomposition)
+    _output_options(parser)
 
-    group_maps = kinds.add_parser(
+
+def _add_group_maps_plot(kinds: Any) -> None:
+    parser = kinds.add_parser(
         "group-maps",
         help="each group's average map per time point, on brain slices",
         description=(
@@ -628,78 +606,49 @@ def _add_plot(commands: Any) -> None:
             "row per group. Per-ROI input needs --segmentation."
         ),
     )
-    group_maps.add_argument(
+    parser.add_argument(
         "--input",
         type=Path,
         required=True,
         help="roi_signal.parquet (per ROI) or voxels.parquet (per voxel)",
     )
-    group_maps.add_argument(
-        "--subject-info",
-        type=Path,
-        required=True,
-        help="CSV with a subjects column",
-    )
-    group_maps.add_argument(
-        "--group-variable",
-        required=True,
-        help="subject-info column that defines the groups",
-    )
-    group_maps.add_argument(
-        "--output-dir",
-        type=Path,
-        required=True,
-        help="results directory",
-    )
-    group_maps.add_argument(
+    _add_subject_arguments(parser, "subject-info column that defines the groups")
+    parser.add_argument(
         "--aggregate",
         choices=AGGREGATES,
         default="trimmed",
         help="across subjects: trimmed mean, mean or median; non-finite values "
         "are ignored (default: trimmed)",
     )
-    group_maps.add_argument(
+    parser.add_argument(
         "--trim",
         type=int,
         default=2,
         help="values dropped at each end for the trimmed mean; fewer than "
         "2*trim+1 values give the median (default: 2)",
     )
-    group_maps.add_argument(
+    parser.add_argument(
         "--statistic",
         choices=("median", "mean"),
         default="median",
         help="per-ROI statistic (roi_signal input) (default: median)",
     )
-    group_maps.add_argument(
-        "--segmentation",
-        type=Path,
-        help="label volume in roi_signal's label space (CSF ids +10000)",
+    _add_map_arguments(
+        parser,
+        "label volume in roi_signal's label space (CSF ids +10000)",
     )
-    group_maps.add_argument(
-        "--background",
-        type=Path,
-        help="image to draw on (default: segmentation mask)",
-    )
-    group_maps.add_argument(
-        "--slices",
-        type=int,
-        nargs=3,
-        metavar=("I", "J", "K"),
-        help="voxel indices of the volume reoriented to RAS (nibabel's "
-        "as_closest_canonical), not of the file as stored (default: centre of "
-        "mass)",
-    )
-    group_maps.add_argument(
+    parser.add_argument(
         "--timepoints",
         type=int,
         nargs="+",
         default=[],
         help="time points to draw (default: all)",
     )
-    _output_options(group_maps)
+    _output_options(parser)
 
-    reproducibility = kinds.add_parser(
+
+def _add_reproducibility_plot(kinds: Any) -> None:
+    parser = kinds.add_parser(
         "reproducibility",
         help="redraw a restart-vs-restart FMS matrix from its CSV",
         description=(
@@ -708,18 +657,30 @@ def _add_plot(commands: Any) -> None:
             "sorted by reconstruction error."
         ),
     )
-    reproducibility.add_argument(
+    parser.add_argument(
         "csv",
         type=Path,
         help="<store>/<method>_rank_<r>/reproducibility.csv",
     )
-    reproducibility.add_argument(
+    parser.add_argument(
         "--output",
         type=Path,
         metavar="STEM",
         help="figure path without extension (default: next to the CSV)",
     )
-    _output_options(reproducibility)
+    _output_options(parser)
+
+
+def _add_plot(commands: Any) -> None:
+    parser = commands.add_parser(
+        "plot",
+        help="ROI statistics, decomposition, group-average or reproducibility figures",
+    )
+    kinds = parser.add_subparsers(dest="action", required=True)
+    _add_statistics_plot(kinds)
+    _add_decomposition_plot(kinds)
+    _add_group_maps_plot(kinds)
+    _add_reproducibility_plot(kinds)
 
 
 def _slices(values: list[int] | None) -> tuple[int, int, int] | None:
@@ -875,67 +836,70 @@ def _run_fit_command(args: argparse.Namespace) -> None:
         pipeline.run_replicability(_replicability_options(args))
 
 
-def _run_plot(args: argparse.Namespace) -> None:
-    if args.action == "reproducibility":
-        written = pipeline.run_reproducibility_plot(
-            args.csv,
-            args.output,
-            page_width=_page_width(args.page_width),
-            formats=tuple(args.formats),
-            dpi=args.dpi,
-        )
-        print(f"{len(written)} figure file(s): {', '.join(map(str, written))}.")
-        return
-    if args.action == "statistics":
-        rois: Any = None
-        if args.rois is not None:
-            rois = "all" if args.rois == ["all"] else tuple(args.rois)
-        options = StatisticsPlotOptions(
-            roi_signal=args.roi_signal,
+def _plot_reproducibility(args: argparse.Namespace) -> None:
+    written = pipeline.run_reproducibility_plot(
+        args.csv,
+        args.output,
+        page_width=_page_width(args.page_width),
+        formats=tuple(args.formats),
+        dpi=args.dpi,
+    )
+    print(f"{len(written)} figure file(s): {', '.join(map(str, written))}.")
+
+
+def _plot_statistics(args: argparse.Namespace) -> None:
+    rois: Any = None
+    if args.rois is not None:
+        rois = "all" if args.rois == ["all"] else tuple(args.rois)
+    options = StatisticsPlotOptions(
+        roi_signal=args.roi_signal,
+        subject_info=args.subject_info,
+        group_variable=args.group_variable,
+        output_dir=args.output_dir,
+        regions=tuple(args.region),
+        rois=rois,
+        statistics=tuple(args.statistics),
+        relaxivity=args.relaxivity,
+        alpha=args.alpha,
+        min_group_n=args.min_group_n,
+        layout=args.layout,
+        sd_bands=args.sd_bands,
+        page_width=_page_width(args.page_width),
+        formats=tuple(args.formats),
+        dpi=args.dpi,
+    )
+    result = pipeline.run_statistics_plots(options)
+    print(pipeline.format_significance_summary(result.summary, options.alpha))
+    print(
+        f"Tables: {options.output_dir / 'roi_analysis'}; {len(result.figures)} figure file(s).",
+    )
+
+
+def _plot_group_maps(args: argparse.Namespace) -> None:
+    written = pipeline.run_group_map_plots(
+        GroupMapPlotOptions(
+            input=args.input,
             subject_info=args.subject_info,
             group_variable=args.group_variable,
             output_dir=args.output_dir,
-            regions=tuple(args.region),
-            rois=rois,
-            statistics=tuple(args.statistics),
-            relaxivity=args.relaxivity,
-            alpha=args.alpha,
-            min_group_n=args.min_group_n,
-            layout=args.layout,
-            sd_bands=args.sd_bands,
+            aggregate=args.aggregate,
+            trim=args.trim,
+            statistic=args.statistic,
+            segmentation=args.segmentation,
+            background=args.background,
+            slices=_slices(args.slices),
+            timepoints=tuple(args.timepoints),
             page_width=_page_width(args.page_width),
             formats=tuple(args.formats),
             dpi=args.dpi,
-        )
-        result = pipeline.run_statistics_plots(options)
-        print(pipeline.format_significance_summary(result.summary, options.alpha))
-        print(
-            f"Tables: {options.output_dir / 'roi_analysis'}; {len(result.figures)} figure file(s).",
-        )
-        return
-    if args.action == "group-maps":
-        written = pipeline.run_group_map_plots(
-            GroupMapPlotOptions(
-                input=args.input,
-                subject_info=args.subject_info,
-                group_variable=args.group_variable,
-                output_dir=args.output_dir,
-                aggregate=args.aggregate,
-                trim=args.trim,
-                statistic=args.statistic,
-                segmentation=args.segmentation,
-                background=args.background,
-                slices=_slices(args.slices),
-                timepoints=tuple(args.timepoints),
-                page_width=_page_width(args.page_width),
-                formats=tuple(args.formats),
-                dpi=args.dpi,
-            ),
-        )
-        print(
-            f"{len(written)} figure file(s) in {args.output_dir / 'figures' / 'group_maps'}.",
-        )
-        return
+        ),
+    )
+    print(
+        f"{len(written)} figure file(s) in {args.output_dir / 'figures' / 'group_maps'}.",
+    )
+
+
+def _plot_decomposition(args: argparse.Namespace) -> None:
     parts = tuple(part for part in DECOMPOSITION_PARTS if getattr(args, part))
     written = pipeline.run_decomposition_plots(
         DecompositionPlotOptions(
@@ -964,6 +928,18 @@ def _run_plot(args: argparse.Namespace) -> None:
     print(
         f"{len(written)} figure file(s) in {args.output_dir / 'figures' / 'decomposition'}.",
     )
+
+
+_PLOTS: dict[str, Callable[[argparse.Namespace], None]] = {
+    "statistics": _plot_statistics,
+    "decomposition": _plot_decomposition,
+    "group-maps": _plot_group_maps,
+    "reproducibility": _plot_reproducibility,
+}
+
+
+def _run_plot(args: argparse.Namespace) -> None:
+    _PLOTS[args.action](args)
 
 
 def main(argv: Sequence[str] | None = None) -> int:

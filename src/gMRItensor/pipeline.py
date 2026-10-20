@@ -23,12 +23,12 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
-from gMRItensor.decomposition import _check_parafac2_rank
 from gMRItensor.decomposition import CMFModel
 from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.decomposition import Method
 from gMRItensor.decomposition import PARAFAC2Model
 from gMRItensor.decomposition import setup_backend
+from gMRItensor.decomposition.parafac2 import _check_parafac2_rank
 from gMRItensor.group_statistics import aggregate_subjects
 from gMRItensor.group_statistics import compare_groups_over_time
 from gMRItensor.group_statistics import resolve_subject_groups
@@ -81,7 +81,6 @@ from gMRItensor.plotting.roi_evolution import plot_roi_evolution_rows
 from gMRItensor.plotting.spatial_mode import plot_spatial_mode
 from gMRItensor.plotting.subject_mode import plot_subject_mode
 from gMRItensor.plotting.time_mode import plot_time_mode
-from gMRItensor.plotting.utils import expand_roi_mode_to_voxels
 from gMRItensor.plotting.utils import resolve_page_width
 from gMRItensor.plotting.utils import save_figure
 from gMRItensor.preprocessing import compute_roi_scaling
@@ -99,6 +98,7 @@ from gMRItensor.reproducibility import write_reproducibility
 from gMRItensor.roi_groups import add_concentration
 from gMRItensor.roi_groups import aggregate_roi_signal
 from gMRItensor.roi_groups import is_csf
+from gMRItensor.volumes import expand_roi_mode_to_voxels
 from nibabel.nifti1 import Nifti1Image
 
 matplotlib.use("Agg")

@@ -9,30 +9,30 @@ import pytest
 from gMRItensor.group_statistics import compare_groups_over_time
 from gMRItensor.group_statistics import summarize_groups_over_time
 from gMRItensor.outliers import OutlierCutoffs
-from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
+from gMRItensor.plotting.evolving_mode import build_long_evolving_dataframe
 from gMRItensor.plotting.evolving_mode import evolving_factors_to_numpy
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
 from gMRItensor.plotting.mode_grid import plot_mode_grid
 from gMRItensor.plotting.outliers import plot_outliers
 from gMRItensor.plotting.reproducibility import plot_reproducibility
-from gMRItensor.plotting.spatial_mode import _percentile_vlim
+from gMRItensor.plotting.spatial_mode import percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
 from gMRItensor.plotting.spatial_mode import plot_spatial_mode
 from gMRItensor.plotting.subject_mode import _levels
-from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
 from gMRItensor.plotting.subject_mode import CATEGORY_COLOR
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
 from gMRItensor.plotting.subject_mode import make_variable_correlation
 from gMRItensor.plotting.subject_mode import plot_subject_mode
 from gMRItensor.plotting.subject_mode import plot_subject_mode_correlation
+from gMRItensor.plotting.subject_mode import prepare_plotting_dataframe
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import create_colorbar_with_offset
-from gMRItensor.plotting.utils import expand_roi_mode_to_voxels
 from gMRItensor.plotting.utils import get_color_palette
-from gMRItensor.plotting.utils import merge_segmentations
-from gMRItensor.plotting.utils import region_masks_from_segmentations
 from gMRItensor.plotting.utils import scale_mode
-from gMRItensor.plotting.utils import scatter_to_volume
+from gMRItensor.volumes import expand_roi_mode_to_voxels
+from gMRItensor.volumes import merge_segmentations
+from gMRItensor.volumes import region_masks_from_segmentations
+from gMRItensor.volumes import scatter_to_volume
 from matplotlib.colors import to_rgb
 from scipy.stats import linregress
 
@@ -109,13 +109,13 @@ def test_create_colorbar_with_offset():
     plt.close(fig)
 
 
-# --- gMRItensor.plotting.subject_mode: _prepare_plotting_dataframe ---
+# --- gMRItensor.plotting.subject_mode: prepare_plotting_dataframe ---
 
 
 def test_prepare_plotting_dataframe_valid():
     subject_info, subjects = make_subject_info()
     subject_mode = np.random.default_rng(0).normal(size=(len(subjects), 3))
-    df = _prepare_plotting_dataframe(subject_mode, subjects, subject_info, "group")
+    df = prepare_plotting_dataframe(subject_mode, subjects, subject_info, "group")
     assert len(df) == len(subjects)
     assert {"comp_0", "comp_1", "comp_2", "group"}.issubset(df.columns)
 
@@ -124,14 +124,14 @@ def test_prepare_plotting_dataframe_row_mismatch():
     subject_info, subjects = make_subject_info()
     subject_mode = np.random.default_rng(0).normal(size=(len(subjects) - 1, 3))
     with pytest.raises(ValueError):
-        _prepare_plotting_dataframe(subject_mode, subjects, subject_info, "group")
+        prepare_plotting_dataframe(subject_mode, subjects, subject_info, "group")
 
 
 def test_prepare_plotting_dataframe_missing_group_column():
     subject_info, subjects = make_subject_info()
     subject_mode = np.random.default_rng(0).normal(size=(len(subjects), 3))
     with pytest.raises(ValueError):
-        _prepare_plotting_dataframe(
+        prepare_plotting_dataframe(
             subject_mode,
             subjects,
             subject_info,
@@ -144,7 +144,7 @@ def test_prepare_plotting_dataframe_missing_subjects_column():
     subject_info = subject_info.rename(columns={"subjects": "id"})
     subject_mode = np.random.default_rng(0).normal(size=(len(subjects), 3))
     with pytest.raises(ValueError):
-        _prepare_plotting_dataframe(subject_mode, subjects, subject_info, "group")
+        prepare_plotting_dataframe(subject_mode, subjects, subject_info, "group")
 
 
 def test_prepare_plotting_dataframe_empty_merge():
@@ -152,7 +152,7 @@ def test_prepare_plotting_dataframe_empty_merge():
     other_subjects = ["not-a-subject"] * len(subject_info)
     subject_mode = np.random.default_rng(0).normal(size=(len(other_subjects), 3))
     with pytest.raises(ValueError):
-        _prepare_plotting_dataframe(subject_mode, other_subjects, subject_info, "group")
+        prepare_plotting_dataframe(subject_mode, other_subjects, subject_info, "group")
 
 
 def test_prepare_plotting_dataframe_single_group():
@@ -161,7 +161,7 @@ def test_prepare_plotting_dataframe_single_group():
     subject_info["group"] = "A"
     subject_mode = np.random.default_rng(0).normal(size=(len(subjects), 3))
     with pytest.raises(ValueError):
-        _prepare_plotting_dataframe(subject_mode, subjects, subject_info, "group")
+        prepare_plotting_dataframe(subject_mode, subjects, subject_info, "group")
 
 
 def make_subject_variables(n_per_group: int = 6):
@@ -180,7 +180,7 @@ def test_prepare_plotting_dataframe_lists_the_available_columns():
     subject_info, subjects = make_subject_variables()
     subject_mode = np.ones((len(subjects), 2))
     with pytest.raises(ValueError) as error:
-        _prepare_plotting_dataframe(
+        prepare_plotting_dataframe(
             subject_mode,
             subjects,
             subject_info,
@@ -197,7 +197,7 @@ def test_prepare_plotting_dataframe_rejects_a_missing_group_value():
     subject_info, subjects = make_subject_info()
     subject_info.loc[3, "group"] = np.nan
     with pytest.raises(ValueError, match="sub-03"):
-        _prepare_plotting_dataframe(
+        prepare_plotting_dataframe(
             np.ones((len(subjects), 2)),
             subjects,
             subject_info,
@@ -208,7 +208,7 @@ def test_prepare_plotting_dataframe_rejects_a_missing_group_value():
 def test_prepare_plotting_dataframe_rejects_a_non_numeric_numerical_column():
     subject_info, subjects = make_subject_variables()
     with pytest.raises(ValueError, match="'sex'.*'F'"):
-        _prepare_plotting_dataframe(
+        prepare_plotting_dataframe(
             np.ones((len(subjects), 2)),
             subjects,
             subject_info,
@@ -219,7 +219,7 @@ def test_prepare_plotting_dataframe_rejects_a_non_numeric_numerical_column():
 
 def test_prepare_plotting_dataframe_keeps_blank_numerical_cells():
     subject_info, subjects = make_subject_variables()
-    df = _prepare_plotting_dataframe(
+    df = prepare_plotting_dataframe(
         np.ones((len(subjects), 2)),
         subjects,
         subject_info,
@@ -946,7 +946,7 @@ def test_build_long_evolving_dataframe_and_ribbon_stats():
     subjects = ["s0", "s1", "s2"]
     groups = ["A", "A", "B"]
 
-    long_df = _build_long_evolving_dataframe(factors, timepoints, subjects, groups, 1)
+    long_df = build_long_evolving_dataframe(factors, timepoints, subjects, groups, 1)
     stats = summarize_groups_over_time(long_df, facet="component")
 
     row_a0 = stats[(stats["group"] == "A") & (stats["timepoint"] == 0)].iloc[0]
@@ -971,7 +971,7 @@ def test_test_group_differences_detects_shifted_timepoints():
     ) = make_evolving_factors_shared_timepoints()
     subject_to_group = subject_info.set_index("subjects")["group"]
     groups = [subject_to_group.loc[s] for s in subjects]
-    long_df = _build_long_evolving_dataframe(
+    long_df = build_long_evolving_dataframe(
         evolving_factors,
         timepoints,
         subjects,
@@ -997,7 +997,7 @@ def test_test_group_differences_min_group_n_guard():
     )
     subject_to_group = subject_info.set_index("subjects")["group"]
     groups = [subject_to_group.loc[s] for s in subjects]
-    long_df = _build_long_evolving_dataframe(
+    long_df = build_long_evolving_dataframe(
         evolving_factors,
         timepoints,
         subjects,
@@ -1011,7 +1011,7 @@ def test_test_group_differences_min_group_n_guard():
 def test_test_group_differences_single_group_short_circuits():
     evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
     groups = ["A"] * len(subjects)
-    long_df = _build_long_evolving_dataframe(
+    long_df = build_long_evolving_dataframe(
         evolving_factors,
         timepoints,
         subjects,
@@ -1031,7 +1031,7 @@ def test_test_group_differences_more_than_two_groups():
     ) = make_evolving_factors_shared_timepoints(n_subjects_per_group=4)
     groups = ["A"] * 4 + ["B"] * 4
     groups[4:6] = ["C", "C"]
-    long_df = _build_long_evolving_dataframe(
+    long_df = build_long_evolving_dataframe(
         evolving_factors,
         timepoints,
         subjects,
@@ -1279,12 +1279,12 @@ def test_region_masks_from_segmentations():
 
 
 def test_percentile_vlim_keeps_negative_values():
-    # Regression test: _percentile_vlim used to filter to values > 0, which
+    # Regression test: percentile_vlim used to filter to values > 0, which
     # dropped real negative entries from an unconstrained spatial mode along
     # with the zero-fill sentinel from scatter_to_volume. It should only
     # exclude the exact zeros, not negative values.
     values = np.concatenate([np.zeros(100), np.linspace(-10, -1, 50)])
-    vmin, vmax = _percentile_vlim(values, low=5, high=95)
+    vmin, vmax = percentile_vlim(values, low=5, high=95)
 
     assert vmin < 0
     assert vmax < 0

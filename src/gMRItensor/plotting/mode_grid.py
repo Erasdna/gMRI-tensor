@@ -1,3 +1,6 @@
+"""One figure of a whole decomposition: per component, its time (or
+evolving) mode, subject mode and spatial mode in parenchyma and CSF.
+"""
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
@@ -6,22 +9,23 @@ import scienceplots  # noqa: F401
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import summarize_groups_over_time
 from gMRItensor.model_io import NEGLIGIBLE_SUBJECT_WEIGHT
-from gMRItensor.plotting.evolving_mode import _all_timepoints
-from gMRItensor.plotting.evolving_mode import _build_long_evolving_dataframe
-from gMRItensor.plotting.evolving_mode import _group_legend
-from gMRItensor.plotting.evolving_mode import _negligible_mask
-from gMRItensor.plotting.evolving_mode import _with_zeroed_curves
-from gMRItensor.plotting.spatial_mode import _percentile_vlim
+from gMRItensor.plotting.evolving_mode import all_timepoints
+from gMRItensor.plotting.evolving_mode import build_long_evolving_dataframe
+from gMRItensor.plotting.evolving_mode import group_legend
+from gMRItensor.plotting.evolving_mode import negligible_mask
+from gMRItensor.plotting.evolving_mode import with_zeroed_curves
+from gMRItensor.plotting.spatial_mode import percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
-from gMRItensor.plotting.subject_mode import _prepare_plotting_dataframe
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
+from gMRItensor.plotting.subject_mode import prepare_plotting_dataframe
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import create_colorbar_with_offset
 from gMRItensor.plotting.utils import get_color_palette
 from gMRItensor.plotting.utils import plot_group_ribbons
 from gMRItensor.plotting.utils import scale_mode
-from gMRItensor.plotting.utils import scatter_to_volume
 from gMRItensor.plotting.utils import SPATIAL_COLORBAR_LABEL
+from gMRItensor.plotting.utils import TIME_LABEL
+from gMRItensor.volumes import scatter_to_volume
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 
 matplotlib.use("Agg")
@@ -137,8 +141,8 @@ def plot_mode_grid(
         color_by_group = dict(zip(categories, get_color_palette(len(categories))))
         # Per-subject scaling and dropped subjects, as in `plot_evolving_mode`.
         scaled_factors = [scale_mode(np.asarray(factor)) for factor in time_mode]
-        negligible = _with_zeroed_curves(
-            _negligible_mask(
+        negligible = with_zeroed_curves(
+            negligible_mask(
                 subject_mode,
                 len(subjects),
                 n_components,
@@ -146,7 +150,7 @@ def plot_mode_grid(
             ),
             scaled_factors,
         )
-        long_df = _build_long_evolving_dataframe(
+        long_df = build_long_evolving_dataframe(
             scaled_factors,
             [np.asarray(timepoints) for timepoints in time_points],
             subjects,
@@ -154,7 +158,7 @@ def plot_mode_grid(
             n_components,
             negligible,
         )
-        evolving_timepoints = _all_timepoints(time_points)
+        evolving_timepoints = all_timepoints(time_points)
         ribbon_stats = summarize_groups_over_time(long_df, facet="component")
     else:
         scaled_time_mode = scale_mode(time_mode)
@@ -218,7 +222,7 @@ def plot_mode_grid(
         h_pad=0.02,  # Height padding between axes
     )
 
-    df = _prepare_plotting_dataframe(
+    df = prepare_plotting_dataframe(
         scaled_subject_mode,
         subjects,
         subject_info,
@@ -240,7 +244,7 @@ def plot_mode_grid(
             plot_time_column_cp(time_ax, scaled_time_mode, time_points, component)
         time_ax.set_ylabel(f"Component {component+1}")
         if component == n_components - 1:
-            time_ax.set_xlabel("Time after injection [h]")
+            time_ax.set_xlabel(TIME_LABEL)
 
         subject_ax = axs[component, 1]
 
@@ -262,7 +266,7 @@ def plot_mode_grid(
         csf_ax = axs[component, 3]
 
         if share_colorbar_scaling:
-            shared_vmin, shared_vmax = _percentile_vlim(
+            shared_vmin, shared_vmax = percentile_vlim(
                 scaled_spatial_mode[combined_index_mask, component],
             )
 
@@ -279,7 +283,7 @@ def plot_mode_grid(
             if share_colorbar_scaling:
                 vmin, vmax = shared_vmin, shared_vmax
             else:
-                vmin, vmax = _percentile_vlim(spatial_component)
+                vmin, vmax = percentile_vlim(spatial_component)
 
             im = plot_enhancement_with_background(
                 ax,
@@ -336,5 +340,5 @@ def plot_mode_grid(
             fig.align_titles()
 
     if is_evolving:
-        _group_legend(fig, categories, color_by_group)
+        group_legend(fig, categories, color_by_group)
     return fig, axs

@@ -21,13 +21,13 @@ from gMRItensor.plotting.utils import plot_subject_curves
 from gMRItensor.plotting.utils import resolve_page_width
 from gMRItensor.plotting.utils import SD_BAND_ALPHAS
 from gMRItensor.plotting.utils import SD_BAND_COLOR
+from gMRItensor.plotting.utils import TIME_LABEL
 from gMRItensor.roi_groups import roi_display_name
 from matplotlib.patches import Patch
 
 plt.style.use(["science", "no-latex"])
 matplotlib.use("Agg")
 
-TIME_LABEL = "Time after injection [h]"
 
 _STATISTIC_LABELS = {
     "median_concentration": "Median concentration (mM)",

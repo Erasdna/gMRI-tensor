@@ -38,15 +38,6 @@ import torch
 from numpy.typing import ArrayLike
 from tqdm import tqdm
 
-from .decomposition import _BestOfRestarts
-from .decomposition import _check_parafac2_rank
-from .decomposition import _compute_kwargs
-from .decomposition import _fit_one
-from .decomposition import _init_restart_worker_backend
-from .decomposition import _maybe_register_memory_efficient_khatri_rao
-from .decomposition import _release_cuda_cache
-from .decomposition import _resolve_options
-from .decomposition import _warn_parafac2_outcome
 from .decomposition import CMFModel
 from .decomposition import ConvergenceError
 from .decomposition import EVOLVING_MODELS
@@ -54,6 +45,15 @@ from .decomposition import Method
 from .decomposition import PARAFAC2Diagnostics
 from .decomposition import PARAFAC2Model
 from .decomposition import RestartTally
+from .decomposition._backend import _init_restart_worker_backend
+from .decomposition._backend import _maybe_register_memory_efficient_khatri_rao
+from .decomposition._backend import _release_cuda_cache
+from .decomposition.parafac2 import _check_parafac2_rank
+from .decomposition.restarts import _BestOfRestarts
+from .decomposition.restarts import _compute_kwargs
+from .decomposition.restarts import _fit_one
+from .decomposition.restarts import _resolve_options
+from .decomposition.restarts import _warn_parafac2_outcome
 
 if TYPE_CHECKING:
     from .replicability import ReplicabilityEngine

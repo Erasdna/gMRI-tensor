@@ -1,3 +1,7 @@
+"""Replicability of a decomposition across subject splits: fits on random
+halves (`HalfHalfEngine`) or k-fold training sets (`CrossValidationEngine`),
+compared by factor match score.
+"""
 from abc import ABC
 from abc import abstractmethod
 from collections.abc import Hashable
@@ -11,10 +15,10 @@ from sklearn.model_selection import RepeatedStratifiedKFold
 from sklearn.model_selection import StratifiedShuffleSplit
 from tlviz.factor_tools import factor_match_score
 
-from .decomposition import _resolve_options
 from .decomposition import CMFModel
 from .decomposition import Method
 from .decomposition import PARAFAC2Model
+from .decomposition.restarts import _resolve_options
 from .jobs import collect
 from .jobs import CPModel
 from .jobs import GroupSummary

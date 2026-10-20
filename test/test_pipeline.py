@@ -11,11 +11,11 @@ import pandas as pd
 import pytest
 import tensorly as tl
 import torch
-from gMRItensor import decomposition
 from gMRItensor import pipeline
 from gMRItensor import preprocessing
 from gMRItensor import replicability
 from gMRItensor.decomposition import ConvergenceError
+from gMRItensor.decomposition import restarts
 from gMRItensor.jobs import FitTask
 from gMRItensor.jobs import RestartResult
 from gMRItensor.model_io import _read_decomposition
@@ -795,14 +795,15 @@ def _devices(data: Any) -> set[torch.device]:
 def spy_fit_devices(monkeypatch: pytest.MonkeyPatch, method: str) -> list[str]:
     """Record the device type of every fit's input, then fit as usual."""
     name = COMPUTE_FUNCTIONS[method]
-    original = getattr(decomposition, name)
+    # Looked up where `_fit_one` calls it.
+    original = getattr(restarts, name)
     seen: list[str] = []
 
     def spy(data: Any, *args: Any, **kwargs: Any) -> Any:
         seen.extend(device.type for device in _devices(data))
         return original(data, *args, **kwargs)
 
-    monkeypatch.setattr(decomposition, name, spy)
+    monkeypatch.setattr(restarts, name, spy)
     return seen
 
 

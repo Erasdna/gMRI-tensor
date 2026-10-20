@@ -21,15 +21,16 @@ from gMRItensor import run_CMF_decomposition_repeated
 from gMRItensor import run_CP_decomposition_repeated
 from gMRItensor import run_PARAFAC2_decomposition_repeated
 from gMRItensor import setup_backend
-from gMRItensor.decomposition import _in_worker_process
-from gMRItensor.decomposition import _init_restart_worker_backend
-from gMRItensor.decomposition import _nn_violations
-from gMRItensor.decomposition import _resolve_nn_modes
-from gMRItensor.decomposition import _suggest_max_iter
-from gMRItensor.decomposition import _to_solver_slices
-from gMRItensor.decomposition import _zero_negligible_loadings
 from gMRItensor.decomposition import AOADMM_DEFAULT_LOSS_TOL
 from gMRItensor.decomposition import ConvergenceError
+from gMRItensor.decomposition._aoadmm import _resolve_nn_modes
+from gMRItensor.decomposition._aoadmm import _suggest_max_iter
+from gMRItensor.decomposition._aoadmm import _zero_negligible_loadings
+from gMRItensor.decomposition._backend import _FitBackend
+from gMRItensor.decomposition._backend import _in_worker_process
+from gMRItensor.decomposition._backend import _init_restart_worker_backend
+from gMRItensor.decomposition._backend import _to_solver_slices
+from gMRItensor.decomposition.restarts import _nn_violations
 from gMRItensor.plotting.evolving_mode import evolving_factors_to_numpy
 from gMRItensor.plotting.utils import scale_mode
 
@@ -240,11 +241,11 @@ def test_init_restart_worker_backend_registers_the_parents_mttkrp(
 ) -> None:
     """Regression: spawned restart workers fell back to TensorLy's default
     MTTKRP, since the registration is process-local."""
-    from gMRItensor import decomposition
+    from gMRItensor.decomposition import _backend
 
     registered: list[bool] = []
     monkeypatch.setattr(
-        decomposition,
+        _backend,
         "_maybe_register_memory_efficient_khatri_rao",
         registered.append,
     )
@@ -377,7 +378,7 @@ def test_restart_procs_falls_back_inside_worker_process(monkeypatch, capsys):
     tensor = make_low_rank_tensor()
 
     monkeypatch.setattr(
-        "gMRItensor.decomposition._in_worker_process",
+        "gMRItensor.decomposition.restarts._in_worker_process",
         lambda: True,
     )
     _, _, error = run_CP_decomposition_repeated(
@@ -439,7 +440,7 @@ def test_PARAFAC2_repeated_checks_rank_before_fitting(
     def no_fit(*args: Any, **kwargs: Any) -> None:
         raise AssertionError("a fit was started")
 
-    monkeypatch.setattr("gMRItensor.decomposition._fit_one", no_fit)
+    monkeypatch.setattr("gMRItensor.decomposition.restarts._fit_one", no_fit)
     with pytest.raises(ValueError, match="labels"):
         run_PARAFAC2_decomposition_repeated(
             tensor,
@@ -450,7 +451,7 @@ def test_PARAFAC2_repeated_checks_rank_before_fitting(
 
 
 def test_PARAFAC2_rank_equal_to_smallest_dimension_is_accepted() -> None:
-    from gMRItensor.decomposition import _check_parafac2_rank
+    from gMRItensor.decomposition.parafac2 import _check_parafac2_rank
 
     slices = [torch.rand(n, 3, dtype=torch.float64) for n in (5, 3, 4)]
 
@@ -870,10 +871,8 @@ def test_tolerances_default_to_the_solvers_own(monkeypatch):
         seen["tol"] = kwargs["tol"]
         raise ConvergenceError("stop")
 
-    from gMRItensor import decomposition
-
     tensor = make_low_rank_tensor()
-    monkeypatch.setattr(decomposition._FitBackend, "call", spy)
+    monkeypatch.setattr(_FitBackend, "call", spy)
     for non_negative, library in [
         (True, tl.decomposition.non_negative_parafac),
         (False, tl.decomposition.parafac),

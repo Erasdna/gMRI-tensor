@@ -13,8 +13,8 @@ from typing import Literal
 
 import numpy as np
 import pandas as pd
-from gMRItensor.decomposition import _resolve_options
 from gMRItensor.decomposition import Method
+from gMRItensor.decomposition.restarts import _resolve_options
 from gMRItensor.group_statistics import Aggregate
 from gMRItensor.group_statistics import AGGREGATES
 from gMRItensor.group_statistics import require_columns
@@ -80,6 +80,42 @@ def _check_page_width(page_width: str | float) -> None:
 def _require_file(path: Path, name: str) -> None:
     if not Path(path).exists():
         raise FileNotFoundError(f"{name}: file not found: {path}")
+
+
+def _require_optional_files(options: Any, names: tuple[str, ...]) -> None:
+    """`_require_file` for each of the path fields `names` that is set."""
+    for name in names:
+        path = getattr(options, name)
+        if path is not None:
+            _require_file(path, name)
+
+
+def _normalise_ranks(options: Any) -> None:
+    """Store `options.ranks` as a tuple of ints, all >= 1 (frozen-safe)."""
+    object.__setattr__(options, "ranks", tuple(int(r) for r in options.ranks))
+    _check(
+        bool(options.ranks) and min(options.ranks) >= 1,
+        f"ranks must be >= 1, got {options.ranks}",
+    )
+
+
+def _check_statistic(statistic: str) -> None:
+    _check(
+        statistic in ("median", "mean"),
+        f"statistic must be median or mean, got {statistic!r}",
+    )
+
+
+def _check_figure(page_width: str | float, dpi: int) -> None:
+    _check_page_width(page_width)
+    _check(dpi >= 1, f"dpi must be >= 1, got {dpi}")
+
+
+def _check_slices(slices: tuple[int, int, int] | None) -> None:
+    _check(
+        slices is None or len(slices) == 3,
+        f"slices must be three indices (i j k), got {slices}",
+    )
 
 
 def _check_subject_columns(path: Path, requested: dict[str, str]) -> None:
@@ -248,15 +284,8 @@ class DecompositionOptions:
     distributed: DistributedOptions = field(default_factory=DistributedOptions)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "ranks", tuple(int(r) for r in self.ranks))
-        _check(
-            bool(self.ranks) and min(self.ranks) >= 1,
-            f"ranks must be >= 1, got {self.ranks}",
-        )
-        _check(
-            self.statistic in ("median", "mean"),
-            f"statistic must be median or mean, got {self.statistic!r}",
-        )
+        _normalise_ranks(self)
+        _check_statistic(self.statistic)
         _check_fit(self.method, self.tensor, self.fit)
 
     @property
@@ -287,11 +316,7 @@ class ReplicabilityOptions:
     distributed: DistributedOptions = field(default_factory=DistributedOptions)
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "ranks", tuple(int(r) for r in self.ranks))
-        _check(
-            bool(self.ranks) and min(self.ranks) >= 1,
-            f"ranks must be >= 1, got {self.ranks}",
-        )
+        _normalise_ranks(self)
         _check(
             self.engine in ("halfhalf", "cv"),
             f"engine must be halfhalf or cv, got {self.engine!r}",
@@ -324,10 +349,7 @@ class ReplicabilityOptions:
                 {self.stratify_by: "--stratify-by"},
             )
         _check(self.n_procs >= 1, f"n_procs must be >= 1, got {self.n_procs}")
-        _check(
-            self.statistic in ("median", "mean"),
-            f"statistic must be median or mean, got {self.statistic!r}",
-        )
+        _check_statistic(self.statistic)
         _check_fit(self.method, self.tensor, self.fit)
 
     @property
@@ -398,8 +420,7 @@ class StatisticsPlotOptions:
             not self.sd_bands or self.layout == "rows",
             "--sd-bands needs --layout rows (panels have no subject curves)",
         )
-        _check_page_width(self.page_width)
-        _check(self.dpi >= 1, f"dpi must be >= 1, got {self.dpi}")
+        _check_figure(self.page_width, self.dpi)
         _check_subject_columns(
             self.subject_info,
             {self.group_variable: "--group-variable"},
@@ -470,10 +491,7 @@ class DecompositionPlotOptions:
             f"got {self.subject_prefix!r}",
         )
         _check(not bad, f"parts must be from {DECOMPOSITION_PARTS}, got {bad}")
-        _check(
-            self.slices is None or len(self.slices) == 3,
-            f"slices must be three indices (i j k), got {self.slices}",
-        )
+        _check_slices(self.slices)
         _check(0 < self.alpha < 1, f"alpha must be in (0, 1), got {self.alpha}")
         _check(
             self.min_panel_width is None or self.min_panel_width > 0,
@@ -487,8 +505,7 @@ class DecompositionPlotOptions:
             0 < self.outlier_alpha < 1,
             f"outlier_alpha must be in (0, 1), got {self.outlier_alpha}",
         )
-        _check_page_width(self.page_width)
-        _check(self.dpi >= 1, f"dpi must be >= 1, got {self.dpi}")
+        _check_figure(self.page_width, self.dpi)
         _require_file(resolve_model(self.model)[0], "model")
         _check_subject_columns(
             self.subject_info,
@@ -498,10 +515,7 @@ class DecompositionPlotOptions:
                 self.group_variable: "--group-variable",
             },
         )
-        for name in ("segmentation", "background", "input"):
-            path = getattr(self, name)
-            if path is not None:
-                _require_file(path, name)
+        _require_optional_files(self, ("segmentation", "background", "input"))
 
     def selected_parts(self) -> tuple[str, ...]:
         """The parts to draw, in `DECOMPOSITION_PARTS` order."""
@@ -541,24 +555,14 @@ class GroupMapPlotOptions:
             f"aggregate must be one of {AGGREGATES}, got {self.aggregate!r}",
         )
         _check(self.trim >= 0, f"trim must be >= 0, got {self.trim}")
-        _check(
-            self.statistic in ("median", "mean"),
-            f"statistic must be median or mean, got {self.statistic!r}",
-        )
-        _check(
-            self.slices is None or len(self.slices) == 3,
-            f"slices must be three indices (i j k), got {self.slices}",
-        )
-        _check_page_width(self.page_width)
-        _check(self.dpi >= 1, f"dpi must be >= 1, got {self.dpi}")
+        _check_statistic(self.statistic)
+        _check_slices(self.slices)
+        _check_figure(self.page_width, self.dpi)
         _check_subject_columns(
             self.subject_info,
             {self.group_variable: "--group-variable"},
         )
-        for name in ("segmentation", "background"):
-            path = getattr(self, name)
-            if path is not None:
-                _require_file(path, name)
+        _require_optional_files(self, ("segmentation", "background"))
 
 
 _PLANNED = {

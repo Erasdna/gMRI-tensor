@@ -4,10 +4,10 @@ import matplotlib.pyplot as plt
 import numpy as np
 import scienceplots  # noqa: F401
 from gMRItensor.plotting.mode_grid import plot_time_column_cp
-from gMRItensor.plotting.roi_evolution import TIME_LABEL
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import resolve_page_width
 from gMRItensor.plotting.utils import scale_mode
+from gMRItensor.plotting.utils import TIME_LABEL
 
 plt.style.use(["science", "no-latex"])
 matplotlib.use("Agg")

@@ -1,3 +1,6 @@
+"""Images to signal tables: ΔR1 (or the T1w ratio) per voxel, its ROI
+statistics, and the tensors the decompositions are fitted to.
+"""
 import json
 import warnings
 from collections import deque
@@ -28,7 +31,14 @@ from scipy.ndimage import labeled_comprehension
 from tqdm import tqdm
 
 
-def compute_tracer(baseline: np.ndarray, post_injection: np.ndarray, signal_type: str):
+def compute_tracer(
+    baseline: np.ndarray,
+    post_injection: np.ndarray,
+    signal_type: str,
+) -> np.ndarray:
+    """The tracer signal per voxel: ΔR1 = 1/T1_post - 1/T1_baseline for
+    T1map, R1_post - R1_baseline for R1map (in the maps' own units), and
+    post/baseline for T1w. Voxels where a map is 0 (or near 0) are NaN."""
 
     if signal_type == "T1map":
         expr = (
