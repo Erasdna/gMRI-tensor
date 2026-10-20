@@ -1,4 +1,5 @@
 """Shared fixtures for the stage (pipeline/CLI) tests."""
+import os
 from pathlib import Path
 from typing import NamedTuple
 
@@ -9,6 +10,33 @@ import pytest
 
 TIME_POINTS = (0, 6, 24)
 LABELS = (4, 10, 49, 2, 41)
+
+if os.environ.get("PYTEST_XDIST_WORKER"):
+    # One BLAS/OpenMP thread per xdist worker, set before numpy or torch start
+    # their thread pools: the workers already use every core between them.
+    for variable in ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS"):
+        os.environ.setdefault(variable, "1")
+
+
+def pytest_addoption(parser: pytest.Parser) -> None:
+    parser.addoption(
+        "--runslow",
+        action="store_true",
+        default=False,
+        help="also run the tests marked slow",
+    )
+
+
+def pytest_collection_modifyitems(
+    config: pytest.Config,
+    items: list[pytest.Item],
+) -> None:
+    if config.getoption("--runslow"):
+        return
+    skip_slow = pytest.mark.skip(reason="slow; run with --runslow")
+    for item in items:
+        if "slow" in item.keywords:
+            item.add_marker(skip_slow)
 
 
 class SyntheticStudy(NamedTuple):

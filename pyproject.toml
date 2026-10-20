@@ -75,6 +75,9 @@ addopts = [
 testpaths = [
     "test"
 ]
+markers = [
+    "slow: long-running; skipped unless pytest is given --runslow",
+]
 
 
 # Pair notebooks with python files
@@ -85,4 +88,5 @@ formats = "demos///ipynb,demos///py:percent"
 dev = [
     "pre-commit>=4.6.1",
     "pytest>=9.1.1",
+    "pytest-xdist>=3.8.0",
 ]
