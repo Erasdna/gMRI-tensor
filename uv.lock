@@ -656,80 +656,73 @@ source = { editable = "." }
 dependencies = [
     { name = "h5py" },
     { name = "matcouply" },
+    { name = "matplotlib", version = "3.10.9", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "matplotlib", version = "3.11.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "nibabel" },
     { name = "numexpr", version = "2.14.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numexpr", version = "2.14.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pandas", version = "2.3.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "pandas", version = "3.0.5", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pyarrow" },
     { name = "scienceplots" },
     { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scikit-learn", version = "1.9.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "seaborn" },
     { name = "statannotations" },
     { name = "statsmodels" },
     { name = "tensorly" },
+    { name = "threadpoolctl" },
     { name = "tlviz" },
     { name = "torch" },
     { name = "tqdm" },
 ]
 
-[package.optional-dependencies]
-all = [
-    { name = "flake8" },
-    { name = "mypy" },
-    { name = "pre-commit" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-]
-dev = [
-    { name = "pre-commit" },
-]
-test = [
-    { name = "flake8" },
-    { name = "mypy" },
-    { name = "pytest" },
-    { name = "pytest-cov" },
-]
-
 [package.dev-dependencies]
 dev = [
+    { name = "flake8" },
+    { name = "mypy" },
     { name = "pre-commit" },
     { name = "pytest" },
+    { name = "pytest-cov" },
     { name = "pytest-xdist" },
 ]
 
 [package.metadata]
 requires-dist = [
-    { name = "flake8", marker = "extra == 'test'" },
-    { name = "gmritensor", extras = ["test", "dev"], marker = "extra == 'all'" },
     { name = "h5py", specifier = ">=3.16.0" },
     { name = "matcouply", specifier = ">=0.2.0,<0.3" },
-    { name = "mypy", marker = "extra == 'test'" },
+    { name = "matplotlib", specifier = ">=3.7" },
     { name = "nibabel", specifier = ">=5.4.2" },
     { name = "numexpr", specifier = ">=2.14.1" },
     { name = "numpy" },
-    { name = "pre-commit", marker = "extra == 'dev'" },
+    { name = "pandas", specifier = ">=2.0" },
     { name = "pyarrow", specifier = ">=25.0.1" },
-    { name = "pytest", marker = "extra == 'test'" },
-    { name = "pytest-cov", marker = "extra == 'test'" },
     { name = "scienceplots", specifier = ">=2.2.2" },
     { name = "scikit-learn", specifier = ">=1.7.2" },
+    { name = "scipy", specifier = ">=1.10" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "statannotations", specifier = ">=0.7.2" },
     { name = "statsmodels", specifier = ">=0.14.6" },
     { name = "tensorly", specifier = ">=0.9.0" },
+    { name = "threadpoolctl", specifier = ">=3.6.0" },
     { name = "tlviz", specifier = ">=0.1.1" },
     { name = "torch", specifier = ">=2.13.0" },
     { name = "tqdm", specifier = ">=4.69.1" },
 ]
-provides-extras = ["test", "dev", "all"]
 
 [package.metadata.requires-dev]
 dev = [
+    { name = "flake8", specifier = ">=7.3.0" },
+    { name = "mypy", specifier = ">=2.3.0" },
     { name = "pre-commit", specifier = ">=4.6.1" },
     { name = "pytest", specifier = ">=9.1.1" },
+    { name = "pytest-cov", specifier = ">=7.1.0" },
     { name = "pytest-xdist", specifier = ">=3.8.0" },
 ]
 

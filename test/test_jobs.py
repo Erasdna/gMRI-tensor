@@ -173,7 +173,8 @@ def test_parafac2_restarts_match_run_repeated():
     run_tasks(plan, slices, 2, "PARAFAC2", store, **FIT_OPTIONS)
     best = collect(plan, store)["full"].best
     assert best is not None and isinstance(best.model, PARAFAC2Model)
-    assert best.error == pytest.approx(float(error), abs=0)
+    # The runner returns its error as float32; the store keeps the float.
+    assert torch.tensor(best.error, dtype=torch.float32) == error
     assert torch.equal(best.model.subject_mode, model.subject_mode)
 
 

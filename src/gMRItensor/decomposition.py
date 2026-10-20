@@ -16,14 +16,19 @@ from typing import Any
 from typing import Literal
 from typing import overload
 
+import numpy as np
 import tensorly as tl
 import torch
 from matcouply._utils import get_svd
+from matcouply.coupled_matrices import CoupledMatrixFactorization
 from matcouply.decomposition import cmf_aoadmm
 from matcouply.decomposition import initialize_cmf
 from matcouply.decomposition import parafac2_aoadmm
+from tensorly.cp_tensor import CPTensor
 from tensorly.parafac2_tensor import apply_parafac2_projections
+from tensorly.parafac2_tensor import Parafac2Tensor
 from tensorly.tenalg.core_tenalg.mttkrp import unfolding_dot_khatri_rao_memory
+from threadpoolctl import threadpool_limits
 from tlviz.factor_tools import degeneracy_score
 from tqdm import tqdm
 
@@ -112,7 +117,7 @@ class PARAFAC2Model:
     """A fitted PARAFAC2 model, in coupled-matrix form.
 
     `evolving_states[i]` is subject `i`'s own `(n_timepoints_i, rank)` time
-    course -- directly interpretable, and what both solvers now return. This
+    course -- directly interpretable, and what both solvers return. This
     is matcouply's native form; TensorLy is converted into it with its public
     `apply_parafac2_projections`.
 
@@ -226,6 +231,10 @@ _CMF_MANAGED_OPTIONS: dict[str, str] = {
 
 #: matcouply's own default, used when reporting the feasibility gap.
 _AOADMM_DEFAULT_FEASIBILITY_TOL: float = 1e-4
+#: AO-ADMM's tolerance on the relative change of the penalized objective
+#: (matcouply's own default is 1e-8, which fits rarely meet within their
+#: iteration budget although their error stopped improving long before).
+AOADMM_DEFAULT_LOSS_TOL: float = 1e-7
 
 
 def _check_tolerances(**tolerances: float | None) -> None:
@@ -308,25 +317,30 @@ def compute_CP_decomposition(
             "first.",
         )
 
-    decomposition_fn = (
-        non_negative_parafac_compiled if non_negative else parafac_compiled
+    library_fn = (
+        tl.decomposition.non_negative_parafac
+        if non_negative
+        else tl.decomposition.parafac
     )
     if CP_tolerance is None:
-        CP_tolerance = _solver_default(
-            tl.decomposition.non_negative_parafac
-            if non_negative
-            else tl.decomposition.parafac,
-        )
-    decomp, errors = decomposition_fn(
-        tensor,
-        rank=rank,
-        n_iter_max=CP_max_iter,
-        tol=CP_tolerance,  # Computing this tensor decomp is quite expensive...
-        return_errors=True,
-        random_state=random_state,
-        verbose=CP_verbose_level,
-        init=init,
-        mask=mask,
+        CP_tolerance = _solver_default(library_fn)
+    backend = _FitBackend(tensor.device)
+    # Compiled for the GPU; numpy fits call TensorLy directly.
+    compiled_fn = non_negative_parafac_compiled if non_negative else parafac_compiled
+    decomp, errors = backend.output(
+        backend.call(
+            library_fn if backend.numpy else compiled_fn,
+            backend.input(tensor),
+            rank=rank,
+            n_iter_max=CP_max_iter,
+            tol=CP_tolerance,
+            return_errors=True,
+            random_state=random_state,
+            verbose=CP_verbose_level,
+            init=init,
+            mask=backend.input(mask),
+        ),
+        tensor.dtype,
     )
     if len(errors) > CP_max_iter - 1:
         raise ConvergenceError(
@@ -631,6 +645,95 @@ def _to_solver_slices(
     return [s.to(device).double() for s in slices]
 
 
+#: Environment variable choosing where CPU fits run: "numpy" (default) or
+#: "torch". GPU fits always run on pytorch.
+FIT_BACKEND_VARIABLE = "GMRITENSOR_FIT_BACKEND"
+
+#: Containers the solvers return, rebuilt part by part by `_solver_output`.
+_FACTORIZATIONS = (CPTensor, Parafac2Tensor, CoupledMatrixFactorization)
+
+
+def _fits_on_numpy(device: torch.device) -> bool:
+    """Whether a fit on `device` runs on TensorLy's numpy backend.
+
+    Every CPU fit does, in float64, unless `GMRITENSOR_FIT_BACKEND=torch`:
+    the solvers' inner loops make many small calls, each several times
+    cheaper in numpy than in torch. A GPU fit always runs on pytorch; asking
+    for numpy there is ignored with a warning.
+    """
+    choice = os.environ.get(FIT_BACKEND_VARIABLE, "numpy")
+    if choice not in ("numpy", "torch"):
+        raise ValueError(
+            f"{FIT_BACKEND_VARIABLE} must be numpy or torch, got {choice!r}",
+        )
+    if device.type != "cpu":
+        if FIT_BACKEND_VARIABLE in os.environ and choice == "numpy":
+            warnings.warn(
+                f"{FIT_BACKEND_VARIABLE}=numpy is ignored for a fit on "
+                f"{device}: GPU fits always run on pytorch.",
+                stacklevel=3,
+            )
+        return False
+    return choice == "numpy"
+
+
+def _solver_input(value: Any) -> Any:
+    """`value` with every torch tensor as a float64 numpy array, through
+    lists and tuples."""
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().double().numpy()
+    if isinstance(value, (list, tuple)):
+        return type(value)(_solver_input(item) for item in value)
+    return value
+
+
+def _solver_output(value: Any, dtype: torch.dtype) -> Any:
+    """`value` back from the numpy backend as CPU torch: arrays as `dtype`,
+    numeric scalars as float64 (they are errors and losses, compared to
+    tolerances), through lists, tuples, named tuples and the factorization
+    containers. Other values are returned as they are."""
+    if isinstance(value, np.ndarray) and value.ndim > 0:
+        return torch.from_numpy(np.ascontiguousarray(value)).to(dtype)
+    if isinstance(value, (np.ndarray, np.generic)):
+        item = value.item()
+        if isinstance(item, (bool, int)) or not isinstance(item, float):
+            return item
+        return torch.tensor(item, dtype=torch.float64)
+    if isinstance(value, _FACTORIZATIONS):
+        return type(value)(tuple(_solver_output(part, dtype) for part in value))
+    if isinstance(value, tuple) and hasattr(value, "_fields"):
+        return type(value)(*(_solver_output(item, dtype) for item in value))
+    if isinstance(value, (list, tuple)):
+        return type(value)(_solver_output(item, dtype) for item in value)
+    return value
+
+
+class _FitBackend:
+    """Where one solver call runs (see `_fits_on_numpy`).
+
+    `input` prepares the solver's arguments, `call` runs it and `output`
+    turns its result back into torch. On the pytorch backend all three
+    leave their values as they are. The conversion back happens after the
+    numpy backend is left, so TensorLy validates the rebuilt containers on
+    pytorch.
+    """
+
+    def __init__(self, device: torch.device) -> None:
+        self.numpy = _fits_on_numpy(device)
+
+    def input(self, value: Any) -> Any:
+        return _solver_input(value) if self.numpy else value
+
+    def call(self, solver: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        if not self.numpy:
+            return solver(*args, **kwargs)
+        with tl.backend_context("numpy"):
+            return solver(*args, **kwargs)
+
+    def output(self, value: Any, dtype: torch.dtype) -> Any:
+        return _solver_output(value, dtype) if self.numpy else value
+
+
 def _accept_aoadmm_fit(
     diagnostics: Any,
     max_iter: int,
@@ -748,7 +851,7 @@ def _compute_PARAFAC2_matcouply(
     options = _build_aoadmm_options(aoadmm_options)
     feasibility_tol = options.get("feasibility_tol", _AOADMM_DEFAULT_FEASIBILITY_TOL)
     if aoadmm_loss_tolerance is None:
-        aoadmm_loss_tolerance = _solver_default(parafac2_aoadmm)
+        aoadmm_loss_tolerance = AOADMM_DEFAULT_LOSS_TOL
 
     slices = (
         list(tensor_slices)
@@ -757,19 +860,24 @@ def _compute_PARAFAC2_matcouply(
     )
     device = compute_device if compute_device is not None else slices[0].device
 
+    backend = _FitBackend(device)
     with _matcouply_numeric_context(device):
-        cmf, admm_vars, diagnostics = parafac2_aoadmm(
-            _to_solver_slices(slices, device),
-            rank=rank,
-            init=init,
-            n_iter_max=max_iter,
-            tol=aoadmm_loss_tolerance,
-            random_state=random_state,
-            non_negative=_nn_modes_to_non_negative(nn_modes),
-            verbose=verbose_level,
-            return_errors=True,
-            return_admm_vars=True,
-            **options,
+        cmf, admm_vars, diagnostics = backend.output(
+            backend.call(
+                parafac2_aoadmm,
+                backend.input(_to_solver_slices(slices, device)),
+                rank=rank,
+                init=init,
+                n_iter_max=max_iter,
+                tol=aoadmm_loss_tolerance,
+                random_state=random_state,
+                non_negative=_nn_modes_to_non_negative(nn_modes),
+                verbose=verbose_level,
+                return_errors=True,
+                return_admm_vars=True,
+                **options,
+            ),
+            torch.float64,
         )
         # matcouply leaves `weights` as None, keeping the scale in the
         # factors; the weights are ones, as for every fit here.
@@ -827,16 +935,22 @@ def _compute_PARAFAC2_tensorly(
     """
     if tolerance is None:
         tolerance = _solver_default(tl.decomposition.parafac2)
-    result, errors = tl.decomposition.parafac2(
-        tensor_slices,
-        rank=rank,
-        n_iter_max=max_iter,
-        tol=tolerance,
-        return_errors=True,
-        random_state=random_state,
-        verbose=verbose_level,
-        init=init,
-        nn_modes=list(nn_modes) if nn_modes else None,
+    first = tensor_slices[0]
+    backend = _FitBackend(first.device)
+    result, errors = backend.output(
+        backend.call(
+            tl.decomposition.parafac2,
+            backend.input(tensor_slices),
+            rank=rank,
+            n_iter_max=max_iter,
+            tol=tolerance,
+            return_errors=True,
+            random_state=random_state,
+            verbose=verbose_level,
+            init=init,
+            nn_modes=list(nn_modes) if nn_modes else None,
+        ),
+        first.dtype,
     )
     rec_errors = [float(error) for error in errors]
     # TensorLy stops exactly when two successive recorded errors differ by
@@ -882,7 +996,7 @@ def compute_PARAFAC2_decomposition(
     PARAFAC2_verbose_level: int = 0,
     PARAFAC2_tolerance: float | None = None,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = "auto",
-    solver: PARAFAC2Solver = "tensorly",
+    solver: PARAFAC2Solver = "matcouply",
     aoadmm_options: dict[str, Any] | None = None,
     aoadmm_loss_tolerance: float | None = None,
     return_projections: bool = False,
@@ -904,10 +1018,10 @@ def compute_PARAFAC2_decomposition(
 
     Choosing a solver
     -----------------
-    `solver="tensorly"` (default) uses ALS/HALS. `solver="matcouply"` uses
-    AO-ADMM, which can enforce non-negativity on mode 1 (the evolving/time
-    mode) where TensorLy's ALS cannot, and offers L1/L2/TV, unimodality and
-    bound constraints via `aoadmm_options`.
+    `solver="matcouply"` (default) uses AO-ADMM, which can enforce
+    non-negativity on mode 1 (the evolving/time mode) where TensorLy's ALS
+    cannot, and offers L1/L2/TV, unimodality and bound constraints via
+    `aoadmm_options`. `solver="tensorly"` uses ALS/HALS.
 
     `nn_modes="auto"` resolves to `(0, 2)` for TensorLy and `(0, 1, 2)` for
     matcouply; pass `None` for an unconstrained fit. Asking TensorLy for
@@ -916,18 +1030,20 @@ def compute_PARAFAC2_decomposition(
 
     Tolerances
     ----------
-    None (the default) means the solver's own default `tol`. For TensorLy
-    `PARAFAC2_tolerance` is its `tol`. For matcouply `aoadmm_loss_tolerance`
-    is its `tol` on the penalized objective; a fit that runs out of
-    iterations before meeting it is kept, as matcouply returns it, with a
-    warning. Passing `PARAFAC2_tolerance` instead gates on the
+    For TensorLy `PARAFAC2_tolerance` is its `tol` (None: TensorLy's
+    default). For matcouply `aoadmm_loss_tolerance` is its `tol` on the
+    penalized objective (None: `AOADMM_DEFAULT_LOSS_TOL`); a fit that runs
+    out of iterations before meeting it is kept, as matcouply returns it,
+    with a warning. Passing `PARAFAC2_tolerance` instead gates on the
     reconstruction error, accepting fits whose error has settled to within
     it -- even at the iteration limit -- and rejecting those that have not.
 
     `compute_device` is the device the fit runs on; None (default) uses the
     input's own device. It lets CPU-resident slices be fitted on the GPU
     without a host-side copy -- for matcouply, which needs float64, the cast
-    happens on `compute_device` (see `_to_solver_slices`).
+    happens on `compute_device` (see `_to_solver_slices`). A CPU fit runs on
+    TensorLy's numpy backend in float64 (`_fits_on_numpy`); the returned
+    tensors are torch either way.
 
     Returns
     -------
@@ -961,8 +1077,8 @@ def compute_PARAFAC2_decomposition(
         raise ValueError(
             "tensor_slices contains NaN values, but neither PARAFAC2 solver is "
             "set up for NaN imputation here -- remove or impute missing values "
-            "first (e.g. via prepare_tensor(..., require_regular=False), which "
-            "never introduces NaN gaps).",
+            "first (e.g. load_tensor_from_parquet(..., model='parafac2'), "
+            "which drops non-finite columns instead).",
         )
 
     if solver not in ("tensorly", "matcouply"):
@@ -1161,11 +1277,13 @@ def compute_CMF_decomposition(
         _solver_default(cmf_aoadmm, "feasibility_tol"),
     )
     if aoadmm_loss_tolerance is None:
-        aoadmm_loss_tolerance = _solver_default(cmf_aoadmm)
+        aoadmm_loss_tolerance = AOADMM_DEFAULT_LOSS_TOL
     device = compute_device if compute_device is not None else slices[0].device
 
-    with _matcouply_numeric_context(device):
-        matrices = _to_solver_slices(slices, device)
+    backend = _FitBackend(device)
+    non_negative = _nn_modes_to_non_negative(nn_modes, "CMF")
+
+    def fit(matrices: list[Any]) -> Any:
         # One generator for the initialisation and the ADMM variables, so a
         # seed fixes the whole fit.
         rng = tl.check_random_state(random_state)
@@ -1177,18 +1295,24 @@ def compute_CMF_decomposition(
             random_state=rng,
             init_params=options.get("init_params"),
         )
-        cmf, diagnostics = cmf_aoadmm(
+        return cmf_aoadmm(
             matrices,
             rank=rank,
-            init=(None, (torch.ones_like(A), B_is, C)),
+            init=(None, (tl.ones(tl.shape(A), **tl.context(A)), B_is, C)),
             n_iter_max=CMF_max_iter,
             tol=aoadmm_loss_tolerance,
             random_state=rng,
-            non_negative=_nn_modes_to_non_negative(nn_modes, "CMF"),
+            non_negative=non_negative,
             verbose=CMF_verbose_level,
             update_A=False,
             return_errors=True,
             **options,
+        )
+
+    with _matcouply_numeric_context(device):
+        cmf, diagnostics = backend.output(
+            backend.call(fit, backend.input(_to_solver_slices(slices, device))),
+            torch.float64,
         )
         _, (_, evolving_states, C) = cmf
         evolving_states = list(evolving_states)
@@ -1252,20 +1376,6 @@ def _cmf_to_cpu(result: CMFModel) -> CMFModel:
         evolving_states=[B.float().cpu() for B in result.evolving_states],
         label_mode=result.label_mode.float().cpu(),
     )
-
-
-#: `run_*_repeated` options that steer the restart loop rather than one fit,
-#: and so never reach `compute_*_decomposition`.
-_RESTART_ONLY_OPTIONS: frozenset[str] = frozenset(
-    {
-        "init_repeats",
-        "restart_procs",
-        "progress_bar",
-        "device",
-        "return_diagnostics",
-        "use_memory_efficient_khatri_rao",
-    },
-)
 
 
 def _resolve_options(
@@ -1391,6 +1501,13 @@ def _release_cuda_cache(device: torch.device) -> None:
         torch.cuda.empty_cache()
 
 
+def _limit_threads(num_threads: int) -> None:
+    """Cap torch's threads and numpy's BLAS/OpenMP pools at `num_threads`;
+    numpy fits (`_fits_on_numpy`) do not follow `torch.set_num_threads`."""
+    torch.set_num_threads(num_threads)
+    threadpool_limits(num_threads)
+
+
 def _init_restart_worker_backend(
     num_threads: int,
     memory_efficient: bool = False,
@@ -1405,7 +1522,7 @@ def _init_restart_worker_backend(
     `restart_procs * num_threads` near the parent's `torch.get_num_threads()`.
     """
     tl.set_backend("pytorch")
-    torch.set_num_threads(num_threads)
+    _limit_threads(num_threads)
     _maybe_register_memory_efficient_khatri_rao(memory_efficient)
 
 
@@ -2069,7 +2186,7 @@ def run_PARAFAC2_decomposition_repeated(
     progress_bar: bool = True,
     nn_modes: tuple[int, ...] | None | Literal["auto"] = "auto",
     restart_procs: int = 1,
-    solver: PARAFAC2Solver = "tensorly",
+    solver: PARAFAC2Solver = "matcouply",
     aoadmm_options: dict[str, Any] | None = None,
     aoadmm_loss_tolerance: float | None = None,
     return_projections: bool = False,
@@ -2308,6 +2425,6 @@ def setup_backend():
         device = torch.device("cpu")
         slurm_cpus = os.environ.get("CPUS_PER_TASK")
         # Sequential unless the CPU count is made explicit.
-        torch.set_num_threads(int(slurm_cpus) if slurm_cpus else 1)
+        _limit_threads(int(slurm_cpus) if slurm_cpus else 1)
         print(f"Running on: Multi-CPU ({torch.get_num_threads()} threads)")
     return device

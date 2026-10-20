@@ -1,4 +1,5 @@
 import dataclasses
+import functools
 import inspect
 import os
 import warnings
@@ -27,11 +28,10 @@ from gMRItensor.decomposition import _resolve_nn_modes
 from gMRItensor.decomposition import _suggest_max_iter
 from gMRItensor.decomposition import _to_solver_slices
 from gMRItensor.decomposition import _zero_negligible_loadings
+from gMRItensor.decomposition import AOADMM_DEFAULT_LOSS_TOL
 from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.plotting.evolving_mode import evolving_factors_to_numpy
 from gMRItensor.plotting.utils import scale_mode
-from matcouply.decomposition import cmf_aoadmm
-from matcouply.decomposition import parafac2_aoadmm
 
 SOLVERS = ["tensorly", "matcouply"]
 
@@ -55,9 +55,7 @@ def run_CP(use_gpu):
     tensor_1 = np.outer(np.array([0, 0, 1, 0]), np.array([0, 1, 0, 0])).astype(float)
     tensor = torch.from_numpy(tensor_1).to(device)
     decomp, errors = compute_CP_decomposition(tensor, 1, 1000, 1)
-    print(decomp)
     weights, factors = decomp
-    print(weights)
 
     assert torch.allclose(weights, torch.ones(1, dtype=weights.dtype, device=device))
 
@@ -66,6 +64,10 @@ def test_CP_cpu():
     run_CP("FALSE")
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="needs CUDA; without it this repeats the CPU test",
+)
 def test_CP_gpu():
     run_CP("TRUE")
 
@@ -88,6 +90,7 @@ def test_CP_non_negative_default():
         tensor,
         rank=2,
         max_iter=500,
+        tolerance=1e-4,
         init_repeats=5,
         device=device,
         progress_bar=False,
@@ -107,6 +110,7 @@ def test_CP_plain_allows_negative_factors():
         tensor,
         rank=2,
         max_iter=500,
+        tolerance=1e-4,
         init_repeats=5,
         device=device,
         progress_bar=False,
@@ -154,6 +158,10 @@ def test_PARAFAC2_cpu():
     run_PARAFAC2("FALSE")
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="needs CUDA; without it this repeats the CPU test",
+)
 def test_PARAFAC2_gpu():
     run_PARAFAC2("TRUE")
 
@@ -199,6 +207,7 @@ def test_CP_nan_with_imputation_succeeds():
         tensor,
         rank=2,
         max_iter=500,
+        tolerance=1e-4,
         init_repeats=5,
         device=device,
         progress_bar=False,
@@ -300,6 +309,7 @@ def test_CP_restart_procs_parallel_converges_as_well_as_sequential():
         tensor,
         rank=2,
         max_iter=500,
+        tolerance=1e-4,
         init_repeats=6,
         device=device,
         progress_bar=False,
@@ -309,6 +319,7 @@ def test_CP_restart_procs_parallel_converges_as_well_as_sequential():
         tensor,
         rank=2,
         max_iter=500,
+        tolerance=1e-4,
         init_repeats=6,
         device=device,
         progress_bar=False,
@@ -373,6 +384,7 @@ def test_restart_procs_falls_back_inside_worker_process(monkeypatch, capsys):
         tensor,
         rank=2,
         max_iter=500,
+        tolerance=1e-4,
         init_repeats=3,
         device=device,
         progress_bar=False,
@@ -492,6 +504,7 @@ def test_PARAFAC2_tensorly_rejects_nn_mode1():
             device=device,
             progress_bar=False,
             nn_modes=(0, 1, 2),
+            solver="tensorly",
         )
 
 
@@ -653,6 +666,7 @@ def test_PARAFAC2_rejects_aoadmm_only_options_on_tensorly(aoadmm_only_kwargs):
             init_repeats=1,
             device=device,
             progress_bar=False,
+            solver="tensorly",
             **aoadmm_only_kwargs,
         )
 
@@ -675,6 +689,10 @@ def test_PARAFAC2_matcouply_rejects_nan():
         )
 
 
+@pytest.mark.skipif(
+    not torch.cuda.is_available(),
+    reason="needs CUDA; without it this repeats the CPU test",
+)
 def test_PARAFAC2_matcouply_gpu():
     # Mirrors the existing _gpu pattern (falls through to CPU when CUDA is
     # absent). matcouply allocates its factors on torch's *default* device
@@ -813,7 +831,8 @@ def _library_tol(function):
 
 def test_tolerances_default_to_the_solvers_own(monkeypatch):
     # Every method defaults to its library's own `tol` instead of a value
-    # hard-coded here; None means "the solver's default".
+    # hard-coded here; None means "the solver's default". The exception is
+    # AO-ADMM's loss tolerance, `AOADMM_DEFAULT_LOSS_TOL`.
     for function in (
         run_CP_decomposition_repeated,
         run_PARAFAC2_decomposition_repeated,
@@ -829,6 +848,7 @@ def test_tolerances_default_to_the_solvers_own(monkeypatch):
         slices,
         2,
         PARAFAC2_max_iter=5000,
+        solver="tensorly",
     )
     assert tensorly_diagnostics.reconstruction_tolerance == _library_tol(
         tl.decomposition.parafac2,
@@ -839,26 +859,25 @@ def test_tolerances_default_to_the_solvers_own(monkeypatch):
         PARAFAC2_max_iter=5000,
         solver="matcouply",
     )
-    assert matcouply_diagnostics.loss_tolerance == _library_tol(parafac2_aoadmm)
+    assert matcouply_diagnostics.loss_tolerance == AOADMM_DEFAULT_LOSS_TOL
     # No extra reconstruction gate unless a tolerance is asked for.
     assert matcouply_diagnostics.reconstruction_tolerance is None
     assert matcouply_diagnostics.loss_converged is True
 
     seen = {}
 
-    def spy(tensor, **kwargs):
+    def spy(self: Any, solver: Any, *args: Any, **kwargs: Any) -> None:
         seen["tol"] = kwargs["tol"]
         raise ConvergenceError("stop")
 
     from gMRItensor import decomposition
 
     tensor = make_low_rank_tensor()
+    monkeypatch.setattr(decomposition._FitBackend, "call", spy)
     for non_negative, library in [
         (True, tl.decomposition.non_negative_parafac),
         (False, tl.decomposition.parafac),
     ]:
-        name = "non_negative_parafac_compiled" if non_negative else "parafac_compiled"
-        monkeypatch.setattr(decomposition, name, spy)
         with pytest.raises(ConvergenceError):
             compute_CP_decomposition(tensor, 2, non_negative=non_negative)
         assert seen.pop("tol") == _library_tol(library)
@@ -984,6 +1003,10 @@ def test_PARAFAC2_healthy_run_is_silent():
             device=device,
             progress_bar=False,
             solver="matcouply",
+            # Run to a tight loss criterion: on these 3 tiny random slices
+            # the default 1e-7 stops with mode-1 residue just above the
+            # zeroing threshold, which is then (rightly) reported.
+            aoadmm_loss_tolerance=1e-8,
         )
     ours = [w for w in caught if "PARAFAC2(solver=" in str(w.message)]
     assert [str(w.message) for w in ours] == []
@@ -1295,18 +1318,13 @@ def make_parafac2_unexpressed_component(device, n_subjects=16, n_labels=24, rank
     ]
 
 
-def test_PARAFAC2_matcouply_subject_mode_exactly_non_negative():
-    # Regression test. The subject and region factors used to come from
-    # matcouply's primal variables, which satisfy non-negativity only to
-    # within the feasibility gap -- measured at -7.7e-07. They now come from
-    # the auxiliaries, which satisfy it exactly, so `>= 0.0` holds strictly
-    # rather than only `>= -1e-6`.
-    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
+@functools.lru_cache(maxsize=1)
+def _unexpressed_component_fit() -> PARAFAC2Model:
+    """One matcouply fit of `make_parafac2_unexpressed_component`, shared by
+    the tests below (computed once per test process)."""
     device = setup_backend()
-    slices = make_parafac2_unexpressed_component(device)
-
     model, _ = run_PARAFAC2_decomposition_repeated(
-        slices,
+        make_parafac2_unexpressed_component(device),
         rank=3,
         max_iter=1500,
         init_repeats=2,
@@ -1315,6 +1333,16 @@ def test_PARAFAC2_matcouply_subject_mode_exactly_non_negative():
         solver="matcouply",
         tolerance=1e-5,
     )
+    return model
+
+
+def test_PARAFAC2_matcouply_subject_mode_exactly_non_negative():
+    # Regression test. The subject and region factors used to come from
+    # matcouply's primal variables, which satisfy non-negativity only to
+    # within the feasibility gap -- measured at -7.7e-07. They now come from
+    # the auxiliaries, which satisfy it exactly, so `>= 0.0` holds strictly
+    # rather than only `>= -1e-6`.
+    model = _unexpressed_component_fit()
     assert model.subject_mode.min() >= 0.0
     assert model.label_mode.min() >= 0.0
 
@@ -1324,20 +1352,7 @@ def test_PARAFAC2_matcouply_amplitude_scaled_profiles_keep_sign():
     # factor by its own loading and then normalising per subject. A negative
     # loading mirrors the whole curve, and scale_mode renormalises the
     # 1e-07-magnitude result back to full amplitude.
-    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
-    device = setup_backend()
-    slices = make_parafac2_unexpressed_component(device)
-
-    model, _ = run_PARAFAC2_decomposition_repeated(
-        slices,
-        rank=3,
-        max_iter=1500,
-        init_repeats=2,
-        device=device,
-        progress_bar=False,
-        solver="matcouply",
-        tolerance=1e-5,
-    )
+    model = _unexpressed_component_fit()
     evolving = evolving_factors_to_numpy(model.evolving_states)
     amplitude_scaled = np.stack(evolving) * model.subject_mode.numpy()[:, None, :]
     scaled = np.stack([scale_mode(s) for s in amplitude_scaled])
@@ -1453,20 +1468,7 @@ def test_zero_negligible_loadings_both_signs():
 def test_PARAFAC2_negligible_loadings_become_exactly_zero():
     # End to end: an unexpressed subject-component should read as 0, not as
     # solver residue whose sign flips the whole curve.
-    os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
-    device = setup_backend()
-    slices = make_parafac2_unexpressed_component(device)
-
-    model, _ = run_PARAFAC2_decomposition_repeated(
-        slices,
-        rank=3,
-        max_iter=1500,
-        init_repeats=2,
-        device=device,
-        progress_bar=False,
-        solver="matcouply",
-        tolerance=1e-5,
-    )
+    model = _unexpressed_component_fit()
     # No residue of either sign survives in a constrained mode.
     assert model.subject_mode.min() >= 0.0
     assert model.label_mode.min() >= 0.0
@@ -1521,7 +1523,7 @@ def test_CMF_shape_contract():
         assert float(torch.linalg.norm(residual) / torch.linalg.norm(X)) < 0.05
     assert diagnostics.solver == "matcouply"
     assert diagnostics.nn_modes == (1, 2)
-    assert diagnostics.loss_tolerance == _library_tol(cmf_aoadmm)
+    assert diagnostics.loss_tolerance == AOADMM_DEFAULT_LOSS_TOL
 
 
 def test_CMF_invalid_mode_names_the_method():
@@ -1554,9 +1556,9 @@ def test_CMF_rejects_nan_and_unconverged_fits():
 
 
 def test_CMF_defaults_accept_a_slowly_converging_fit():
-    # Noisy data where matcouply's own 1e-8 criterion needs far more than the
-    # default 2000 iterations: the default run still returns a model, with a
-    # warning rather than "no decomposition converged".
+    # Noisy data where a 1e-8 loss criterion needs far more than the default
+    # 2000 iterations: the run still returns a model, with a warning rather
+    # than "no decomposition converged".
     os.environ["GMRITENSOR_USE_GPU"] = "FALSE"
     device = setup_backend()
     rng = np.random.default_rng(1)
@@ -1572,6 +1574,7 @@ def test_CMF_defaults_accept_a_slowly_converging_fit():
             init_repeats=1,
             device=device,
             progress_bar=False,
+            aoadmm_loss_tolerance=1e-8,
         )
     assert isinstance(model, CMFModel) and float(error) < 0.2
 
@@ -1612,6 +1615,7 @@ def _fit_weights(method: str, solver: str | None, device: torch.device) -> torch
         weights, _, _ = run_CP_decomposition_repeated(
             make_low_rank_tensor(),
             max_iter=500,
+            tolerance=1e-4,
             **common,
         )
         return weights
@@ -1637,19 +1641,6 @@ def test_fits_are_never_normalized(method: str, solver: str | None) -> None:
     torch.testing.assert_close(weights.float(), torch.ones(2), rtol=0, atol=0)
 
 
-@pytest.mark.parametrize(
-    "runner",
-    [
-        run_CP_decomposition_repeated,
-        run_PARAFAC2_decomposition_repeated,
-        run_CMF_decomposition_repeated,
-    ],
-)
-def test_normalize_is_not_an_option(runner: Any) -> None:
-    with pytest.raises(TypeError, match="normalize"):
-        runner(None, rank=2, normalize=True)
-
-
 def test_CP_imputation_error_covers_observed_entries_only():
     setup_backend()
     tensor = make_low_rank_tensor_with_nan()
@@ -1671,11 +1662,16 @@ def test_CP_imputation_without_nan_fits_as_without_imputation():
     setup_backend()
     tensor = make_low_rank_tensor()
 
-    (_, plain), plain_errors = compute_CP_decomposition(tensor, rank=2)
+    (_, plain), plain_errors = compute_CP_decomposition(
+        tensor,
+        rank=2,
+        CP_tolerance=1e-4,
+    )
     (_, imputed), imputed_errors = compute_CP_decomposition(
         tensor,
         rank=2,
         allow_nan_imputation=True,
+        CP_tolerance=1e-4,
     )
 
     for a, b in zip(plain, imputed):

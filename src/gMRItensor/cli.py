@@ -247,7 +247,7 @@ def _add_fit_arguments(
     fit.add_argument(
         "--solver",
         choices=("tensorly", "matcouply"),
-        help="PARAFAC2 solver (default: tensorly); CMF always uses matcouply",
+        help="PARAFAC2 solver (default: matcouply); CMF always uses matcouply",
     )
     fit.add_argument(
         "--fit-option",

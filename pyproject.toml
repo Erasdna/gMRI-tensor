@@ -1,37 +1,37 @@
-[build-system] # Require setuptool version due to https://github.com/pypa/setuptools/issues/2938
+[build-system]
 requires = ["setuptools>=61.0.0", "wheel"]
 
- # See https://python-poetry.org/docs/pyproject/ for more keywords for the project table
 [project]
- # Name of your package
 name = "gMRItensor"
 authors = [
     {name = "Andreas R. Solheim", email = "solheim@simula.no"},
     ]
 version = "0.1.0"
-description = "Minimal package for adding two numbers"
-# "readme" the description field in your package, see: https://python-poetry.org/docs/pyproject/#readme
+description = "Tensor decompositions (CP, PARAFAC2, CMF) of gadolinium-enhanced MRI time series, with preprocessing, group statistics and figures"
 readme = "README.md"
 requires-python = ">=3.10"
- # Path to license file, see: https://spdx.org/licenses/ for options
 license = {file = "LICENSE"}
-# Direct dependencies
 dependencies = [
     "h5py>=3.16.0",
     # Upper-bounded deliberately: gMRItensor.decomposition reads the PARAFAC2
     # basis/coordinate matrices out of matcouply's ADMM auxiliary variables
     # (`auxes[1][0]`), which is internal layout rather than public API.
     "matcouply>=0.2.0,<0.3",
+    # `loc="outside ..."` legends need 3.7.
+    "matplotlib>=3.7",
     "nibabel>=5.4.2",
     "numexpr>=2.14.1",
     'numpy',
+    "pandas>=2.0",
     "pyarrow>=25.0.1",
     "scienceplots>=2.2.2",
     "scikit-learn>=1.7.2",
+    "scipy>=1.10",
     "seaborn>=0.13.2",
     "statannotations>=0.7.2",
     "statsmodels>=0.14.6",
     "tensorly>=0.9.0",
+    "threadpoolctl>=3.6.0",
     "tlviz>=0.1.1",
     "torch>=2.13.0",
     "tqdm>=4.69.1",
@@ -41,25 +41,13 @@ dependencies = [
 [project.scripts]
 gmri = "gMRItensor.cli:main"
 
-[project.optional-dependencies]
-test = [
-   "flake8", # Formatting: https://flake8.pycqa.org/en/latest/user/error-codes.html
-   "mypy", # Input/Output consistency
-   "pytest", # Testing suite
-   "pytest-cov" # Coverage reports
-]
-
-dev = ["pre-commit"]
-
-all = ["gMRItensor[test,dev]"]
-
 [tool.mypy]
 ignore_missing_imports = true # Does not show errors when importing untyped libraries
-exclude = [ # We only want mypy to consider files that are not generated in installing or building documentation
+exclude = [
     "docs/",
     "build/"
 ]
-files = [  # Folder to which files that should be checked by mypy
+files = [
     "src",
     "test"
 ]
@@ -79,14 +67,12 @@ markers = [
     "slow: long-running; skipped unless pytest is given --runslow",
 ]
 
-
-# Pair notebooks with python files
-[tool.jupytext]
-formats = "demos///ipynb,demos///py:percent"
-
 [dependency-groups]
 dev = [
+    "flake8>=7.3.0",
+    "mypy>=2.3.0",
     "pre-commit>=4.6.1",
     "pytest>=9.1.1",
+    "pytest-cov>=7.1.0",
     "pytest-xdist>=3.8.0",
 ]
