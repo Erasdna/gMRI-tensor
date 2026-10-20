@@ -52,6 +52,19 @@ def cpu_backend(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("GMRITENSOR_USE_GPU", "FALSE")
 
 
+@pytest.fixture(autouse=True)
+def quick_reproducibility_figures(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Decomposition runs save each rank's reproducibility figure; in tests
+    a small PNG is enough to check it is written."""
+    from gMRItensor import pipeline
+
+    monkeypatch.setattr(
+        pipeline,
+        "REPRODUCIBILITY_FIGURE",
+        {"formats": ("png",), "dpi": 50},
+    )
+
+
 @pytest.fixture
 def synthetic_study(tmp_path: Path) -> SyntheticStudy:
     """6 subjects (3 PD, 3 Control) x 3 time points of 6^3 T1 maps [ms].
