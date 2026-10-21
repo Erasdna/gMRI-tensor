@@ -349,16 +349,54 @@ def test_directory_store_refuses_results_saved_with_other_settings(tmp_path):
     assert DirectoryStore(tmp_path).load(task) is not None  # no settings: no check
     with pytest.raises(ValueError, match="fitted with other settings"):
         DirectoryStore(tmp_path, settings="b").load(task)
+    assert DirectoryStore(tmp_path).status(task) == "current"
 
 
-def test_run_tasks_refuses_to_resume_from_results_with_other_settings(tmp_path):
-    """Regression: re-planning with other fit options silently reused the
-    restarts already in the store."""
-    plan = plan_restarts(4, 1)
-    run_tasks(plan, make_slices(), 2, "PARAFAC2", DirectoryStore(tmp_path, "a"))
+@pytest.mark.parametrize(
+    "stored",
+    ["other settings", "no settings", "other task", "damaged"],
+)
+def test_directory_store_status_marks_unusable_results_stale(
+    tmp_path: Any,
+    stored: str,
+) -> None:
+    task = FitTask("full", (0, 1), 0)
+    store = DirectoryStore(tmp_path, settings="a")
+    assert store.status(task) == "missing"
+    written = {
+        "other settings": DirectoryStore(tmp_path, settings="b"),
+        "no settings": DirectoryStore(tmp_path),
+        "other task": DirectoryStore(tmp_path, settings="a"),
+        "damaged": DirectoryStore(tmp_path, settings="a"),
+    }[stored]
+    written_task = FitTask("full", (0, 2), 0) if stored == "other task" else task
+    written.save(RestartResult(written_task, fake_model(1.0), 0.1))
+    if stored == "damaged":
+        store.path(task).write_bytes(b"not a torch file")
 
-    with pytest.raises(ValueError, match="fitted with other settings"):
-        run_tasks(plan, make_slices(), 2, "PARAFAC2", DirectoryStore(tmp_path, "b"))
+    assert store.status(task) == "stale"
+    with pytest.raises(ValueError):
+        store.load(task)  # collect still refuses it
+    DirectoryStore(tmp_path, settings="a").save(
+        RestartResult(task, fake_model(1.0), 0.1),
+    )
+    assert store.status(task) == "current"
+
+
+def test_run_tasks_refits_results_with_other_settings(tmp_path: Any) -> None:
+    """A store fitted with other settings is refitted and overwritten, not
+    reused (and not refused): re-planning with new settings just works."""
+    plan = plan_restarts(4, 2)
+    first = run_tasks(plan, make_slices(), 2, "PARAFAC2", DirectoryStore(tmp_path, "a"))
+    assert first == jobs.TaskCounts(fitted=2, reused=0, refitted=0)
+
+    store = DirectoryStore(tmp_path, "b")
+    counts = run_tasks(plan, make_slices(), 2, "PARAFAC2", store)
+
+    assert counts == jobs.TaskCounts(fitted=0, reused=0, refitted=2)
+    assert [store.status(task) for task in plan] == ["current", "current"]
+    again = run_tasks(plan, make_slices(), 2, "PARAFAC2", store)
+    assert again == jobs.TaskCounts(fitted=0, reused=2, refitted=0)
 
 
 def test_directory_store_reports_a_damaged_file(tmp_path):

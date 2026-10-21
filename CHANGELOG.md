@@ -22,7 +22,7 @@
 
 ### Fixed
 - TensorLy PARAFAC2 accepted fits that had run out of iterations (its line search hid the limit from the iteration count).
-- Re-planning with other settings reused the restarts fitted under the old ones; stores now refuse them.
+- Re-planning with other settings reused the restarts fitted under the old ones. The jobs now refit and overwrite such stale restarts (and report what they fitted, reused and refitted); `collect` waits for them, naming the jobs to run; `plan --overwrite` starts the planned ranks from scratch.
 - `plot decomposition --outliers` could reload the data with another model's settings when models shared an output directory, and failed from another working directory.
 - A blank group cell emptied the significance tables (numeric groups) or crashed `plot statistics` (text groups); an all-tied time point turned every Benjamini–Hochberg p-value of its ROI into NaN.
 - Subject-mode scatter colours shifted when a group had no values for a variable.

@@ -17,7 +17,9 @@ from gMRItensor import replicability
 from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.decomposition import restarts
 from gMRItensor.jobs import FitTask
+from gMRItensor.jobs import pending_tasks
 from gMRItensor.jobs import RestartResult
+from gMRItensor.jobs import TaskCounts
 from gMRItensor.model_io import _read_decomposition
 from gMRItensor.model_io import component_weights
 from gMRItensor.model_io import load_decomposition
@@ -99,9 +101,10 @@ def stub_fits(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, int, dict]]:
         method: str,
         store: Any,
         **kwargs: Any,
-    ) -> None:
+    ) -> TaskCounts:
         calls.append((data, len(tasks), kwargs))
-        for task in tasks:
+        pending, counts = pending_tasks(tasks, store, kwargs.get("resume", True))
+        for task in pending:
             rows = list(task.indices)
             subset = (
                 data[rows]
@@ -110,6 +113,7 @@ def stub_fits(monkeypatch: pytest.MonkeyPatch) -> list[tuple[Any, int, dict]]:
             )
             model = fake_model(subset, rank, method, seed=task.seed)
             store.save(RestartResult(task, model, 0.3 - 0.01 * task.seed))
+        return counts
 
     monkeypatch.setattr(pipeline, "run_tasks", fake_run_tasks)
     monkeypatch.setattr(replicability, "run_tasks", fake_run_tasks)
@@ -651,7 +655,7 @@ def test_distributed_jobs_need_a_plan_and_all_restarts(synthetic_study: Any) -> 
     with pytest.raises(ValueError, match="job 2 .* 2 jobs"):
         run_decomposition_job(options.output_dir, 2)
     run_decomposition_job(options.output_dir, 0)
-    with pytest.raises(ValueError, match="1 of 2 restarts missing"):
+    with pytest.raises(ValueError, match=r"rank 2: 1 restart missing.* job 1 first"):
         collect_decomposition(options.output_dir)
     with pytest.raises(ValueError, match="DecompositionOptions plan"):
         run_replicability_job(options.output_dir, 0)
@@ -758,9 +762,9 @@ def test_progress_bar_option_is_passed_through(
     seen = []
     original: Any = pipeline.run_tasks
 
-    def spy(*args: Any, progress_bar: bool = True, **kwargs: Any) -> None:
+    def spy(*args: Any, progress_bar: bool = True, **kwargs: Any) -> Any:
         seen.append(progress_bar)
-        original(*args, progress_bar=progress_bar, **kwargs)
+        return original(*args, progress_bar=progress_bar, **kwargs)
 
     monkeypatch.setattr(pipeline, "run_tasks", spy)
     fit = FitOptions(restarts=1, max_iter=20, extra={"progress_bar": True})
@@ -1822,26 +1826,35 @@ def test_plot_outliers_rejects_data_with_other_subjects(
         pipeline.load_model_data(model, fewer)
 
 
-def test_replanning_with_other_settings_refuses_the_stored_restarts(
+def test_replanning_with_other_settings_refits_the_stored_restarts(
     synthetic_study: Any,
     monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
-    """Regression: `plan` again with another --max-iter (or solver, scaling,
-    ...) made `collect` return the restarts fitted under the old settings."""
+    """`plan` again with other settings: the jobs refit the stored restarts
+    and overwrite them (never reuse them); `collect` waits for all of them."""
     stub_fits(monkeypatch)
     preprocess(synthetic_study)
     options = decomposition_options(synthetic_study, ranks=(1,))
     for job in range(plan_decomposition(options)):
         run_decomposition_job(options.output_dir, job)
 
+    # More restarts or another job size keep what is stored.
     more = dataclasses.replace(
         options,
         fit=dataclasses.replace(options.fit, restarts=3),
         distributed=DistributedOptions(tasks_per_job=2),
     )
-    for job in range(plan_decomposition(more)):
+    capsys.readouterr()
+    n_jobs = plan_decomposition(more)
+    assert "2 restarts already stored with these settings will be reused" in (
+        capsys.readouterr().err
+    )
+    for job in range(n_jobs):
         run_decomposition_job(options.output_dir, job)
-    # More restarts or another job size keep what is stored.
+    out = capsys.readouterr().out
+    assert "rank 1: 0 fitted, 2 reused, 0 refitted" in out
+    assert "rank 1: 1 fitted, 0 reused, 0 refitted" in out
     collect_decomposition(options.output_dir)
 
     changed = dataclasses.replace(
@@ -1849,8 +1862,42 @@ def test_replanning_with_other_settings_refuses_the_stored_restarts(
         fit=dataclasses.replace(more.fit, max_iter=more.fit.max_iter + 1),
     )
     plan_decomposition(changed)
-    with pytest.raises(ValueError, match="fitted with other settings"):
+    assert "3 restarts in" in capsys.readouterr().err
+    with pytest.raises(
+        ValueError,
+        match=r"rank 1: 3 restarts fitted with other.*jobs 0, 1 first",
+    ):
         collect_decomposition(options.output_dir)
+    run_decomposition_job(options.output_dir, 0)
+    assert "rank 1: 0 fitted, 0 reused, 2 refitted" in capsys.readouterr().out
+    with pytest.raises(ValueError, match=r"1 restart fitted with other.* job 1 first"):
+        collect_decomposition(options.output_dir)
+    run_decomposition_job(options.output_dir, 1)
+    collect_decomposition(options.output_dir)
+
+
+def test_plan_overwrite_removes_the_planned_ranks_restarts(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    options = decomposition_options(synthetic_study, ranks=(1, 2))
+    for job in range(plan_decomposition(options)):
+        run_decomposition_job(options.output_dir, job)
+    store = options.store_dir
+
+    capsys.readouterr()
+    plan_decomposition(dataclasses.replace(options, ranks=(1,)), overwrite=True)
+
+    assert "Removed 2 stored restarts" in capsys.readouterr().err
+    assert not (store / "parafac2_rank_1").exists()
+    assert (store / "parafac2_rank_2").exists()  # not planned: kept
+    run_decomposition_job(options.output_dir, 0)
+    assert "rank 1: 1 fitted, 0 reused, 0 refitted" in capsys.readouterr().out
+    run_decomposition_job(options.output_dir, 0)  # a re-queued job resumes
+    assert "rank 1: 0 fitted, 1 reused, 0 refitted" in capsys.readouterr().out
 
 
 def test_a_rank_that_does_not_converge_keeps_the_others(

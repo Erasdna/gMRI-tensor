@@ -364,6 +364,30 @@ def test_cli_planned_jobs_take_settings_only_from_the_plan(
         assert "cannot be used with --job" in err and "plan.json" in err
 
 
+def test_cli_reports_and_overwrites_the_store(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _preprocess(synthetic_study)
+    planned = results / "planned"
+    assert _run(["decompose", "plan", *_fit_args(results, "planned")]) == 0
+    capsys.readouterr()
+    assert _run(["decompose", "run", "--output-dir", planned, "--job", 0]) == 0
+    assert "rank 1: 1 fitted, 0 reused, 0 refitted" in capsys.readouterr().out
+
+    args = _fit_args(results, "planned")
+    args[args.index("--max-iter") + 1] = 60
+    assert _run(["decompose", "plan", *args]) == 0
+    captured = capsys.readouterr()
+    assert captured.out.strip() == "2"  # only the job count, for N=$(...)
+    assert "1 restart in" in captured.err and "will be refitted" in captured.err
+
+    assert _run(["decompose", "plan", *args, "--overwrite"]) == 0
+    assert "Removed 1 stored restart" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        _run(["decompose", "run", "--output-dir", planned, "--job", 0, "--overwrite"])
+
+
 def test_cli_refuses_abbreviated_flags(
     synthetic_study: Any,
     capsys: pytest.CaptureFixture[str],

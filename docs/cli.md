@@ -221,7 +221,7 @@ gmri decompose run --output-dir results/parafac2 --job $SLURM_ARRAY_TASK_ID
 ```
 
 - **Settings:** `plan` saves all arguments to `<output-dir>/plan.json`, so `run --job` and `collect` need only `--output-dir`. All jobs therefore use the same settings: `run --job` refuses any other argument, and `--fit-option` cannot override a setting that has its own flag (such as `max_iter`). Run `plan` again to change the settings.
-- **Changed settings:** every stored restart records a fingerprint of the settings that change a fit (input, statistic, tensor and fit options). After `plan` with other such settings, `run --job` and `collect` refuse the restarts fitted under the old ones instead of reusing them: use a fresh `--store`, or delete the store. More `--restarts` or another `--tasks-per-job` keep what is stored.
+- **Changed settings:** every stored restart records a fingerprint of the settings that change a fit (input, statistic, tensor and fit options). Restarts stored with the same settings are reused; more `--restarts` or another `--tasks-per-job` keep them. A restart stored with other settings (or by another plan, or unreadable) is stale: the job that owns it fits it again and overwrites it. `plan` says on stderr how many stored restarts will be reused and how many refitted; its stdout stays the job count. Do not run `plan` again while an array of the previous plan is still running: jobs that start afterwards use the new plan.
 - **Tasks:** each restart of each fit is one task, and a job runs `--tasks-per-job` of them, one after another or in parallel with `--restart-procs` (decompose) / `--n-procs` (replicability). Request `--cpus-per-task` to match.
 
 | Command | Tasks | Example, `--tasks-per-job 4` |
@@ -231,9 +231,9 @@ gmri decompose run --output-dir results/parafac2 --job $SLURM_ARRAY_TASK_ID
 | replicability, cv | `ranks × splits × repeats × restarts` | |
 
 - **Array size limits:** many clusters cap array size (`MaxArraySize`, often 1001). If `plan` prints more jobs than that, raise `--tasks-per-job`.
-- **Resuming:** results are kept in `<output-dir>/<store>/<method>_rank_<r>/`. A re-queued job skips restarts that are already there, so failed jobs can simply be resubmitted. A single-process `decompose run` uses the same store, but refits every restart. A restart file that cannot be read (e.g. after a node crash) stops the command with its path; delete it to fit that restart again.
-- **Collecting:** `collect` refuses to write while restarts are missing, and says how many. It writes the same files as a single-process `run`.
-- **Starting over:** run `plan` again and delete the store directory.
+- **Resuming:** results are kept in `<output-dir>/<store>/<method>_rank_<r>/`. A re-queued job skips restarts that are already there with the current settings, so failed jobs can simply be resubmitted; each job prints, per rank, how many restarts it fitted, reused and refitted. A single-process `decompose run` uses the same store, but refits every restart.
+- **Collecting:** `collect` cannot fit, so it refuses to write while restarts are missing or stale, and names the jobs to run first. It writes the same files as a single-process `run`.
+- **Starting over:** `plan --overwrite` removes the stored restarts of the planned ranks, whatever their settings, before saving the plan; the jobs then fit everything. Other ranks' restarts are kept.
 
 ## `gmri plot decomposition`
 

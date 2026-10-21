@@ -7,6 +7,8 @@ the `gmri` command line or from a script.
 import dataclasses
 import hashlib
 import json
+import shutil
+import sys
 import warnings
 from collections.abc import Hashable
 from collections.abc import Sequence
@@ -48,6 +50,8 @@ from gMRItensor.jobs import plan_replicability
 from gMRItensor.jobs import plan_restarts
 from gMRItensor.jobs import RestartResult
 from gMRItensor.jobs import run_tasks
+from gMRItensor.jobs import StoreStatus
+from gMRItensor.jobs import TaskCounts
 from gMRItensor.model_io import component_weights
 from gMRItensor.model_io import load_decomposition
 from gMRItensor.model_io import MODEL_FILE
@@ -663,8 +667,9 @@ def _run_job_tasks(
     n_procs: int,
     fit_kwargs: dict[str, Any],
     resume: bool = True,
-) -> None:
-    """Fit `tasks` rank by rank into each rank's store (`_store`).
+) -> dict[int, TaskCounts]:
+    """Fit `tasks` rank by rank into each rank's store (`_store`); return
+    what each rank fitted, reused and refitted.
 
     `resume=False` refits tasks the store already holds (see `run_tasks`).
     The fits run on `setup_backend()`'s device (`GMRITENSOR_USE_GPU`).
@@ -672,8 +677,9 @@ def _run_job_tasks(
     fit_kwargs = dict(fit_kwargs)
     progress_bar = bool(fit_kwargs.pop("progress_bar", False))
     tensor = _on_device(data.data, setup_backend())
+    counts = {}
     for rank, rank_tasks in groupby(tasks, key=lambda item: item[0]):
-        run_tasks(
+        counts[rank] = run_tasks(
             [task for _, task in rank_tasks],
             tensor,
             rank,
@@ -683,6 +689,102 @@ def _run_job_tasks(
             progress_bar=progress_bar,
             resume=resume,
             **fit_kwargs,
+        )
+    return counts
+
+
+def _plural(n: int, noun: str) -> str:
+    return f"{n} {noun}" + ("" if n == 1 else "s")
+
+
+def _print_job_counts(counts: dict[int, TaskCounts]) -> None:
+    """One line per rank of what a `run --job` did with the store."""
+    for rank, done in counts.items():
+        note = " (fitted with other settings)" if done.refitted else ""
+        print(
+            f"rank {rank}: {done.fitted} fitted, {done.reused} reused, "
+            f"{done.refitted} refitted{note}",
+        )
+
+
+def _store_statuses(
+    options: DecompositionOptions | ReplicabilityOptions,
+    plan: Sequence[_RankTask],
+) -> list[StoreStatus]:
+    """What each rank's store holds for every task of `plan`, in order."""
+    stores = {rank: _store(options, rank) for rank in dict.fromkeys(r for r, _ in plan)}
+    return [stores[rank].status(task) for rank, task in plan]
+
+
+def _report_store(
+    options: DecompositionOptions | ReplicabilityOptions,
+    plan: Sequence[_RankTask],
+) -> None:
+    """Tell `plan`'s user, on stderr, which planned restarts the jobs will
+    reuse and which they will refit over results with other settings."""
+    statuses = _store_statuses(options, plan)
+    current, stale = statuses.count("current"), statuses.count("stale")
+    if current:
+        print(
+            f"{_plural(current, 'restart')} already stored with these settings "
+            "will be reused.",
+            file=sys.stderr,
+        )
+    if stale:
+        print(
+            f"{_plural(stale, 'restart')} in {options.store_dir} "
+            f"{'was' if stale == 1 else 'were'} fitted with other settings (or "
+            "another plan) and will be refitted and overwritten.",
+            file=sys.stderr,
+        )
+
+
+def _remove_planned_stores(
+    options: DecompositionOptions | ReplicabilityOptions,
+) -> None:
+    """`plan --overwrite`: delete the stored restarts of every planned rank,
+    whatever they were fitted with, and say so on stderr."""
+    for rank in options.ranks:
+        root = _store(options, rank).root
+        if root.exists():
+            n_restarts = sum(1 for _ in root.rglob("seed_*.pt"))
+            shutil.rmtree(root)
+            print(
+                f"Removed {_plural(n_restarts, 'stored restart')} from {root}.",
+                file=sys.stderr,
+            )
+
+
+def _require_complete_store(
+    options: DecompositionOptions | ReplicabilityOptions,
+    plan: Sequence[_RankTask],
+) -> None:
+    """Refuse to collect while restarts of `plan` are missing or stale
+    (`collect` cannot fit), naming the jobs to run (`_job_tasks` order)."""
+    statuses = _store_statuses(options, plan)
+    per_job = options.distributed.tasks_per_job
+    problems: list[str] = []
+    jobs: set[int] = set()
+    for rank in dict.fromkeys(r for r, _ in plan):
+        positions = [i for i, (r, _) in enumerate(plan) if r == rank]
+        missing = [i for i in positions if statuses[i] == "missing"]
+        stale = [i for i in positions if statuses[i] == "stale"]
+        parts = []
+        if missing:
+            parts.append(f"{_plural(len(missing), 'restart')} missing")
+        if stale:
+            parts.append(
+                f"{_plural(len(stale), 'restart')} fitted with other settings "
+                "or another plan",
+            )
+        if parts:
+            problems.append(f"rank {rank}: {' and '.join(parts)}")
+            jobs.update(i // per_job for i in missing + stale)
+    if problems:
+        listed = ", ".join(str(job) for job in sorted(jobs))
+        raise ValueError(
+            f"{'; '.join(problems)}; run `run --job` for "
+            f"{'job' if len(jobs) == 1 else 'jobs'} {listed} first",
         )
 
 
@@ -912,16 +1014,22 @@ def _decomposition_plan(
     ]
 
 
-def plan_decomposition(options: DecompositionOptions) -> int:
+def plan_decomposition(options: DecompositionOptions, overwrite: bool = False) -> int:
     """`gmri decompose plan`: save `plan.json`; return the number of jobs.
 
-    An impossible PARAFAC2 rank is refused here, before any job runs.
+    An impossible PARAFAC2 rank is refused here, before any job runs. Says
+    on stderr which stored restarts the jobs will reuse or refit, or, with
+    `overwrite`, first removes the planned ranks' stored restarts.
     """
     data = _decomposition_input(options)
     if options.method == "parafac2":
         for rank in options.ranks:
             _check_parafac2_rank(data.data, rank)
     plan = _decomposition_plan(options, len(data.subjects))
+    if overwrite:
+        _remove_planned_stores(options)
+    else:
+        _report_store(options, plan)
     _write_plan(options)
     return n_jobs(plan, options.distributed.tasks_per_job)
 
@@ -929,20 +1037,23 @@ def plan_decomposition(options: DecompositionOptions) -> int:
 def run_decomposition_job(output_dir: Path, job: int) -> int:
     """`gmri decompose run --job N`: fit job `N`'s restarts into the store.
 
-    Settings come from `plan.json`. Restarts already in the store are
-    skipped, so a re-queued job resumes. Returns the number of tasks.
+    Settings come from `plan.json`. Restarts already stored with these
+    settings are skipped, so a re-queued job resumes; ones stored with other
+    settings are refitted and overwritten. Prints what each rank fitted,
+    reused and refitted. Returns the number of tasks.
     """
     options = load_plan(output_dir, DecompositionOptions)
     data = _decomposition_input(options)
     plan = _decomposition_plan(options, len(data.subjects))
     tasks = _job_tasks(plan, job, options.distributed.tasks_per_job)
-    _run_job_tasks(
+    counts = _run_job_tasks(
         tasks,
         data,
         options,
         options.fit.restart_procs,
         _fit_options(options.fit, options.method),
     )
+    _print_job_counts(counts)
     return len(tasks)
 
 
@@ -951,6 +1062,7 @@ def collect_decomposition(output_dir: Path) -> list[Path]:
     `run_decomposition`."""
     options = load_plan(output_dir, DecompositionOptions)
     data = _decomposition_input(options)
+    _require_complete_store(options, _decomposition_plan(options, len(data.subjects)))
     fit_kwargs = _fit_options(options.fit, options.method)
     plan = plan_restarts(len(data.subjects), options.fit.restarts)
     return _finish_ranks(options, plan, fit_kwargs, data)
@@ -1147,28 +1259,39 @@ def _flatten(plans: dict[int, list[FitTask]]) -> list[_RankTask]:
     return [(rank, task) for rank, plan in plans.items() for task in plan]
 
 
-def plan_replicability_jobs(options: ReplicabilityOptions) -> int:
-    """`gmri replicability plan`: save `plan.json`; return the number of jobs."""
+def plan_replicability_jobs(
+    options: ReplicabilityOptions,
+    overwrite: bool = False,
+) -> int:
+    """`gmri replicability plan`: save `plan.json`; return the number of
+    jobs. Reports or, with `overwrite`, first removes the stored restarts
+    as `plan_decomposition` does."""
     data = _decomposition_input(options)
     plan = _flatten(_replicability_plans(options, data))
+    if overwrite:
+        _remove_planned_stores(options)
+    else:
+        _report_store(options, plan)
     _write_plan(options)
     return n_jobs(plan, options.distributed.tasks_per_job)
 
 
 def run_replicability_job(output_dir: Path, job: int) -> int:
     """`gmri replicability run --job N`: fit job `N`'s split/fold restarts,
-    with the settings from `plan.json`. Returns the number of tasks."""
+    with the settings from `plan.json`, resuming and refitting as
+    `run_decomposition_job` does. Returns the number of tasks."""
     options = load_plan(output_dir, ReplicabilityOptions)
     data = _decomposition_input(options)
     plan = _flatten(_replicability_plans(options, data))
     tasks = _job_tasks(plan, job, options.distributed.tasks_per_job)
-    _run_job_tasks(
+    counts = _run_job_tasks(
         tasks,
         data,
         options,
         options.n_procs,
         _fit_options(options.fit, options.method),
     )
+    _print_job_counts(counts)
     return len(tasks)
 
 
@@ -1177,9 +1300,11 @@ def collect_replicability(output_dir: Path) -> Path:
     `replicability.csv`, as `run_replicability` writes it."""
     options = load_plan(output_dir, ReplicabilityOptions)
     data = _decomposition_input(options)
+    plans = _replicability_plans(options, data)
+    _require_complete_store(options, _flatten(plans))
     fit_kwargs = _fit_options(options.fit, options.method)
     rows = []
-    for rank, plan in _replicability_plans(options, data).items():
+    for rank, plan in plans.items():
         summaries = _collect_rank(plan, options, rank, fit_kwargs)
         rows.extend(_score_rows(options, rank, _engine(options).compute_fms(summaries)))
     return _write_replicability(options, rows)

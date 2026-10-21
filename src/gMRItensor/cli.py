@@ -366,6 +366,13 @@ def _add_fit_command(
         help="results directory",
     )
     _add_fit_arguments(plan, required=True, replicability=replicability)
+    plan.add_argument(
+        "--overwrite",
+        action="store_true",
+        help="remove the stored restarts of the planned ranks first, whatever "
+        "their settings (by default the jobs reuse those stored with the same "
+        "settings and refit the others)",
+    )
     if replicability:
         _add_replicability_arguments(plan, required=True)
     collect = actions.add_parser(
@@ -812,9 +819,19 @@ def _run_fit_command(args: argparse.Namespace) -> None:
         )
     elif args.action == "plan":
         if decompose:
-            print(pipeline.plan_decomposition(_decomposition_options(args)))
+            print(
+                pipeline.plan_decomposition(
+                    _decomposition_options(args),
+                    overwrite=args.overwrite,
+                ),
+            )
         else:
-            print(pipeline.plan_replicability_jobs(_replicability_options(args)))
+            print(
+                pipeline.plan_replicability_jobs(
+                    _replicability_options(args),
+                    overwrite=args.overwrite,
+                ),
+            )
     elif args.job is not None:
         _refuse_planned_flags(args)
         (

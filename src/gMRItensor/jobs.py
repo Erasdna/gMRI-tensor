@@ -29,6 +29,8 @@ from dataclasses import dataclass
 from multiprocessing import get_context
 from pathlib import Path
 from typing import Any
+from typing import Literal
+from typing import NamedTuple
 from typing import Protocol
 from typing import TYPE_CHECKING
 from typing import TypeVar
@@ -231,14 +233,24 @@ def fit_task(
     )
 
 
+#: What a store holds for a task: nothing, a usable result, or a result it
+#: cannot use (fitted with other settings, for another task, or unreadable).
+StoreStatus = Literal["missing", "current", "stale"]
+
+
 class ResultStore(Protocol):
     """Where `run_tasks` puts results and `collect` reads them."""
 
     def save(self, result: RestartResult) -> None:
+        """Store `result`, replacing any result for its task."""
         ...
 
     def load(self, task: FitTask) -> RestartResult | None:
         """The stored result for `task`, or None if it is missing."""
+        ...
+
+    def status(self, task: FitTask) -> StoreStatus:
+        """Whether `task`'s result is missing, usable or stale."""
         ...
 
 
@@ -253,6 +265,9 @@ class InMemoryStore:
 
     def load(self, task: FitTask) -> RestartResult | None:
         return self.results.get(task)
+
+    def status(self, task: FitTask) -> StoreStatus:
+        return "current" if task in self.results else "missing"
 
 
 _SLUG_PART = re.compile(r"^[A-Za-z0-9.-]+$")
@@ -363,42 +378,54 @@ class DirectoryStore:
             os.fsync(file.fileno())
         os.replace(tmp, path)
 
-    def load(self, task: FitTask) -> RestartResult | None:
-        """The stored result for `task`, or None if it is missing.
-
-        Raises `ValueError` if the file cannot be read, holds another task,
-        or was saved with other `settings`.
-        """
+    def _read(self, task: FitTask) -> tuple[dict[str, Any] | None, str | None]:
+        """`task`'s stored record (None if missing or unreadable) and, if
+        it cannot be used, why."""
         path = self.path(task)
         if not path.exists():
-            return None
+            return None, None
         try:
             record = torch.load(path, weights_only=True)
         except Exception as error:  # any unpickling failure: a damaged file
             # Only the type: torch's message spans lines and suggests
             # weights_only=False, which would run code from the file.
-            raise ValueError(
-                f"{path} cannot be read ({type(error).__name__}); delete it to "
-                "fit that restart again",
-            ) from None
+            return None, f"{path} cannot be read ({type(error).__name__})"
         if self.settings is not None and record.get("settings") != self.settings:
-            raise ValueError(
+            return record, (
                 f"{path} was fitted with other settings (input, tensor or fit "
-                f"options) than now; use a fresh store, or delete {self.root} "
-                "to fit again",
+                "options) than now"
             )
         stored = record["task"]
-        stored_task = FitTask(
-            stored["group"],
-            tuple(stored["indices"]),
-            stored["seed"],
-        )
+        stored_task = FitTask(stored["group"], tuple(stored["indices"]), stored["seed"])
         if stored_task != task:
-            raise ValueError(
-                f"{path} holds {stored_task}, not the requested {task}. The "
-                "store was written by a different plan (other splits, subject "
-                "set or n_restarts); use a fresh directory.",
+            return record, (
+                f"{path} holds {stored_task}, not the requested {task}: it was "
+                "written by a different plan (other splits, subject set or "
+                "n_restarts)"
             )
+        return record, None
+
+    def status(self, task: FitTask) -> StoreStatus:
+        """`"missing"`, `"current"`, or `"stale"` for a result that cannot
+        be used: unreadable, for another task, or saved with other
+        `settings`. Never raises; `run_tasks` refits stale results."""
+        if not self.path(task).exists():
+            return "missing"
+        return "stale" if self._read(task)[1] is not None else "current"
+
+    def load(self, task: FitTask) -> RestartResult | None:
+        """The stored result for `task`, or None if it is missing.
+
+        Raises `ValueError` for a stale result (see `status`): it has to be
+        fitted again, or deleted, before it can be collected.
+        """
+        record, problem = self._read(task)
+        if problem is not None:
+            raise ValueError(
+                f"{problem}; fit it again (`run --job`), or delete it",
+            )
+        if record is None:
+            return None
         diagnostics = record["diagnostics"]
         return RestartResult(
             task=task,
@@ -434,6 +461,34 @@ def _with_subsets(
         yield task, subset
 
 
+class TaskCounts(NamedTuple):
+    """What `run_tasks` did: tasks fitted for the first time, reused from
+    the store, and fitted again over a stale result."""
+
+    fitted: int
+    reused: int
+    refitted: int
+
+
+def pending_tasks(
+    tasks: Sequence[FitTask],
+    store: ResultStore,
+    resume: bool = True,
+) -> tuple[list[FitTask], TaskCounts]:
+    """The tasks to fit and what that means for the store. With `resume`,
+    tasks with a current result are skipped and stale ones refitted;
+    without it every task is fitted, as new."""
+    if not resume:
+        return list(tasks), TaskCounts(len(tasks), 0, 0)
+    statuses = [store.status(task) for task in tasks]
+    pending = [task for task, status in zip(tasks, statuses) if status != "current"]
+    return pending, TaskCounts(
+        fitted=statuses.count("missing"),
+        reused=statuses.count("current"),
+        refitted=statuses.count("stale"),
+    )
+
+
 def run_tasks(
     tasks: Sequence[FitTask],
     data: Data,
@@ -445,12 +500,14 @@ def run_tasks(
     progress_bar: bool = True,
     resume: bool = True,
     **kwargs: Any,
-) -> None:
+) -> TaskCounts:
     """Fit `tasks` and save every result, failures included, to `store`.
 
-    With `resume` (the default), tasks already in `store` are skipped, so a
-    re-queued job resumes rather than refitting. Without it every task is
-    refitted and overwrites what the store held. Each group's subset is
+    With `resume` (the default), tasks with a current result in `store`
+    are skipped, so a re-queued job resumes rather than refitting; stale
+    results (see `DirectoryStore.status`) are refitted and overwritten.
+    Without it every task is refitted and overwrites what the store held.
+    Returns what was fitted, reused and refitted (`TaskCounts`). Each group's subset is
     built (and `transform`ed) once, in this process, as the tasks reach it.
 
     `kwargs` are `run_*_decomposition_repeated` options -- see `fit_task`.
@@ -481,7 +538,7 @@ def run_tasks(
             "compute_device) to use multiple processes.",
         )
 
-    pending = [task for task in tasks if not resume or store.load(task) is None]
+    pending, counts = pending_tasks(tasks, store, resume)
     compute_kwargs = _compute_kwargs(method, rank, resolved)
     memory_efficient = resolved["use_memory_efficient_khatri_rao"]
     task_args = (
@@ -498,7 +555,7 @@ def run_tasks(
         ):
             store.save(_run_task(args))
             _release_cuda_cache(fit_device)
-        return
+        return counts
 
     threads_per_proc = max(1, torch.get_num_threads() // n_procs)
     with get_context("spawn").Pool(
@@ -513,6 +570,7 @@ def run_tasks(
             desc=f"Fitting restarts (parallel, {n_procs} procs)",
         ):
             store.save(result)
+    return counts
 
 
 @dataclass(frozen=True)
