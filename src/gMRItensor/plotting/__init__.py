@@ -7,6 +7,8 @@ from gMRItensor.plotting.reproducibility import plot_reproducibility
 from gMRItensor.plotting.roi_evolution import figure_path
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_panels
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_rows
+from gMRItensor.plotting.roi_overview import plot_region_columns
+from gMRItensor.plotting.roi_overview import plot_roi_overview
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
 from gMRItensor.plotting.spatial_mode import plot_spatial_mode
 from gMRItensor.plotting.subject_mode import plot_subject_mode
@@ -26,6 +28,8 @@ __all__ = [
     "evolving_factors_to_numpy",
     "plot_roi_evolution_rows",
     "plot_roi_evolution_panels",
+    "plot_roi_overview",
+    "plot_region_columns",
     "figure_path",
     "save_figure",
     "JOURNAL_WIDTHS",

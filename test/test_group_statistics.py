@@ -7,6 +7,7 @@ import pytest
 from gMRItensor.group_statistics import Aggregate
 from gMRItensor.group_statistics import aggregate_subjects
 from gMRItensor.group_statistics import compare_groups_over_time
+from gMRItensor.group_statistics import flag_roi_values
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import significance_summary
 from gMRItensor.group_statistics import subjects_outside_sd
@@ -381,3 +382,71 @@ def test_a_time_point_where_every_value_ties_is_not_tested() -> None:
 
     assert list(table["timepoint"]) == [6]
     assert np.isfinite(table["p_adj"].astype(float)).all()
+
+
+def _label_values(n: int = 12) -> pd.DataFrame:
+    """`n` subjects x labels 1, 2 x time points 4, 24 of `median`, spread
+    evenly over [1, 1 + 0.01 (n - 1)] per cell: |robust z| < 1.5 for all."""
+    rows = [
+        {
+            "subject": f"s{i:02d}",
+            "group": "AB"[i % 2],
+            "timepoint": t,
+            "label": label,
+            "median": 1.0 + 0.01 * ((5 * i + label + t) % n),
+        }
+        for i in range(n)
+        for t in (4, 24)
+        for label in (1, 2)
+    ]
+    return pd.DataFrame(rows)
+
+
+def _at(frame: pd.DataFrame, subject: str, t: int, label: int) -> pd.Series:
+    return (
+        (frame["subject"] == subject)
+        & (frame["timepoint"] == t)
+        & (frame["label"] == label)
+    )
+
+
+def test_flag_roi_values_flags_planted_values_per_label_and_session() -> None:
+    frame = _label_values()
+    frame.loc[_at(frame, "s03", 24, 2), "median"] = 5.0  # extreme in one ROI
+    frame.loc[_at(frame, "s07", 4, 1), "median"] = -1.0  # failed scan
+
+    flags = flag_roi_values(frame, "median")
+
+    found = set(zip(flags["subject"], flags["timepoint"], flags["label"]))
+    assert found == {("s03", 24, 2), ("s07", 4, 1)}
+    assert list(flags.columns) == [*frame.columns, "robust_z"]
+    s03 = flags[flags["subject"] == "s03"].iloc[0]
+    others = frame[(frame["timepoint"] == 24) & (frame["label"] == 2)]["median"]
+    mad = (others - others.median()).abs().median()
+    assert s03["robust_z"] == pytest.approx(
+        (5.0 - others.median()) / (1.4826 * mad),
+    )
+    assert (flags.loc[flags["subject"] == "s07", "robust_z"] < 0).all()
+
+
+def test_flag_roi_values_threshold_is_a_parameter() -> None:
+    frame = _label_values()
+    frame.loc[_at(frame, "s03", 24, 2), "median"] = 5.0
+
+    assert len(flag_roi_values(frame, "median", z_cut=1e6)) == 0
+    assert len(flag_roi_values(frame, "median", z_cut=0.5)) > 1
+
+
+def test_flag_roi_values_skips_small_samples_tied_values_and_nan() -> None:
+    few = _label_values(n=4)
+    few.loc[_at(few, "s01", 4, 1), "median"] = 100.0
+    tied = _label_values()
+    tied["median"] = 0.0
+    tied.loc[_at(tied, "s01", 4, 1), "median"] = 1.0  # MAD = 0
+    missing = _label_values()
+    missing.loc[_at(missing, "s01", 4, 1), "median"] = np.nan
+
+    assert flag_roi_values(few, "median").empty
+    assert flag_roi_values(tied, "median").empty
+    assert flag_roi_values(missing, "median").empty
+    assert len(flag_roi_values(few, "median", min_n=4)) == 1

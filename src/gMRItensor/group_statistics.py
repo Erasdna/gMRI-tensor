@@ -227,6 +227,47 @@ def subjects_outside_sd(
     return worst.loc[worst["z"].abs() > n_sd, columns].reset_index(drop=True)
 
 
+# 1.4826 * MAD estimates the SD of normally distributed data.
+_MAD_TO_SD = 1.4826
+
+
+def flag_roi_values(
+    long_df: pd.DataFrame,
+    value: str,
+    z_cut: float = 3.5,
+    min_n: int = 5,
+    by: Sequence[str] = ("timepoint", "label"),
+) -> pd.DataFrame:
+    """Values far from the rest of the cohort, judged per `by` (ROI and
+    session): the rows of `long_df` with `|robust_z| > z_cut`, plus a
+    `robust_z` column.
+
+    `robust_z = (x - median) / (1.4826 * MAD)` over all subjects with a
+    finite `value` in that `by` cell, regardless of group, MAD being the
+    median absolute deviation from the median: the modified z-score of
+    Iglewicz and Hoaglin (1993), whose recommended cut-off is 3.5. Median
+    and MAD keep the outliers sought from inflating the scale they are
+    judged against. Cells with fewer than `min_n` values, or MAD = 0, are
+    not judged. A screening heuristic with no multiple-comparison
+    correction: a flag means "look at this scan", not "exclude".
+
+    Iglewicz, B. and Hoaglin, D. C. (1993). How to Detect and Handle
+    Outliers. ASQC Basic References in Quality Control: Statistical
+    Techniques, vol. 16. Milwaukee, WI: ASQC Quality Press.
+    """
+    observed = long_df[np.isfinite(long_df[value].astype(float))]
+    cells = observed.groupby(list(by))[value]
+    median = cells.transform("median")
+    deviation = (observed[value] - median).abs()
+    scale = _MAD_TO_SD * deviation.groupby([observed[c] for c in by]).transform(
+        "median",
+    )
+    judged = (cells.transform("count") >= min_n) & (scale > 0)
+    z = (observed[value] - median) / scale.where(judged)
+    flagged = z.abs() > z_cut
+    return observed[flagged].assign(robust_z=z[flagged]).reset_index(drop=True)
+
+
 def compare_groups_over_time(
     long_df: pd.DataFrame,
     categories: list[str],

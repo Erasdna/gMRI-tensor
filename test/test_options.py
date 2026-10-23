@@ -191,6 +191,7 @@ def test_statistics_plot_options(tmp_path: Path) -> None:
         ({"relaxivity": -1.0}, "relaxivity"),
         ({"layout": "grid"}, "layout"),
         ({"sd_bands": True, "layout": "panels"}, "--sd-bands needs --layout rows"),
+        ({"overview": True, "overview_z": 0.0}, "overview_z must be > 0"),
     ]
     for bad, match in cases:
         with pytest.raises(ValueError, match=match):

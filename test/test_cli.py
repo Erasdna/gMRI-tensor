@@ -85,6 +85,9 @@ def test_cli_runs_every_command(
                 "median",
                 "median_concentration",
                 "--sd-bands",
+                "--overview",
+                "--overview-z",
+                3,
                 "--formats",
                 "png",
                 "--dpi",
@@ -96,6 +99,7 @@ def test_cli_runs_every_command(
     assert "group differences" in capsys.readouterr().out
     assert (results / "roi_analysis" / "summary.csv").exists()
     assert (results / "roi_analysis" / "cohort__median.parquet").exists()
+    assert (results / "roi_analysis" / "overview_flags__median.csv").exists()
 
     assert _run(["decompose", "run", *_fit_args(results, "decomposition")]) == 0
     model = results / "decomposition" / "parafac2_rank_1"
@@ -300,6 +304,11 @@ def test_cli_reports_errors_on_one_line(
     ]
     assert _run(statistics) == 2
     assert "--sd-bands needs --layout rows" in capsys.readouterr().err
+    overview = [*statistics[:-3], "--overview", "--overview-z", 0]
+    assert _run(overview) == 2
+    assert "overview_z must be > 0" in capsys.readouterr().err
+    assert _run([*statistics[:-3], "--overview-z", 3]) == 2
+    assert "--overview-z needs --overview" in capsys.readouterr().err
 
 
 def test_cli_cmf(synthetic_study: Any) -> None:
@@ -596,7 +605,10 @@ def test_cli_parses_fit_options_and_modes() -> None:
         ),
         (["replicability", "run", "--help"], ["--job", "--engine"]),
         (["plot", "--help"], ["statistics", "decomposition"]),
-        (["plot", "statistics", "--help"], ["--region", "--rois", "--relaxivity"]),
+        (
+            ["plot", "statistics", "--help"],
+            ["--region", "--rois", "--relaxivity", "--overview", "Iglewicz"],
+        ),
         (
             ["plot", "decomposition", "--help"],
             ["--segmentation", "--mode-grid", "--slices"],

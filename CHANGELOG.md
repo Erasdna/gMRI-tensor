@@ -1,5 +1,10 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- **ROI overview:** `plot statistics --overview` draws every label for every subject and session, one row per session (all parenchyma, all CSF, and one column per region), and flags values with |modified z-score| > 3.5 among all subjects for that label and session (`--overview-z`; Iglewicz & Hoaglin 1993). Each flagged value is ringed and named in the figures and listed in `roi_analysis/overview_flags__<statistic>.csv`. See `docs/cli.md`.
+
 ## 0.2.0
 
 ### Added

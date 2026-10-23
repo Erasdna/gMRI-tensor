@@ -8,6 +8,8 @@ import matplotlib.pyplot as plt
 import nibabel as nib
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 import pytest
 import tensorly as tl
 import torch
@@ -315,6 +317,79 @@ def test_run_statistics_plots_unknown_label_writes_nothing(
     with pytest.raises(ValueError, match="99"):
         run_statistics_plots(statistics_options(synthetic_study, rois=("99",)))
     assert not (synthetic_study.root / "results" / "roi_analysis").exists()
+
+
+OVERVIEW_FIGURES = ("parenchyma", "csf", "parenchyma_regions", "csf_regions")
+OVERVIEW_COLUMNS = [
+    "time_point",
+    "label",
+    "region",
+    "tissue",
+    "subject",
+    "group",
+    "value",
+    "robust_z",
+]
+
+
+def test_run_statistics_plots_overview_figures_and_flags(
+    synthetic_study: Any,
+) -> None:
+    results = preprocess(synthetic_study)
+    roi_signal = results / "data" / "roi_signal.parquet"
+    table = pq.read_table(roi_signal)
+    signal = table.to_pandas()
+    # sub-02 is far off in label 10 at 24 h.
+    far = (
+        (signal["subject"] == "sub-02")
+        & (signal["time_point"] == 24)
+        & (signal["label"] == 10)
+    )
+    signal.loc[far, "median"] *= 50
+    pq.write_table(
+        pa.Table.from_pandas(signal, preserve_index=False).replace_schema_metadata(
+            table.schema.metadata,
+        ),
+        roi_signal,
+    )
+
+    result = run_statistics_plots(
+        statistics_options(
+            synthetic_study,
+            rois=("4",),
+            statistics=("median", "total_amount"),
+            overview=True,
+        ),
+    )
+
+    for statistic in ("median", "total_amount"):
+        overview = results / "figures" / "roi" / "overview" / statistic
+        for name in OVERVIEW_FIGURES:
+            assert overview / f"{name}.png" in result.figures
+    flags = pd.read_csv(results / "roi_analysis" / "overview_flags__median.csv")
+    assert list(flags.columns) == OVERVIEW_COLUMNS
+    planted = (flags["subject"] == "sub-02") & (flags["label"] == 10)
+    assert flags.loc[planted, "time_point"].tolist() == [24]
+    row = flags[planted].iloc[0]
+    assert (row["region"], row["tissue"], row["group"]) == (
+        "Subcortical GM",
+        "parenchyma",
+        "PD",
+    )
+    assert row["robust_z"] > 3.5
+    total = pd.read_csv(results / "roi_analysis" / "overview_flags__total_amount.csv")
+    assert list(total.columns) == OVERVIEW_COLUMNS
+
+
+def test_run_statistics_plots_without_overview_writes_none(
+    synthetic_study: Any,
+) -> None:
+    results = preprocess(synthetic_study)
+
+    run_statistics_plots(statistics_options(synthetic_study, rois=("4",)))
+
+    assert not (results / "figures" / "roi" / "overview").exists()
+    assert not list((results / "roi_analysis").glob("overview_flags__*"))
 
 
 def test_format_significance_summary() -> None:

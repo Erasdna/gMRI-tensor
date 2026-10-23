@@ -115,6 +115,111 @@ def is_csf(labels: np.ndarray, csf_offset: int = 10000) -> np.ndarray:
     return (labels >= csf_offset) | np.isin(labels, (*VENTRICLE_IDS, CSF_ID))
 
 
+#: A named, sorted list of label ids, as `overview_blocks` returns them.
+Block = tuple[str, list[int]]
+
+
+def _blocks(
+    candidates: Sequence[tuple[str, Sequence[int]]],
+    labels: set[int],
+) -> list[Block]:
+    """The `labels` in each candidate, in order, each label in its first
+    candidate only; empty blocks are left out. Assigned labels are removed
+    from `labels`."""
+    blocks = []
+    for name, ids in candidates:
+        present = sorted(labels.intersection(ids))
+        labels.difference_update(present)
+        if present:
+            blocks.append((name, present))
+    return blocks
+
+
+def _other(labels: set[int]) -> list[Block]:
+    return [("Other", sorted(labels))] if labels else []
+
+
+def overview_blocks(
+    labels: np.ndarray,
+    csf_offset: int = 10000,
+) -> tuple[list[Block], list[Block]]:
+    """The ROI overview's x-axis order: `(parenchyma, csf)` blocks of `labels`.
+
+    Parenchyma: Subcortical GM, WM, Cerebellum, Brainstem, Other, Cortex lh
+    (1000s), Cortex rh (2000s). CSF (`is_csf`): Ventricles + CSF (24),
+    Infratentorial, Pons, Cortical CSF lh and rh (the cortical ranges +
+    `csf_offset`), Other. Ids are sorted within a block; empty blocks are
+    left out.
+    """
+    labels = np.unique(np.asarray(labels)).astype(int)
+    csf_mask = is_csf(labels, csf_offset)
+    presets = get_roi_presets(csf_offset)
+    remaining = set(labels[~csf_mask].tolist())
+    cortex = _blocks(
+        [("Cortex lh", range(1000, 2000)), ("Cortex rh", range(2000, 3000))],
+        remaining,
+    )
+    parenchyma = _blocks(
+        [
+            ("Subcortical GM", presets["subcortical_grey_matter"]),
+            ("WM", presets["white_matter"]),
+            ("Cerebellum", presets["cerebellum"]),
+            ("Brainstem", presets["brainstem"]),
+        ],
+        remaining,
+    )
+    parenchyma += _other(remaining) + cortex
+
+    remaining = set(labels[csf_mask].tolist())
+    csf = _blocks(
+        [
+            ("Ventricles + CSF", (*presets["ventricles"], CSF_ID)),
+            ("Infratentorial", presets["cerebellum_csf"]),
+            ("Pons", presets["brainstem_csf"]),
+            ("Cortical CSF lh", range(csf_offset + 1000, csf_offset + 2000)),
+            ("Cortical CSF rh", range(csf_offset + 2000, csf_offset + 3000)),
+        ],
+        remaining,
+    )
+    return parenchyma, csf + _other(remaining)
+
+
+def overview_regions(
+    labels: np.ndarray,
+    csf_offset: int = 10000,
+) -> tuple[list[Block], list[Block]]:
+    """The ROI overview's region columns: `(parenchyma, csf)` presets
+    restricted to `labels`, empty ones left out. The cortex has no
+    parenchyma column (the all-ROI figure shows it)."""
+    presets = get_roi_presets(csf_offset)
+    present = set(np.unique(np.asarray(labels)).astype(int).tolist())
+    parenchyma = _blocks(
+        [
+            (roi_display_name(name), presets[name])
+            for name in (
+                "subcortical_grey_matter",
+                "white_matter",
+                "cerebellum",
+                "brainstem",
+            )
+        ],
+        set(present),
+    )
+    csf = _blocks(
+        [
+            (
+                roi_display_name("cortical_grey_matter_csf"),
+                presets["cortical_grey_matter_csf"],
+            ),
+            ("Ventricles + CSF (24)", (*presets["ventricles"], CSF_ID)),
+            (roi_display_name("cerebellum_csf"), presets["cerebellum_csf"]),
+            (roi_display_name("brainstem_csf"), presets["brainstem_csf"]),
+        ],
+        set(present),
+    )
+    return parenchyma, csf
+
+
 def parse_region(spec: str, csf_offset: int = 10000) -> tuple[str, np.ndarray]:
     """A `--region` value: a preset name, or `name=ids` with ids such as
     `17,53,1001-1035` (comma-separated, `a-b` inclusive ranges)."""

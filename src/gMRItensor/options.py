@@ -367,7 +367,9 @@ class StatisticsPlotOptions:
     With neither, every preset region is used. `relaxivity` (default 3.2
     when a concentration statistic is requested) converts ΔR1 to mM.
     `sd_bands` draws the cohort mean +/- 1, 2 and 3 SD behind the subject
-    curves (rows layout only).
+    curves (rows layout only). `overview` also draws every label for every
+    subject and session, flagging values with |robust z| > `overview_z`
+    (`flag_roi_values`).
     """
 
     roi_signal: Path
@@ -382,6 +384,8 @@ class StatisticsPlotOptions:
     min_group_n: int = 2
     layout: Literal["rows", "panels"] = "rows"
     sd_bands: bool = False
+    overview: bool = False
+    overview_z: float = 3.5
     page_width: str | float = "double"
     formats: tuple[str, ...] = ("pdf", "png")
     dpi: int = 300
@@ -419,6 +423,10 @@ class StatisticsPlotOptions:
         _check(
             not self.sd_bands or self.layout == "rows",
             "--sd-bands needs --layout rows (panels have no subject curves)",
+        )
+        _check(
+            self.overview_z > 0,
+            f"overview_z must be > 0, got {self.overview_z}",
         )
         _check_figure(self.page_width, self.dpi)
         _check_subject_columns(

@@ -5,6 +5,8 @@ from gMRItensor.roi_groups import add_concentration
 from gMRItensor.roi_groups import aggregate_roi_signal
 from gMRItensor.roi_groups import get_roi_presets
 from gMRItensor.roi_groups import is_csf
+from gMRItensor.roi_groups import overview_blocks
+from gMRItensor.roi_groups import overview_regions
 from gMRItensor.roi_groups import parse_region
 from gMRItensor.roi_groups import roi_display_name
 
@@ -218,3 +220,64 @@ def test_add_concentration() -> None:
     assert s0["total_amount"] == pytest.approx(0.75 * 3 * 2.0 * 1e-6)
     with pytest.raises(ValueError, match="relaxivity"):
         add_concentration(frame, relaxivity=0.0)
+
+
+# aparc+aseg-like labels plus the CSF atlas: 1004/2004 (corpus callosum) and
+# 13/63 are absent, 28 (VentralDC), 30 (vessel) and 77 (WM hypo) present.
+_PARENCHYMA_LABELS = (10, 11, 12, 17, 28, 30, 2, 41, 77, 7, 8, 46, 47, 16)
+_CORTEX = (1001, 1002, 1035, 2001, 2035)
+_CSF_LABELS = (4, 43, 24, 10004, 10007, 10046, 10016, 11001, 12035, 15000)
+
+
+def test_overview_blocks_order_and_split() -> None:
+    labels = np.array([*_CSF_LABELS, *_CORTEX, *_PARENCHYMA_LABELS])
+
+    parenchyma, csf = overview_blocks(labels)
+
+    assert parenchyma == [
+        ("Subcortical GM", [10, 11, 12, 17]),
+        ("WM", [2, 41, 77]),
+        ("Cerebellum", [7, 8, 46, 47]),
+        ("Brainstem", [16]),
+        ("Other", [28, 30]),
+        ("Cortex lh", [1001, 1002, 1035]),
+        ("Cortex rh", [2001, 2035]),
+    ]
+    assert csf == [
+        ("Ventricles + CSF", [4, 24, 43, 10004]),
+        ("Infratentorial", [10007, 10046]),
+        ("Pons", [10016]),
+        ("Cortical CSF lh", [11001]),
+        ("Cortical CSF rh", [12035]),
+        ("Other", [15000]),
+    ]
+    split = [label for _, ids in parenchyma for label in ids]
+    assert not is_csf(np.array(split)).any()
+    assert is_csf(np.array([label for _, ids in csf for label in ids])).all()
+
+
+def test_overview_blocks_drop_empty_blocks_and_follow_the_offset() -> None:
+    parenchyma, csf = overview_blocks(np.array([2, 41, 5004, 5016]), csf_offset=5000)
+
+    assert parenchyma == [("WM", [2, 41])]
+    assert csf == [("Ventricles + CSF", [5004]), ("Pons", [5016])]
+
+
+def test_overview_regions_keep_only_present_labels() -> None:
+    labels = np.array([*_CSF_LABELS, *_CORTEX, *_PARENCHYMA_LABELS])
+
+    parenchyma, csf = overview_regions(labels)
+
+    assert parenchyma == [
+        ("Subcortical GM", [10, 11, 12, 17]),
+        ("WM", [2, 41, 77]),
+        ("Cerebellum", [7, 8, 46, 47]),
+        ("Brainstem", [16]),
+    ]
+    assert csf == [
+        ("Supratentorial CSF", [11001, 12035]),
+        ("Ventricles + CSF (24)", [4, 24, 43, 10004]),
+        ("Infratentorial CSF", [10007, 10046]),
+        ("Pontine cistern", [10016]),
+    ]
+    assert overview_regions(np.array([2])) == ([("WM", [2])], [])

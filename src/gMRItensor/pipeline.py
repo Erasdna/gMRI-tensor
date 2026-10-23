@@ -33,6 +33,7 @@ from gMRItensor.decomposition import setup_backend
 from gMRItensor.decomposition.parafac2 import _check_parafac2_rank
 from gMRItensor.group_statistics import aggregate_subjects
 from gMRItensor.group_statistics import compare_groups_over_time
+from gMRItensor.group_statistics import flag_roi_values
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import significance_summary
 from gMRItensor.group_statistics import subjects_outside_sd
@@ -82,6 +83,9 @@ from gMRItensor.plotting.reproducibility import plot_reproducibility
 from gMRItensor.plotting.roi_evolution import figure_path
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_panels
 from gMRItensor.plotting.roi_evolution import plot_roi_evolution_rows
+from gMRItensor.plotting.roi_evolution import statistic_label
+from gMRItensor.plotting.roi_overview import plot_region_columns
+from gMRItensor.plotting.roi_overview import plot_roi_overview
 from gMRItensor.plotting.spatial_mode import plot_spatial_mode
 from gMRItensor.plotting.subject_mode import plot_subject_mode
 from gMRItensor.plotting.time_mode import plot_time_mode
@@ -102,6 +106,8 @@ from gMRItensor.reproducibility import write_reproducibility
 from gMRItensor.roi_groups import add_concentration
 from gMRItensor.roi_groups import aggregate_roi_signal
 from gMRItensor.roi_groups import is_csf
+from gMRItensor.roi_groups import overview_blocks
+from gMRItensor.roi_groups import overview_regions
 from gMRItensor.volumes import expand_roi_mode_to_voxels
 from nibabel.nifti1 import Nifti1Image
 
@@ -296,6 +302,96 @@ def _subject_groups(
     return {s: group for s, group in zip(subjects, groups) if pd.notna(group)}
 
 
+OVERVIEW_FLAG_COLUMNS = [
+    "time_point",
+    "label",
+    "region",
+    "tissue",
+    "subject",
+    "group",
+    "value",
+    "robust_z",
+]
+
+
+def _overview(
+    options: StatisticsPlotOptions,
+    roi_signal: pd.DataFrame,
+    groups: dict[str, Any],
+    signal: str,
+) -> list[Path]:
+    """`--overview`: every label of `roi_signal` for every subject with a
+    group and every session, per statistic. Writes the flagged values
+    (`flag_roi_values`) to `roi_analysis/overview_flags__<statistic>.csv`
+    and four figures to `figures/roi/overview/<statistic>/`: `parenchyma`
+    and `csf` (all labels, `overview_blocks`) and `parenchyma_regions` and
+    `csf_regions` (`overview_regions`); a figure without labels is skipped.
+    """
+    labels = aggregate_roi_signal(roi_signal, labels="all")
+    if any(s in CONCENTRATION_STATISTICS for s in options.statistics):
+        labels = add_concentration(labels, options.relaxivity or DEFAULT_RELAXIVITY)
+    labels = labels[labels["subject"].isin(groups)]
+    labels = labels.assign(
+        group=labels["subject"].map(groups),
+        label=labels["roi"].astype(int),
+    ).rename(columns={"time_point": "timepoint"})
+    ids = labels["label"].unique()
+    blocks = overview_blocks(ids, options.csf_offset)
+    regions = overview_regions(ids, options.csf_offset)
+    block_of = {label: name for part in blocks for name, b in part for label in b}
+    timepoints = sorted(labels["timepoint"].unique())
+    figures = (
+        ("parenchyma", plot_roi_overview, blocks[0], "All parenchyma ROIs"),
+        ("csf", plot_roi_overview, blocks[1], "All CSF ROIs"),
+        ("parenchyma_regions", plot_region_columns, regions[0], "Parenchyma regions"),
+        ("csf_regions", plot_region_columns, regions[1], "CSF regions"),
+    )
+
+    written: list[Path] = []
+    for statistic in options.statistics:
+        flags = flag_roi_values(labels, statistic, z_cut=options.overview_z)
+        tissue = np.where(
+            is_csf(flags["label"], options.csf_offset),
+            "csf",
+            "parenchyma",
+        )
+        table = flags.assign(
+            time_point=flags["timepoint"],
+            region=flags["label"].map(block_of),
+            tissue=tissue,
+            value=flags[statistic],
+        )[OVERVIEW_FLAG_COLUMNS]
+        table.sort_values(["time_point", "subject", "label"]).to_csv(
+            Path(options.output_dir)
+            / "roi_analysis"
+            / f"overview_flags__{statistic}.csv",
+            index=False,
+        )
+        directory = Path(options.output_dir) / "figures" / "roi" / "overview"
+        for name, plot, columns, title in figures:
+            if not columns:
+                continue
+            fig, _ = plot(
+                labels,
+                columns,
+                statistic,
+                flags,
+                statistic_label(statistic, signal),
+                title=title,
+                z_cut=options.overview_z,
+                timepoints=timepoints,
+            )
+            written.extend(
+                save_figure(
+                    fig,
+                    directory / statistic / name,
+                    options.formats,
+                    options.dpi,
+                ),
+            )
+    return written
+
+
 def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult:
     """`gmri plot statistics`: ROI signal -> group tables, summary, figures.
 
@@ -307,7 +403,8 @@ def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult
     cohort mean and SD behind the bands, and `outside_3sd__<stat>.csv`, the
     subjects named for a point beyond +/-3 SD). Then one figure per ROI and
     statistic, drawn from those saved tables, under
-    `<output_dir>/figures/roi/`.
+    `<output_dir>/figures/roi/`. With `overview`, also the overview figures
+    and flagged values of every label (`_overview`).
     """
     metadata = _metadata(options.roi_signal, "roi_signal")
     signal = metadata.get("signal", "delta_R1")
@@ -425,6 +522,8 @@ def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult
                     options.dpi,
                 ),
             )
+    if options.overview:
+        written.extend(_overview(options, roi_signal, groups, signal))
     write_provenance(options.output_dir, "plot_statistics", options)
     return StatisticsPlotResult(written, summary)
 

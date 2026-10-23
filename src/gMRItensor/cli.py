@@ -494,6 +494,22 @@ def _add_statistics_plot(kinds: Any) -> None:
         help="draw the cohort mean +/- 1, 2 and 3 SD behind the subject curves, "
         "to spot outlying subjects (rows layout only)",
     )
+    parser.add_argument(
+        "--overview",
+        action="store_true",
+        help="also draw every label for every subject and session (parenchyma, "
+        "CSF and their regions, under figures/roi/overview/) and list the "
+        "flagged values in roi_analysis/overview_flags__<statistic>.csv",
+    )
+    parser.add_argument(
+        "--overview-z",
+        type=float,
+        default=3.5,
+        metavar="Z",
+        help="flag a value when its modified z-score (x - median) / (1.4826 MAD) "
+        "among all subjects for that label and session exceeds Z in absolute "
+        "value (default: 3.5, Iglewicz & Hoaglin 1993)",
+    )
     _output_options(parser)
 
 
@@ -865,6 +881,8 @@ def _plot_reproducibility(args: argparse.Namespace) -> None:
 
 
 def _plot_statistics(args: argparse.Namespace) -> None:
+    if "--overview-z" in _given_flags(args) and not args.overview:
+        raise ValueError("--overview-z needs --overview")
     rois: Any = None
     if args.rois is not None:
         rois = "all" if args.rois == ["all"] else tuple(args.rois)
@@ -881,6 +899,8 @@ def _plot_statistics(args: argparse.Namespace) -> None:
         min_group_n=args.min_group_n,
         layout=args.layout,
         sd_bands=args.sd_bands,
+        overview=args.overview,
+        overview_z=args.overview_z,
         page_width=_page_width(args.page_width),
         formats=tuple(args.formats),
         dpi=args.dpi,

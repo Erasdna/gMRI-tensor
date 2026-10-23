@@ -40,7 +40,7 @@ Every step is a `gmri` command with plain arguments (run them with `uv run gmri 
 ```bash
 gmri preprocess --manifest scans.csv --output-dir results --input-type T1map --time-unit ms [--store-voxels]
 gmri plot statistics --roi-signal results/data/roi_signal.parquet --subject-info subjects.csv \
-    --group-variable diagnosis --output-dir results --statistics median total_amount [--sd-bands]
+    --group-variable diagnosis --output-dir results --statistics median total_amount [--sd-bands] [--overview]
 gmri decompose run --input results/data/roi_signal.parquet --output-dir results/parafac2 \
     --method parafac2 --ranks 2 3 4
 gmri replicability run --input results/data/roi_signal.parquet --output-dir results/replicability \
@@ -56,7 +56,7 @@ gmri plot reproducibility results/parafac2/restarts/parafac2_rank_3/reproducibil
 - **`plot statistics`:**
   - **Regions:** combines labels into regions, either presets or `--region name=ids`.
   - **Concentration:** converts to concentration (`--relaxivity`, default 3.2).
-  - **Output:** prints the significant group differences, writes one table per statistic and draws one figure per ROI. `--sd-bands` adds the cohort mean ± 1, 2 and 3 SD to spot outlying subjects.
+  - **Output:** prints the significant group differences, writes one table per statistic and draws one figure per ROI. `--sd-bands` adds the cohort mean ± 1, 2 and 3 SD to spot outlying subjects. `--overview` draws every label for every subject and session and flags outlying values (modified z-score, Iglewicz & Hoaglin 1993), to find problematic subjects and ROIs.
 - **`decompose` / `replicability`:** fit per-ROI (`roi_signal.parquet`) or per-voxel (`voxels.parquet`) data. Each model gets its own directory, `<method>_rank_<r>/` (`model.h5` and the `decompose.json` it was fitted with). They can also spread their restarts over a SLURM array with `plan`, then `run --job $SLURM_ARRAY_TASK_ID`, then `collect`.
 - **`plot decomposition`:** draws the mode grid, subject mode, time or evolving mode, spatial maps and outlier diagnostics (`--mode-grid --subject-mode --time --spatial --outliers`; all by default).
 - **`plot group-maps`:** each group's average map per time point. **`plot reproducibility`:** redraws a restart-vs-restart FMS matrix.
