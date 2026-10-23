@@ -216,8 +216,9 @@ def test_add_concentration() -> None:
     s0 = out.set_index("subject").loc["s0"]
     assert s0["median_concentration"] == pytest.approx(0.5)  # 1 1/s / 2 1/(mM s)
     assert s0["mean_concentration"] == pytest.approx(0.75)
-    # mM * n_valid * mm^3 * 1e-6 = mmol.
-    assert s0["total_amount"] == pytest.approx(0.75 * 3 * 2.0 * 1e-6)
+    # mM * the full ROI volume (all 4 voxels, also the invalid one) * 1e-6
+    # = mmol: invalid voxels count at the ROI's mean concentration.
+    assert s0["total_amount"] == pytest.approx(0.75 * 4 * 2.0 * 1e-6)
     with pytest.raises(ValueError, match="relaxivity"):
         add_concentration(frame, relaxivity=0.0)
 
@@ -281,3 +282,38 @@ def test_overview_regions_keep_only_present_labels() -> None:
         ("Pontine cistern", [10016]),
     ]
     assert overview_regions(np.array([2])) == ([("WM", [2])], [])
+
+
+def test_aggregate_roi_signal_invalidates_regions_with_too_many_invalid_voxels() -> (
+    None
+):
+    regions = {"all": np.array([1, 2, 3])}
+
+    lenient = aggregate_roi_signal(_roi_signal(), regions)
+    strict = aggregate_roi_signal(
+        _roi_signal(),
+        regions,
+        max_invalid_voxel_fraction=0.5,
+    )
+    looser = aggregate_roi_signal(
+        _roi_signal(),
+        regions,
+        max_invalid_voxel_fraction=0.6,
+    )
+
+    # s0: 5 of 9 voxels invalid (0.56); s1: none.
+    s0 = strict[strict["subject"] == "s0"].iloc[0]
+    assert np.isnan(s0["median"]) and np.isnan(s0["mean"]) and s0["n_valid"] == 0
+    assert s0["n_voxels"] == 9
+    s1 = strict[strict["subject"] == "s1"].iloc[0]
+    assert s1["n_valid"] == 8 and np.isfinite(s1["median"])
+    pd.testing.assert_frame_equal(lenient, looser)
+    labels = aggregate_roi_signal(
+        _roi_signal(),
+        labels="all",
+        max_invalid_voxel_fraction=0.0,
+    )
+    pd.testing.assert_frame_equal(
+        labels,
+        aggregate_roi_signal(_roi_signal(), labels="all"),
+    )

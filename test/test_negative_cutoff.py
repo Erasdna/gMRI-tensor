@@ -8,7 +8,9 @@ import pandas as pd
 import pytest
 from gMRItensor import preprocessing
 from gMRItensor.options import PreprocessingOptions
+from gMRItensor.options import StatisticsPlotOptions
 from gMRItensor.pipeline import run_preprocessing
+from gMRItensor.pipeline import run_statistics_plots
 from gMRItensor.preprocessing import PreprocessedPaths
 from gMRItensor.preprocessing import read_signal_metadata
 
@@ -233,3 +235,48 @@ def test_other_settings_go_to_another_folder(head_study: Any) -> None:
     assert first.roi_signal.parent.name == "k4"
     assert second.roi_signal.parent.name == "k4_inside"
     assert first.roi_signal.exists() and second.roi_signal.exists()
+
+
+def test_statistics_apply_the_roi_rule_to_regions(head_study: Any) -> None:
+    paths = preprocess(head_study, negative_cutoff=4.0)
+    info = head_study.root / "subjects.csv"
+    pd.DataFrame(
+        {"subjects": ["sub-0", "sub-1", "sub-2"], "diagnosis": ["A", "A", "B"]},
+    ).to_csv(info, index=False)
+    output = head_study.root / "statistics"
+
+    run_statistics_plots(
+        StatisticsPlotOptions(
+            roi_signal=paths.roi_signal,
+            subject_info=info,
+            group_variable="diagnosis",
+            output_dir=output,
+            regions=("cube=10", "pair=10,11", "both=2,10"),
+            statistics=("median", "total_amount"),
+            formats=("png",),
+            dpi=50,
+        ),
+    )
+
+    stats = pd.read_parquet(output / "roi_analysis" / "roi_statistics.parquet")
+    scan = stats[(stats["subject"] == "sub-1") & (stats["timepoint"] == 1)]
+    cube = scan.set_index("roi").loc["cube"]
+    pair = scan.set_index("roi").loc["pair"]
+    both = scan.set_index("roi").loc["both"]
+    # The invalid label alone, and with the 8 voxels of label 11 (27 of 35
+    # invalid), is invalid; with label 2 it is not, and its median comes
+    # from label 2 only.
+    assert np.isnan(cube["median"]) and cube["n_valid"] == 0
+    assert np.isnan(cube["total_amount"])
+    assert np.isnan(pair["median"]) and pair["n_valid"] == 0
+    label_2 = pd.read_parquet(paths.roi_signal)
+    label_2 = label_2[
+        (label_2["subject"] == "sub-1")
+        & (label_2["time_point"] == 1)
+        & (label_2["label"] == 2)
+    ].iloc[0]
+    assert both["median"] == pytest.approx(label_2["median"])
+    # The total counts every voxel of the region at its mean.
+    assert both["total_amount"] == pytest.approx(
+        both["mean"] / 3.2 * both["n_voxels"] * 1e-6,
+    )

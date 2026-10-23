@@ -81,7 +81,7 @@ gmri preprocess --manifest scans.csv --output-dir results --input-type T1map --t
    - A compartment without any estimate gets no cutoff.
    - `--noise-sd` fixes the noise SD (one value, or `parenchyma=SD,csf=SD`) and skips the noise pass, for example to keep the cutoffs when subjects are added later.
 3. **Cutoff.** In every scan, a value below −K × σ of its compartment becomes NaN; the cutoff is anchored at 0, the physical lower limit. Under Gaussian noise about 3·10⁻⁵ of the voxels without tracer fall below −4σ by chance, so removing only the negative tail biases nothing measurably.
-4. **Invalid ROIs.** An ROI with more than `--max-invalid-voxel-fraction` (default 0.5) invalid voxels, i.e. mapping failures plus rejected values, gets NaN `median` and `mean` and `n_valid` 0 for that scan. With `--store-voxels`, the rejected voxels and every voxel of an invalid ROI are NaN in `voxels.parquet` as well.
+4. **Invalid ROIs.** An ROI with more than `--max-invalid-voxel-fraction` (default 0.5) invalid voxels, i.e. mapping failures plus rejected values, gets NaN `median` and `mean` and `n_valid` 0 for that scan. `plot statistics` applies the same fraction to the regions it combines. With `--store-voxels`, the rejected voxels and every voxel of an invalid ROI are NaN in `voxels.parquet` as well.
 
 **Outputs** go to their own folder, `data/k<K>/`, so runs with different settings never overwrite each other or the default `data/`. Every setting that changes the values and differs from its default is added to the name in this order: `_sd<SD>` (`_sd<P>-<C>` for a pair), `_f<F>`, `_outside`/`_inside`, `_shell<MM>`, `_csf<OFFSET>` (e.g. `data/k4/`, `data/k4_f0.25_inside/`). The folder holds `roi_signal.parquet` (and the voxel files), its own `preprocess.json`, and:
 
@@ -135,7 +135,8 @@ The command combines labels into ROIs and computes the statistics. It then compa
 - **Region counts:** `n_voxels`, `n_valid` and the volume are summed.
 - **Region `mean`:** a mean weighted by `n_valid`, which is exact.
 - **Region `median`:** the `n_valid`-weighted median of the label medians. This approximates the median of all the region's voxels, and is exact for one label.
-- **Concentrations:** ΔR1 / r1 in mM, exact because the conversion is linear. `total_amount` is mean concentration × valid volume, in mmol. One r1 is applied to every region, so parenchymal concentrations are approximate.
+- **Invalid regions:** for data preprocessed with `--negative-cutoff`, a region whose share of invalid voxels, 1 − Σ`n_valid`/Σ`n_voxels`, exceeds the `--max-invalid-voxel-fraction` used then (read from the file) is NaN, as an invalid label is. Otherwise a region would silently become the median of its remaining labels.
+- **Concentrations:** ΔR1 / r1 in mM, exact because the conversion is linear. `total_amount` is mean concentration × the full volume of the ROI (`n_voxels` × voxel volume), in mmol: invalid voxels count at the ROI's mean concentration. One r1 is applied to every region, so parenchymal concentrations are approximate.
 
 **Outputs:**
 - `roi_analysis/roi_statistics.parquet`: every ROI's values per scan.

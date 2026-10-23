@@ -502,10 +502,14 @@ def _read_roi_signal(
     path: Path,
     statistics: Sequence[str],
     relaxivity: float | None,
-) -> tuple[pd.DataFrame, str]:
-    """`roi_signal.parquet` and its signal (`delta_R1` or `ratio`). Raises
-    if a concentration statistic or `relaxivity` is asked of T1w input."""
-    signal = _metadata(path, "roi_signal").get("signal", "delta_R1")
+) -> tuple[pd.DataFrame, str, float | None]:
+    """`roi_signal.parquet`, its signal (`delta_R1` or `ratio`) and the
+    `max_invalid_voxel_fraction` its labels were judged with (None without
+    a negative cutoff). Raises if a concentration statistic or `relaxivity`
+    is asked of T1w input."""
+    metadata = _metadata(path, "roi_signal")
+    signal = metadata.get("signal", "delta_R1")
+    fraction = metadata.get("max_invalid_voxel_fraction")
     if signal == "ratio":
         wants_concentration = [s for s in statistics if s in CONCENTRATION_STATISTICS]
         if wants_concentration:
@@ -515,7 +519,7 @@ def _read_roi_signal(
             )
         if relaxivity is not None:
             raise ValueError("relaxivity has no meaning for T1w input")
-    return pd.read_parquet(path), signal
+    return pd.read_parquet(path), signal, None if fraction is None else float(fraction)
 
 
 def _grouped_frame(
@@ -554,7 +558,7 @@ def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult
     statistic, drawn from those saved tables, under
     `<output_dir>/figures/roi/`.
     """
-    roi_signal, signal = _read_roi_signal(
+    roi_signal, signal, invalid_fraction = _read_roi_signal(
         options.roi_signal,
         options.statistics,
         options.relaxivity,
@@ -566,7 +570,12 @@ def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult
         present = set(roi_signal["label"])
         regions = {name: ids for name, ids in regions.items() if present & set(ids)}
     frame, groups = _grouped_frame(
-        aggregate_roi_signal(roi_signal, regions, options.label_ids()),
+        aggregate_roi_signal(
+            roi_signal,
+            regions,
+            options.label_ids(),
+            max_invalid_voxel_fraction=invalid_fraction,
+        ),
         options.statistics,
         options.relaxivity,
         options.subject_info,
@@ -683,7 +692,8 @@ def run_overview_plots(options: OverviewPlotOptions) -> list[Path]:
     `parenchyma_regions` and `csf_regions` (`overview_regions`); a figure
     without labels is skipped. Returns the figure paths.
     """
-    roi_signal, signal = _read_roi_signal(
+    # Labels only: a label is already invalidated by preprocessing.
+    roi_signal, signal, _ = _read_roi_signal(
         options.roi_signal,
         options.statistics,
         options.relaxivity,

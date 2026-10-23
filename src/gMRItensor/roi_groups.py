@@ -315,6 +315,7 @@ def aggregate_roi_signal(
     roi_signal: pd.DataFrame,
     regions: Mapping[str, Sequence[int] | np.ndarray] | None = None,
     labels: Sequence[int] | Literal["all"] | None = None,
+    max_invalid_voxel_fraction: float | None = None,
 ) -> pd.DataFrame:
     """Per-scan ROI rows from `write_preprocessed_data`'s `roi_signal` table.
 
@@ -325,6 +326,13 @@ def aggregate_roi_signal(
     exact; `median` is the `n_valid`-weighted median of the label medians,
     an approximation of the median of the pooled voxels (exact for a single
     label).
+
+    With `max_invalid_voxel_fraction` (the value `gmri preprocess
+    --negative-cutoff` applied to the labels, from the file's metadata), a
+    region with a larger share of invalid voxels, 1 - sum(n_valid) /
+    sum(n_voxels), gets NaN `median`/`mean` and `n_valid` 0 as an invalid
+    label does, so it does not silently become the median of its remaining
+    labels.
 
     Raises `ValueError` for requested labels, or regions with no labels, not
     in the table.
@@ -358,6 +366,11 @@ def aggregate_roi_signal(
         )
         combined["roi"] = name
         combined["roi_type"] = "group"
+        if max_invalid_voxel_fraction is not None:
+            share = 1 - combined["n_valid"] / combined["n_voxels"]
+            invalid = share > max_invalid_voxel_fraction
+            combined.loc[invalid, ["median", "mean"]] = np.nan
+            combined.loc[invalid, "n_valid"] = 0
         frames.append(combined[_ROI_COLUMNS])
 
     if not frames:
@@ -375,7 +388,8 @@ def add_concentration(frame: pd.DataFrame, relaxivity: float) -> pd.DataFrame:
 
     `median_concentration` / `mean_concentration` = ΔR1 / `relaxivity`
     [mM], exact for both because the conversion is linear; `total_amount`
-    = mean concentration x valid volume [mmol]. `relaxivity` is r1 in
+    = mean concentration x the full ROI volume `volume_mm3` [mmol], so
+    invalid voxels count at the ROI's mean concentration. `relaxivity` is r1 in
     1/(mM s); one value is applied to every region, so parenchymal
     concentrations are approximate.
     """
@@ -385,9 +399,6 @@ def add_concentration(frame: pd.DataFrame, relaxivity: float) -> pd.DataFrame:
     out["median_concentration"] = out["median"] / relaxivity
     out["mean_concentration"] = out["mean"] / relaxivity
     out["total_amount"] = (
-        out["mean_concentration"]
-        * out["n_valid"]
-        * out["voxel_volume_mm3"]
-        * _MM_MM3_TO_MMOL
+        out["mean_concentration"] * out["volume_mm3"] * _MM_MM3_TO_MMOL
     )
     return out

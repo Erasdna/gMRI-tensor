@@ -147,7 +147,8 @@ def _head_study(tmp_path: Path, scalp: bool) -> HeadStudy:
 
     A brain sphere (radius 9, the mask) of parenchyma (label 2, ΔR1
     0.02 * t 1/s) around CSF (label 10004, radius 4, 0.3 1/s), with a
-    27-voxel parenchyma cube (label 10); a scalp shell (radius 9-14,
+    27-voxel parenchyma cube (label 10) and an 8-voxel label 11 beside it;
+    a scalp shell (radius 9-14,
     outside the mask, T1 400 ms) without tracer, or zeros with
     `scalp=False`; air (zeros) beyond. Noise SD `HEAD_NOISE_SD`. Planted problems: sub-0 at
     t=1 has `HEAD_ARTIFACT_VOXELS` parenchyma voxels at -10 SD; sub-1 at
@@ -163,6 +164,7 @@ def _head_study(tmp_path: Path, scalp: bool) -> HeadStudy:
     segmentation[brain] = 2
     segmentation[csf] = 10004
     segmentation[21:24, 14:17, 14:17] = 10
+    segmentation[21:23, 18:20, 14:16] = 11  # 8 voxels beside it
     images = tmp_path / "images"
     images.mkdir()
     affine = np.eye(4)

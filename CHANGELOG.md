@@ -10,6 +10,8 @@
 
 ### Changed
 - The loader's notes on dropped sessions and subjects go to stderr, so the stdout of `plan` stays the job count.
+- **`total_amount`** is mean concentration × the full ROI volume (it was × the valid volume), so invalid voxels count at the ROI's mean concentration instead of lowering the total.
+- For data preprocessed with `--negative-cutoff`, `plot statistics` makes a region NaN when its share of invalid voxels exceeds the `--max-invalid-voxel-fraction` used then.
 
 ## 0.2.0
 
