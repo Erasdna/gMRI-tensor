@@ -6,8 +6,8 @@
 |---|---|---|
 | `gmri preprocess` | manifest CSV, NIfTI images | `<output-dir>/data/` |
 | `gmri plot statistics` | `roi_signal.parquet`, subject info CSV | `<output-dir>/roi_analysis/`, `<output-dir>/figures/roi/` |
-| `gmri decompose run\|plan\|collect` | `roi_signal.parquet` or `voxels.parquet` | one directory per model, `<method>_rank_<r>/` (`model.h5`, `decompose.json`, `excluded_subjects.csv`), `fits.csv`, the restarts and their reproducibility in `<store>/<method>_rank_<r>/` |
-| `gmri replicability run\|plan\|collect` | the same, plus the subject info CSV with `--stratify-by` | `replicability.csv`, `excluded_subjects.csv` |
+| `gmri decompose run\|plan\|collect` | `roi_signal.parquet` or `voxels.parquet` | one directory per model, `<method>_rank_<r>/` (`model.h5`, `decompose.json`, `excluded_subjects.csv`, `excluded_columns.csv`), `fits.csv`, the restarts and their reproducibility in `<store>/<method>_rank_<r>/` |
+| `gmri replicability run\|plan\|collect` | the same, plus the subject info CSV with `--stratify-by` | `replicability.csv`, `excluded_subjects.csv`, `excluded_columns.csv` |
 | `gmri plot decomposition` | a model directory, subject info CSV, optionally a segmentation; for `--outliers`, the data the model was fitted to | `<output-dir>/figures/decomposition/` |
 | `gmri plot group-maps` | `roi_signal.parquet` (plus a segmentation) or `voxels.parquet`, subject info CSV | `<output-dir>/figures/group_maps/` |
 | `gmri plot reproducibility` | a `reproducibility.csv` | the figure, next to the CSV or at `--output` |
@@ -97,7 +97,7 @@ The parquet metadata records `noise_source`, `noise_sd`, `negative_cutoff_k`, `n
 - Partial volume at CSF/tissue borders gives artifacts of both signs, and only the negative ones are removed; prefer the `median` statistic there.
 - Smoothed or interpolated maps cluster the rejected voxels; integer-valued T1 maps give exact zeros.
 - The noise level, and so the cutoff, depends on the scans in the manifest unless `--noise-sd` fixes it.
-- PARAFAC2 and CMF drop a label (or, for voxel input, a voxel) that is NaN in any scan they keep. An invalid ROI in one scan therefore removes that label for every subject, unless the scan's session or the subject is left out (`--max-invalid-fraction`, `--exclude-subjects`).
+- PARAFAC2 and CMF drop a label (or, for voxel input, a voxel) that is NaN in any scan they keep. An invalid ROI in one scan therefore removes that label for every subject, unless the scan's session or the subject is left out (`--max-invalid-fraction`, `--exclude-subjects`). `excluded_columns.csv` next to each model lists what was dropped and because of which scans.
 
 ## `gmri plot statistics`
 
@@ -263,6 +263,7 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 - `<method>_rank_<r>/model.h5` (e.g. `cmf_rank_3/model.h5`): the fitted factors, components ordered by weight, largest first (`model_io.component_weights`: the weight times each mode's L2 norm), plus the subjects, time points, label ids and scaling needed to read them. Voxel models also store each voxel's template coordinates, the template's shape and affine, and the recorded template path. Load a model with `gMRItensor.model_io.load_decomposition`.
 - `<method>_rank_<r>/decompose.json`: the settings that model was fitted with (input, statistic, tensor and fit options). `plot decomposition --outliers` reloads the data from it, so several methods and ranks can share one `--output-dir`.
 - `<method>_rank_<r>/excluded_subjects.csv`: `subject, reason`, every subject in the input that the model leaves out. The reason is `rejected at command line` (`--exclude-subjects`), or `too few valid time points (2 of 3; needs 3): time point 6 missing; time point 24 has 95% invalid values (more than --max-invalid-fraction 0.9)` for a subject short of valid sessions (`--min-timepoints`, by default all time points). Written with only the header when nobody is left out. `plan` writes the same file to `--output-dir`, so it can be checked before the jobs run.
+- `<method>_rank_<r>/excluded_columns.csv`: `label, n_columns, n_dropped, scans`, one row per label with columns left out of the fit. PARAFAC2 and CMF drop every column (a label for ROI input, a voxel for voxel input) that is non-finite in any kept scan; CP drops only columns never finite and imputes the rest. `scans` names the kept scans in which the label's dropped columns were non-finite or missing (the first 10, then a count), e.g. a scan whose ROI `--negative-cutoff` invalidated. Written with only the header when nothing is dropped, and by `plan` too.
 - `fits.csv`: `method, rank, error, model`, one row per model in `--output-dir`. A later run replaces the rows of the methods and ranks it fits and keeps the others.
 - **A rank that does not converge:** the ranks that did are still written; the command then exits with code 2 and names the failed ranks.
 - `<store>/<method>_rank_<r>/full/seed_<NNNN>.pt`: every restart, failures included. Both `run` and `collect` keep them. A `run` without `--job` refits every restart and overwrites what the store held.
@@ -285,7 +286,7 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 | `--n-procs` | `1` | Parallel fits (every split and restart in one pool). Use 1 on a GPU. `--restart-procs` does not apply. |
 | `--seed` | `0` | Seed of the splits; every rank uses the same splits. |
 
-The output is `replicability.csv`. It has columns `method, rank, split, fms` for `halfhalf`, or `method, rank, fold_i, fold_j, n_common, fms` for `cv`, where fms is the factor match score. `excluded_subjects.csv` lists the left-out subjects as for `decompose`; they need no `--subject-info` row. Scaling and centering are applied to the full tensor before splitting. A single-process `run` keeps its fits in memory: only the distributed `plan` / `run --job` / `collect` path writes them to the store.
+The output is `replicability.csv`. It has columns `method, rank, split, fms` for `halfhalf`, or `method, rank, fold_i, fold_j, n_common, fms` for `cv`, where fms is the factor match score. `excluded_subjects.csv` and `excluded_columns.csv` list the left-out subjects and columns as for `decompose`; left-out subjects need no `--subject-info` row. Scaling and centering are applied to the full tensor before splitting. A single-process `run` keeps its fits in memory: only the distributed `plan` / `run --job` / `collect` path writes them to the store.
 
 ## CPU and GPU
 

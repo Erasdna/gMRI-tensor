@@ -7,6 +7,7 @@
 - **Excluding subjects:** `decompose` and `replicability` (`run` and `plan`) take `--exclude-subjects ID ...`; the subjects are left out as if absent from the input, and an unknown ID is an error. Every left-out subject, also those dropped for missing or unusable sessions (naming the time points), is listed with the reason in `excluded_subjects.csv`, per model directory for `decompose`.
 
 - **Negative cutoff:** `preprocess --negative-cutoff K` (off by default) estimates the study's ΔR1 noise level from the data (outside the brain mask, or per compartment inside it; `gMRItensor.noise`), makes values below −K noise SDs invalid, and makes an ROI NaN when more than `--max-invalid-voxel-fraction` (0.5) of its voxels are invalid, in the ROI and the voxel data alike. Each setting writes to its own folder, `data/k<K>[...]/`, with `noise.csv` (per-scan noise estimates, z-scores, cutoff, rejected voxels) and `invalid_rois.csv`. `roi_signal.parquet` gains an `n_rejected` column (0 without a cutoff).
+- **Dropped columns listed:** `decompose` and `replicability` write `excluded_columns.csv` next to `excluded_subjects.csv`: per label, the columns left out of the fit (PARAFAC2/CMF drop any column non-finite in a kept scan) and the scans that caused it.
 
 ### Changed
 - The loader's notes on dropped sessions and subjects go to stderr, so the stdout of `plan` stays the job count.

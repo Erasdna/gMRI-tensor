@@ -4,6 +4,7 @@ statistics, and the tensors the decompositions are fitted to.
 import json
 import sys
 import warnings
+from collections import Counter
 from collections import deque
 from collections.abc import Callable
 from collections.abc import Iterator
@@ -1081,29 +1082,63 @@ def _invalid_fraction_per_session(
     return {session: n_invalid[session] / n_rows[session] for session in n_rows}
 
 
+#: Columns of `Exclusions.columns`.
+EXCLUDED_COLUMN_COLUMNS = ["label", "n_columns", "n_dropped", "scans"]
+# Scans named per dropped label before the rest are only counted.
+_LISTED_SCANS = 10
+
+
+class Exclusions(NamedTuple):
+    """What `load_tensor_with_exclusions` left out of the tensor.
+
+    `subjects`: every left-out subject and why (`EXCLUDED_COLUMNS`).
+    `columns`: per label with dropped columns, how many of its columns
+    there were and were dropped, and the kept scans in which they were
+    non-finite or missing (`EXCLUDED_COLUMN_COLUMNS`).
+    """
+
+    subjects: pd.DataFrame
+    columns: pd.DataFrame
+
+
+def _scan_list(scans: list[tuple[str, int]]) -> str:
+    listed = "; ".join(f"{subject} t={t}" for subject, t in scans[:_LISTED_SCANS])
+    rest = len(scans) - _LISTED_SCANS
+    return listed + (f" (+{rest} more)" if rest > 0 else "")
+
+
 def _scan_tracer_parquet(
     parquet_file: pq.ParquetFile,
     group_filtering: tuple[str, str] | None,
     sessions: set[tuple[str, int]],
     any_finite: bool = False,
-) -> np.ndarray:
-    """Sorted keys finite in every one of `sessions`.
+) -> tuple[np.ndarray, pd.DataFrame]:
+    """Sorted keys finite in every one of `sessions`, and the dropped ones.
 
     The columns with a finite value in every session of `sessions`; chunks
-    of other sessions are ignored. `any_finite`
-    keeps the keys finite in at least one of `sessions` instead.
+    of other sessions are ignored. `any_finite` keeps the keys finite in at
+    least one of `sessions` instead. The second value lists the dropped
+    columns per label (`EXCLUDED_COLUMN_COLUMNS`), with the sessions in
+    which they were non-finite or missing; it is built from per-(session,
+    label) counts, so it stays small for voxel input.
     """
     keys = np.empty(0, dtype=np.int64)
     finite_count = np.empty(0, dtype=np.int64)
+    seen = np.empty(0, dtype=np.int64)
+    entries: Counter[tuple[str, int, int]] = Counter()
+    nonfinite: Counter[tuple[str, int, int]] = Counter()
     # Images usually share one voxel template, so reuse the previous chunk's
     # positions instead of re-sorting ~10M keys per image.
     previous_keys: np.ndarray | None = None
     previous_positions = np.empty(0, dtype=np.intp)
+    previous_seen: np.ndarray | None = None
 
     for chunk in _iter_image_chunks(parquet_file, group_filtering):
-        if (chunk.subject, chunk.time_point) not in sessions:
+        session = (chunk.subject, chunk.time_point)
+        if session not in sessions:
             continue
-        finite_keys = chunk.keys[np.isfinite(chunk.values)]
+        finite = np.isfinite(chunk.values)
+        finite_keys = chunk.keys[finite]
         if previous_keys is None or not np.array_equal(finite_keys, previous_keys):
             merged = np.union1d(keys, finite_keys)
             merged_count = np.zeros(len(merged), dtype=np.int64)
@@ -1112,8 +1147,31 @@ def _scan_tracer_parquet(
             previous_keys = finite_keys
             previous_positions = np.searchsorted(keys, finite_keys)
         finite_count[previous_positions] += 1
+        if previous_seen is None or not np.array_equal(chunk.keys, previous_seen):
+            seen = np.union1d(seen, chunk.keys)
+            previous_seen = chunk.keys
+        labels = chunk.keys >> _KEY_SHIFT
+        for counter, chunk_labels in ((entries, labels), (nonfinite, labels[~finite])):
+            for label, n in zip(*np.unique(chunk_labels, return_counts=True)):
+                counter[session + (int(label),)] += int(n)
 
-    return keys if any_finite else keys[finite_count == len(sessions)]
+    valid = keys if any_finite else keys[finite_count == len(sessions)]
+    seen_labels, n_columns = np.unique(seen >> _KEY_SHIFT, return_counts=True)
+    columns_of = dict(zip(seen_labels.tolist(), n_columns.tolist()))
+    dropped_labels, n_dropped = np.unique(
+        np.setdiff1d(seen, valid) >> _KEY_SHIFT,
+        return_counts=True,
+    )
+    rows = []
+    for label, n in zip(dropped_labels.tolist(), n_dropped.tolist()):
+        scans = [
+            session
+            for session in sorted(sessions)
+            if nonfinite[session + (label,)]
+            or entries[session + (label,)] < columns_of[label]
+        ]
+        rows.append((label, columns_of[label], n, _scan_list(scans)))
+    return valid, pd.DataFrame(rows, columns=EXCLUDED_COLUMN_COLUMNS)
 
 
 def _warn_imputed_entries(
@@ -1300,10 +1358,11 @@ def load_tensor_with_exclusions(
     np.ndarray | list[np.ndarray],
     np.ndarray,
     np.ndarray,
-    pd.DataFrame,
+    Exclusions,
 ]:
     """The subject x time x label tensor of a long-format tracer parquet,
-    and the subjects left out of it with the reason (`_judge_subjects`).
+    and what was left out of it (`Exclusions`): the subjects with the
+    reason (`_judge_subjects`) and the dropped columns.
 
     The file has one row per scan and label (or voxel), as
     `write_preprocessed_data` writes `voxels.parquet`. It is streamed one
@@ -1360,12 +1419,12 @@ def load_tensor_with_exclusions(
     Returns
     -------
     For `"cp"`: `(tensor, subjects, time_points, labels, label_index,
-    excluded)`, the tensor `(subjects, time_points, labels)`. For
+    exclusions)`, the tensor `(subjects, time_points, labels)`. For
     `"parafac2"`: `(slices, subjects, timepoints_per_subject, labels,
-    label_index, excluded)`, `slices[i]` of shape
+    label_index, exclusions)`, `slices[i]` of shape
     `(len(timepoints_per_subject[i]), labels)`. Column `j` is the pair
-    `(labels[j], label_index[j])`. `excluded` lists every subject in the
-    file that is left out, with the reason (`EXCLUDED_COLUMNS`).
+    `(labels[j], label_index[j])`. `exclusions` lists every subject in the
+    file that is left out, with the reason, and every dropped column.
     """
     if model not in ("cp", "parafac2"):
         raise ValueError(f"model must be 'cp' or 'parafac2', got {model!r}")
@@ -1391,12 +1450,13 @@ def load_tensor_with_exclusions(
         for subject, time_points in zip(subjects, timepoints_per_subject)
         for t in time_points
     }
-    valid_keys = _scan_tracer_parquet(
+    valid_keys, dropped_columns = _scan_tracer_parquet(
         parquet_file,
         group_filtering,
         sessions,
         any_finite=impute_missing,
     )
+    exclusions = Exclusions(excluded, dropped_columns)
     if len(valid_keys) == 0:
         raise ValueError(
             "No column is finite in any kept session"
@@ -1458,5 +1518,5 @@ def load_tensor_with_exclusions(
     label_index = (valid_keys & _KEY_MASK).astype(int)
     subjects_arr = np.array(subjects).astype(str)
     if model == "cp":
-        return output, subjects_arr, all_timepoints, labels, label_index, excluded
-    return output, subjects_arr, timepoints_per_subject, labels, label_index, excluded
+        return output, subjects_arr, all_timepoints, labels, label_index, exclusions
+    return output, subjects_arr, timepoints_per_subject, labels, label_index, exclusions

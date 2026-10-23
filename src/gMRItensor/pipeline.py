@@ -97,7 +97,9 @@ from gMRItensor.plotting.utils import resolve_page_width
 from gMRItensor.plotting.utils import save_figure
 from gMRItensor.preprocessing import compute_roi_scaling
 from gMRItensor.preprocessing import estimate_scan_noise
+from gMRItensor.preprocessing import EXCLUDED_COLUMN_COLUMNS
 from gMRItensor.preprocessing import EXCLUDED_COLUMNS
+from gMRItensor.preprocessing import Exclusions
 from gMRItensor.preprocessing import load_tensor_with_exclusions
 from gMRItensor.preprocessing import NegativeCutoff
 from gMRItensor.preprocessing import PreprocessedPaths
@@ -771,7 +773,7 @@ def run_overview_plots(options: OverviewPlotOptions) -> list[Path]:
 class DecompositionInput(NamedTuple):
     """`load_tensor_with_exclusions` output as torch, plus the preprocessing
     applied, for voxel input where each column sits on the template, and
-    the left-out subjects with their reasons (`excluded`)."""
+    what was left out: subjects and columns (`excluded`)."""
 
     data: torch.Tensor | list[torch.Tensor]
     subjects: np.ndarray
@@ -785,7 +787,7 @@ class DecompositionInput(NamedTuple):
     template_shape: np.ndarray | None = None
     template_affine: np.ndarray | None = None
     template_path: str | None = None
-    excluded: pd.DataFrame | None = None
+    excluded: Exclusions | None = None
 
 
 def _roi_tensor_source(path: Path, statistic: str) -> pa.BufferReader:
@@ -1270,26 +1272,30 @@ def _update_fits_table(path: Path, fits: list[SavedDecomposition]) -> None:
 
 
 EXCLUDED_FILE = "excluded_subjects.csv"
+EXCLUDED_COLUMNS_FILE = "excluded_columns.csv"
 
 
 def _write_excluded(directories: Sequence[Path], data: DecompositionInput) -> None:
-    """`excluded_subjects.csv` (`EXCLUDED_COLUMNS`: every subject of the
-    input left out of the fit, and why) in each of `directories`. Written
-    even when empty, so no earlier list lingers."""
-    excluded = (
-        pd.DataFrame(columns=EXCLUDED_COLUMNS)
-        if data.excluded is None
-        else data.excluded
+    """In each of `directories`: `excluded_subjects.csv` (every subject of
+    the input left out of the fit, and why) and `excluded_columns.csv`
+    (per label, the columns dropped and the scans that made them invalid;
+    see `Exclusions`). Written even when empty, so no earlier list
+    lingers."""
+    exclusions = data.excluded or Exclusions(
+        pd.DataFrame(columns=EXCLUDED_COLUMNS),
+        pd.DataFrame(columns=EXCLUDED_COLUMN_COLUMNS),
     )
-    for directory in directories:
-        directory.mkdir(parents=True, exist_ok=True)
-        excluded.to_csv(directory / EXCLUDED_FILE, index=False)
-    if len(excluded):
-        where = ", ".join(str(directory / EXCLUDED_FILE) for directory in directories)
-        print(
-            f"{len(excluded)} subject(s) left out, with the reasons, in {where}",
-            file=sys.stderr,
-        )
+    tables = (
+        (EXCLUDED_FILE, exclusions.subjects, "subject(s) left out"),
+        (EXCLUDED_COLUMNS_FILE, exclusions.columns, "label(s) with dropped columns"),
+    )
+    for name, table, what in tables:
+        for directory in directories:
+            directory.mkdir(parents=True, exist_ok=True)
+            table.to_csv(directory / name, index=False)
+        if len(table):
+            where = ", ".join(str(directory / name) for directory in directories)
+            print(f"{len(table)} {what}, listed in {where}", file=sys.stderr)
 
 
 def _write_decompositions(

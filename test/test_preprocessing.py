@@ -1449,11 +1449,12 @@ def test_excluded_subjects_reasons(tmp_path):
     )
     path = _write_long_df(df, tmp_path / "tracer.parquet")
 
-    *tensor, excluded = load_tensor_with_exclusions(
+    *tensor, exclusions = load_tensor_with_exclusions(
         path,
         "parafac2",
         exclude_subjects=("d",),
     )
+    excluded = exclusions.subjects
 
     np.testing.assert_array_equal(tensor[1], ["a"])
     assert list(excluded.columns) == ["subject", "reason"]
@@ -1476,10 +1477,17 @@ def test_excluded_subjects_empty_without_exclusions(tmp_path):
         tmp_path / "tracer.parquet",
     )
 
-    *_, excluded = load_tensor_with_exclusions(path, "cp")
+    *_, exclusions = load_tensor_with_exclusions(path, "cp")
 
-    assert excluded.empty
-    assert list(excluded.columns) == ["subject", "reason"]
+    assert exclusions.subjects.empty
+    assert list(exclusions.subjects.columns) == ["subject", "reason"]
+    assert exclusions.columns.empty
+    assert list(exclusions.columns.columns) == [
+        "label",
+        "n_columns",
+        "n_dropped",
+        "scans",
+    ]
 
 
 def test_exclude_subjects_rejects_unknown_ids_and_excluding_everyone(tmp_path):
@@ -1544,3 +1552,39 @@ def test_shell_is_measured_in_mm_outside_the_mask() -> None:
     assert not shell[4, 4, 4]  # inside the mask
     assert shell[5, 4, 4] and not shell[6, 4, 4]  # 2 mm, 4 mm along x
     assert shell[4, 6, 4] and not shell[4, 7, 4]  # 2 mm, 3 mm along y
+
+
+def test_excluded_columns_name_the_scans_behind_each_dropped_label(tmp_path):
+    # Label 20 is NaN in ("b", 2); label 30 is absent from ("a", 1).
+    df = make_long_df({"a": [0, 1, 2], "b": [0, 1, 2]}, missing={("b", 2, 20)})
+    df = df[~((df["subject"] == "a") & (df["time_point"] == 1) & (df["labels"] == 30))]
+    path = _write_long_df(df, tmp_path / "tracer.parquet", row_group_size=3)
+
+    *tensor, exclusions = load_tensor_with_exclusions(path, "parafac2")
+
+    np.testing.assert_array_equal(tensor[3], [10])
+    assert exclusions.columns.values.tolist() == [
+        [20, 1, 1, "b t=2"],
+        [30, 1, 1, "a t=1"],
+    ]
+    # CP keeps the columns finite somewhere and imputes the rest.
+    *_, imputed = load_tensor_with_exclusions(path, "cp", impute_missing=True)
+    assert imputed.columns.empty
+
+
+def test_excluded_columns_count_voxels_and_shorten_long_scan_lists(tmp_path):
+    subjects = {f"s{i:02d}": [0] for i in range(12)}
+    # Two "voxels" of label 10 (label_index 0, 1); one is NaN in every scan.
+    rows = [
+        {"subject": s, "time_point": 0, "labels": 10, "label_index": i, "values": v}
+        for s in subjects
+        for i, v in ((0, 1.0), (1, np.nan))
+    ]
+    path = _write_long_df(pd.DataFrame(rows), tmp_path / "voxels.parquet")
+
+    *_, exclusions = load_tensor_with_exclusions(path, "parafac2")
+
+    row = exclusions.columns.iloc[0]
+    assert (row["label"], row["n_columns"], row["n_dropped"]) == (10, 2, 1)
+    assert row["scans"].startswith("s00 t=0; s01 t=0;")
+    assert row["scans"].endswith("(+2 more)")

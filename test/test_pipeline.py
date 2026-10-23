@@ -611,6 +611,102 @@ def test_replicability_with_exclusions_needs_no_subject_info_row(
 
     excluded = pd.read_csv(options.output_dir / "excluded_subjects.csv")
     assert excluded.values.tolist() == [["sub-00", "rejected at command line"]]
+    assert pd.read_csv(options.output_dir / "excluded_columns.csv").empty
+
+
+def test_decomposition_lists_the_dropped_columns(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
+    results = preprocess(synthetic_study)
+
+    def blank(signal: pd.DataFrame) -> pd.DataFrame:
+        scan = (signal["subject"] == "sub-02") & (signal["time_point"] == 24)
+        signal.loc[scan & (signal["label"] == 10), "median"] = np.nan
+        return signal
+
+    _edit_roi_signal(results / "data" / "roi_signal.parquet", blank)
+    parafac2 = decomposition_options(synthetic_study, ranks=(1,))
+    cp = decomposition_options(
+        synthetic_study,
+        method="cp",
+        ranks=(1,),
+        output_dir=results / "decompositions" / "cp",
+    )
+
+    run_decomposition(parafac2)
+    run_decomposition(cp)
+
+    dropped = pd.read_csv(
+        parafac2.output_dir / "parafac2_rank_1" / "excluded_columns.csv",
+    )
+    assert dropped.values.tolist() == [[10, 1, 1, "sub-02 t=24"]]
+    imputed = pd.read_csv(cp.output_dir / "cp_rank_1" / "excluded_columns.csv")
+    assert imputed.empty  # CP imputes the missing value
+
+
+def test_negative_cutoff_reaches_voxel_wise_fits(
+    head_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
+    paths = run_preprocessing(
+        PreprocessingOptions(
+            head_study.manifest,
+            head_study.root / "results",
+            "T1map",
+            time_unit="ms",
+            n_procs=1,
+            negative_cutoff=4.0,
+            store_voxels=True,
+        ),
+    )
+    assert paths.voxels is not None
+    voxels = pd.read_parquet(paths.voxels)
+    first = voxels[(voxels["subject"] == "sub-0") & (voxels["time_point"] == 2)]
+    n_label = first["labels"].value_counts()
+    common = {"input": paths.voxels, "ranks": (1,)}
+    parafac2 = decomposition_options(
+        head_study,
+        output_dir=head_study.root / "voxel_parafac2",
+        **common,
+    )
+    cp = decomposition_options(
+        head_study,
+        method="cp",
+        output_dir=head_study.root / "voxel_cp",
+        **common,
+    )
+
+    run_decomposition(parafac2)
+    run_decomposition(cp)
+
+    dropped = pd.read_csv(
+        parafac2.output_dir / "parafac2_rank_1" / "excluded_columns.csv",
+    )
+    assert dropped.values.tolist() == [
+        [2, n_label[2], head_study.artifact_voxels, "sub-0 t=1"],
+        [10, 27, 27, "sub-1 t=1"],  # the invalidated ROI: all its voxels
+    ]
+    assert pd.read_csv(cp.output_dir / "cp_rank_1" / "excluded_columns.csv").empty
+
+    info = head_study.root / "subjects.csv"
+    pd.DataFrame(
+        {"subjects": ["sub-0", "sub-1", "sub-2"], "diagnosis": ["A", "A", "B"]},
+    ).to_csv(info, index=False)
+    written = run_group_map_plots(
+        GroupMapPlotOptions(
+            input=paths.voxels,
+            subject_info=info,
+            group_variable="diagnosis",
+            output_dir=head_study.root / "maps",
+            trim=0,
+            formats=("png",),
+            dpi=50,
+        ),
+    )
+    assert written
 
 
 def _assert_saved_largest_first(path: Path) -> None:
