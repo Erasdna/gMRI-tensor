@@ -34,6 +34,7 @@ from gMRItensor.options import DistributedOptions
 from gMRItensor.options import FitOptions
 from gMRItensor.options import GroupMapPlotOptions
 from gMRItensor.options import options_to_json
+from gMRItensor.options import OverviewPlotOptions
 from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import StatisticsPlotOptions
@@ -50,6 +51,7 @@ from gMRItensor.pipeline import run_decomposition
 from gMRItensor.pipeline import run_decomposition_job
 from gMRItensor.pipeline import run_decomposition_plots
 from gMRItensor.pipeline import run_group_map_plots
+from gMRItensor.pipeline import run_overview_plots
 from gMRItensor.pipeline import run_preprocessing
 from gMRItensor.pipeline import run_replicability
 from gMRItensor.pipeline import run_replicability_job
@@ -332,40 +334,52 @@ OVERVIEW_COLUMNS = [
 ]
 
 
-def test_run_statistics_plots_overview_figures_and_flags(
-    synthetic_study: Any,
-) -> None:
-    results = preprocess(synthetic_study)
-    roi_signal = results / "data" / "roi_signal.parquet"
-    table = pq.read_table(roi_signal)
-    signal = table.to_pandas()
-    # sub-02 is far off in label 10 at 24 h.
-    far = (
-        (signal["subject"] == "sub-02")
-        & (signal["time_point"] == 24)
-        & (signal["label"] == 10)
-    )
-    signal.loc[far, "median"] *= 50
+def overview_options(study: Any, **overrides: Any) -> OverviewPlotOptions:
+    values: dict[str, Any] = {
+        "roi_signal": study.root / "results" / "data" / "roi_signal.parquet",
+        "subject_info": study.subject_info,
+        "group_variable": "diagnosis",
+        "output_dir": study.root / "results",
+        "formats": ("png",),
+        "dpi": 50,
+        **overrides,
+    }
+    return OverviewPlotOptions(**values)
+
+
+def _edit_roi_signal(path: Path, edit: Any) -> None:
+    """Rewrite `roi_signal.parquet` as `edit(frame)`, keeping its metadata."""
+    table = pq.read_table(path)
     pq.write_table(
-        pa.Table.from_pandas(signal, preserve_index=False).replace_schema_metadata(
-            table.schema.metadata,
-        ),
-        roi_signal,
+        pa.Table.from_pandas(
+            edit(table.to_pandas()),
+            preserve_index=False,
+        ).replace_schema_metadata(table.schema.metadata),
+        path,
     )
 
-    result = run_statistics_plots(
-        statistics_options(
-            synthetic_study,
-            rois=("4",),
-            statistics=("median", "total_amount"),
-            overview=True,
-        ),
+
+def test_run_overview_plots_figures_and_flags(synthetic_study: Any) -> None:
+    results = preprocess(synthetic_study)
+
+    def plant(signal: pd.DataFrame) -> pd.DataFrame:
+        subject = signal["subject"] == "sub-02"
+        # Far off in label 10 at 24 h; and no CSF label (4) at all, which
+        # must not drop it from the parenchyma.
+        far = subject & (signal["time_point"] == 24) & (signal["label"] == 10)
+        signal.loc[far, "median"] *= 50
+        return signal[~(subject & (signal["label"] == 4))]
+
+    _edit_roi_signal(results / "data" / "roi_signal.parquet", plant)
+
+    written = run_overview_plots(
+        overview_options(synthetic_study, statistics=("median", "total_amount")),
     )
 
     for statistic in ("median", "total_amount"):
         overview = results / "figures" / "roi" / "overview" / statistic
         for name in OVERVIEW_FIGURES:
-            assert overview / f"{name}.png" in result.figures
+            assert overview / f"{name}.png" in written
     flags = pd.read_csv(results / "roi_analysis" / "overview_flags__median.csv")
     assert list(flags.columns) == OVERVIEW_COLUMNS
     planted = (flags["subject"] == "sub-02") & (flags["label"] == 10)
@@ -379,17 +393,23 @@ def test_run_statistics_plots_overview_figures_and_flags(
     assert row["robust_z"] > 3.5
     total = pd.read_csv(results / "roi_analysis" / "overview_flags__total_amount.csv")
     assert list(total.columns) == OVERVIEW_COLUMNS
+    # Only the overview: no per-ROI tables or figures, its own provenance.
+    assert not (results / "roi_analysis" / "roi_statistics.parquet").exists()
+    assert not (results / "figures" / "roi" / "single").exists()
+    assert (results / "plot_overview.json").exists()
+    assert not (results / "plot_statistics.json").exists()
 
 
-def test_run_statistics_plots_without_overview_writes_none(
+def test_run_overview_plots_rejects_concentration_for_t1w(
     synthetic_study: Any,
 ) -> None:
-    results = preprocess(synthetic_study)
+    preprocess(synthetic_study, input_type="T1w")
 
-    run_statistics_plots(statistics_options(synthetic_study, rois=("4",)))
-
-    assert not (results / "figures" / "roi" / "overview").exists()
-    assert not list((results / "roi_analysis").glob("overview_flags__*"))
+    with pytest.raises(ValueError, match="T1w"):
+        run_overview_plots(
+            overview_options(synthetic_study, statistics=("total_amount",)),
+        )
+    assert not (synthetic_study.root / "results" / "roi_analysis").exists()
 
 
 def test_format_significance_summary() -> None:

@@ -3,7 +3,8 @@
     gmri preprocess    --manifest scans.csv --output-dir results --input-type T1map
     gmri decompose     run | plan | collect   (run --job N for one distributed job)
     gmri replicability run | plan | collect
-    gmri plot          statistics | decomposition | group-maps | reproducibility
+    gmri plot          statistics | overview | decomposition | group-maps |
+                       reproducibility
 
 Each command calls one `gMRItensor.pipeline` stage with its
 `gMRItensor.options` dataclass, so scripts can do the same.
@@ -26,6 +27,7 @@ from gMRItensor.options import DecompositionPlotOptions
 from gMRItensor.options import DistributedOptions
 from gMRItensor.options import FitOptions
 from gMRItensor.options import GroupMapPlotOptions
+from gMRItensor.options import OverviewPlotOptions
 from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import STATISTICS
@@ -76,12 +78,13 @@ def _fit_option(value: str) -> tuple[str, Any]:
         return key, text
 
 
-def _output_options(parser: argparse.ArgumentParser) -> None:
-    parser.add_argument(
-        "--page-width",
-        default="double",
-        help="figure width: single, onehalf, double or inches (default: double)",
-    )
+def _output_options(parser: argparse.ArgumentParser, page_width: bool = True) -> None:
+    if page_width:
+        parser.add_argument(
+            "--page-width",
+            default="double",
+            help="figure width: single, onehalf, double or inches (default: double)",
+        )
     parser.add_argument(
         "--formats",
         nargs="+",
@@ -494,15 +497,42 @@ def _add_statistics_plot(kinds: Any) -> None:
         help="draw the cohort mean +/- 1, 2 and 3 SD behind the subject curves, "
         "to spot outlying subjects (rows layout only)",
     )
-    parser.add_argument(
-        "--overview",
-        action="store_true",
-        help="also draw every label for every subject and session (parenchyma, "
-        "CSF and their regions, under figures/roi/overview/) and list the "
-        "flagged values in roi_analysis/overview_flags__<statistic>.csv",
+    _output_options(parser)
+
+
+def _add_overview_plot(kinds: Any) -> None:
+    parser = kinds.add_parser(
+        "overview",
+        help="every label for every subject and session, outlying values flagged",
+        description=(
+            "Draw every label in the ROI signal for every subject and session "
+            "(all parenchyma, all CSF, and one column per region; large PDFs to "
+            "zoom) and flag outlying values, to find problematic subjects and "
+            "ROIs. The flagged values are listed in "
+            "roi_analysis/overview_flags__<statistic>.csv."
+        ),
     )
     parser.add_argument(
-        "--overview-z",
+        "--roi-signal",
+        type=Path,
+        required=True,
+        help="roi_signal.parquet from gmri preprocess",
+    )
+    _add_subject_arguments(parser, "subject-info column to colour by, e.g. diagnosis")
+    parser.add_argument(
+        "--statistics",
+        nargs="+",
+        choices=STATISTICS,
+        default=["median"],
+        help="statistics to draw, each in its own figures (default: median)",
+    )
+    parser.add_argument(
+        "--relaxivity",
+        type=float,
+        help="r1 in 1/(mM s) for concentrations (default: 3.2; not for T1w)",
+    )
+    parser.add_argument(
+        "--z-cut",
         type=float,
         default=3.5,
         metavar="Z",
@@ -510,7 +540,7 @@ def _add_statistics_plot(kinds: Any) -> None:
         "among all subjects for that label and session exceeds Z in absolute "
         "value (default: 3.5, Iglewicz & Hoaglin 1993)",
     )
-    _output_options(parser)
+    _output_options(parser, page_width=False)
 
 
 def _add_decomposition_plot(kinds: Any) -> None:
@@ -697,10 +727,12 @@ def _add_reproducibility_plot(kinds: Any) -> None:
 def _add_plot(commands: Any) -> None:
     parser = commands.add_parser(
         "plot",
-        help="ROI statistics, decomposition, group-average or reproducibility figures",
+        help="ROI statistics, ROI overview, decomposition, group-average or "
+        "reproducibility figures",
     )
     kinds = parser.add_subparsers(dest="action", required=True)
     _add_statistics_plot(kinds)
+    _add_overview_plot(kinds)
     _add_decomposition_plot(kinds)
     _add_group_maps_plot(kinds)
     _add_reproducibility_plot(kinds)
@@ -881,8 +913,6 @@ def _plot_reproducibility(args: argparse.Namespace) -> None:
 
 
 def _plot_statistics(args: argparse.Namespace) -> None:
-    if "--overview-z" in _given_flags(args) and not args.overview:
-        raise ValueError("--overview-z needs --overview")
     rois: Any = None
     if args.rois is not None:
         rois = "all" if args.rois == ["all"] else tuple(args.rois)
@@ -899,8 +929,6 @@ def _plot_statistics(args: argparse.Namespace) -> None:
         min_group_n=args.min_group_n,
         layout=args.layout,
         sd_bands=args.sd_bands,
-        overview=args.overview,
-        overview_z=args.overview_z,
         page_width=_page_width(args.page_width),
         formats=tuple(args.formats),
         dpi=args.dpi,
@@ -909,6 +937,25 @@ def _plot_statistics(args: argparse.Namespace) -> None:
     print(pipeline.format_significance_summary(result.summary, options.alpha))
     print(
         f"Tables: {options.output_dir / 'roi_analysis'}; {len(result.figures)} figure file(s).",
+    )
+
+
+def _plot_overview(args: argparse.Namespace) -> None:
+    options = OverviewPlotOptions(
+        roi_signal=args.roi_signal,
+        subject_info=args.subject_info,
+        group_variable=args.group_variable,
+        output_dir=args.output_dir,
+        statistics=tuple(args.statistics),
+        relaxivity=args.relaxivity,
+        z_cut=args.z_cut,
+        formats=tuple(args.formats),
+        dpi=args.dpi,
+    )
+    written = pipeline.run_overview_plots(options)
+    print(
+        f"Flagged values: {options.output_dir / 'roi_analysis'}/"
+        f"overview_flags__<statistic>.csv; {len(written)} figure file(s).",
     )
 
 
@@ -969,6 +1016,7 @@ def _plot_decomposition(args: argparse.Namespace) -> None:
 
 _PLOTS: dict[str, Callable[[argparse.Namespace], None]] = {
     "statistics": _plot_statistics,
+    "overview": _plot_overview,
     "decomposition": _plot_decomposition,
     "group-maps": _plot_group_maps,
     "reproducibility": _plot_reproducibility,

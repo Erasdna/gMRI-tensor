@@ -19,6 +19,7 @@ from typing import NamedTuple
 import numpy as np
 import pandas as pd
 import torch
+from gMRItensor.group_statistics import MAD_TO_SD
 from gMRItensor.model_io import SavedDecomposition
 from scipy.stats import chi2
 from tlviz.outliers import get_leverage_outlier_threshold
@@ -137,7 +138,7 @@ def _robust_residual_cutoff(residual: np.ndarray, p_value: float) -> float | Non
     and `σ` from the median and `1.4826·MAD`, so a few outlying subjects do
     not move the cut-off; None without spread."""
     centre = float(np.median(residual))
-    spread = 1.4826 * float(np.median(np.abs(residual - centre)))
+    spread = MAD_TO_SD * float(np.median(np.abs(residual - centre)))
     if spread == 0 or centre <= 0:
         return None
     scale = spread**2 / (2 * centre)

@@ -227,8 +227,9 @@ def subjects_outside_sd(
     return worst.loc[worst["z"].abs() > n_sd, columns].reset_index(drop=True)
 
 
-# 1.4826 * MAD estimates the SD of normally distributed data.
-_MAD_TO_SD = 1.4826
+#: 1.4826 * MAD (median absolute deviation) estimates the SD of normally
+#: distributed data.
+MAD_TO_SD = 1.4826
 
 
 def flag_roi_values(
@@ -259,7 +260,7 @@ def flag_roi_values(
     cells = observed.groupby(list(by))[value]
     median = cells.transform("median")
     deviation = (observed[value] - median).abs()
-    scale = _MAD_TO_SD * deviation.groupby([observed[c] for c in by]).transform(
+    scale = MAD_TO_SD * deviation.groupby([observed[c] for c in by]).transform(
         "median",
     )
     judged = (cells.transform("count") >= min_n) & (scale > 0)

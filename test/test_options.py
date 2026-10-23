@@ -9,6 +9,7 @@ from gMRItensor.options import FitOptions
 from gMRItensor.options import GroupMapPlotOptions
 from gMRItensor.options import options_from_json
 from gMRItensor.options import options_to_json
+from gMRItensor.options import OverviewPlotOptions
 from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import StatisticsPlotOptions
@@ -191,11 +192,32 @@ def test_statistics_plot_options(tmp_path: Path) -> None:
         ({"relaxivity": -1.0}, "relaxivity"),
         ({"layout": "grid"}, "layout"),
         ({"sd_bands": True, "layout": "panels"}, "--sd-bands needs --layout rows"),
-        ({"overview": True, "overview_z": 0.0}, "overview_z must be > 0"),
     ]
     for bad, match in cases:
         with pytest.raises(ValueError, match=match):
             StatisticsPlotOptions(**common, **bad)
+
+
+def test_overview_plot_options(tmp_path: Path) -> None:
+    common: dict[str, Any] = {
+        "roi_signal": tmp_path / "roi_signal.parquet",
+        "subject_info": _subject_info(tmp_path),
+        "group_variable": "diagnosis",
+        "output_dir": tmp_path,
+    }
+
+    default = OverviewPlotOptions(**common)
+    assert (default.statistics, default.z_cut) == (("median",), 3.5)
+    cases: list[tuple[dict[str, Any], str]] = [
+        ({"statistics": ("max",)}, "statistics"),
+        ({"relaxivity": -1.0}, "relaxivity"),
+        ({"z_cut": 0.0}, "z_cut must be > 0"),
+        ({"dpi": 0}, "dpi"),
+        ({"group_variable": "nope"}, "nope"),
+    ]
+    for bad, match in cases:
+        with pytest.raises(ValueError, match=match):
+            OverviewPlotOptions(**{**common, **bad})
 
 
 def test_decomposition_plot_options(tmp_path: Path) -> None:

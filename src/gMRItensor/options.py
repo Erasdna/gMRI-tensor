@@ -367,9 +367,7 @@ class StatisticsPlotOptions:
     With neither, every preset region is used. `relaxivity` (default 3.2
     when a concentration statistic is requested) converts ΔR1 to mM.
     `sd_bands` draws the cohort mean +/- 1, 2 and 3 SD behind the subject
-    curves (rows layout only). `overview` also draws every label for every
-    subject and session, flagging values with |robust z| > `overview_z`
-    (`flag_roi_values`).
+    curves (rows layout only).
     """
 
     roi_signal: Path
@@ -384,8 +382,6 @@ class StatisticsPlotOptions:
     min_group_n: int = 2
     layout: Literal["rows", "panels"] = "rows"
     sd_bands: bool = False
-    overview: bool = False
-    overview_z: float = 3.5
     page_width: str | float = "double"
     formats: tuple[str, ...] = ("pdf", "png")
     dpi: int = 300
@@ -424,10 +420,6 @@ class StatisticsPlotOptions:
             not self.sd_bands or self.layout == "rows",
             "--sd-bands needs --layout rows (panels have no subject curves)",
         )
-        _check(
-            self.overview_z > 0,
-            f"overview_z must be > 0, got {self.overview_z}",
-        )
         _check_figure(self.page_width, self.dpi)
         _check_subject_columns(
             self.subject_info,
@@ -446,6 +438,44 @@ class StatisticsPlotOptions:
         if self.rois is None or self.rois == "all":
             return self.rois  # type: ignore[return-value]
         return [int(roi) for roi in self.rois]
+
+
+@dataclass(frozen=True)
+class OverviewPlotOptions:
+    """`gmri plot overview`: every label, subject and session, outliers flagged.
+
+    Values with |robust z| > `z_cut` among all subjects for that label and
+    session are flagged (`flag_roi_values`). `relaxivity` (default 3.2 when
+    a concentration statistic is requested) converts ΔR1 to mM.
+    """
+
+    roi_signal: Path
+    subject_info: Path
+    group_variable: str
+    output_dir: Path
+    statistics: tuple[str, ...] = ("median",)
+    relaxivity: float | None = None
+    z_cut: float = 3.5
+    formats: tuple[str, ...] = ("pdf", "png")
+    dpi: int = 300
+    csf_offset: int = 10000
+
+    def __post_init__(self) -> None:
+        bad = [s for s in self.statistics if s not in STATISTICS]
+        _check(
+            bool(self.statistics) and not bad,
+            f"statistics must be from {STATISTICS}, got {bad or '[]'}",
+        )
+        _check(
+            self.relaxivity is None or self.relaxivity > 0,
+            f"relaxivity must be > 0, got {self.relaxivity}",
+        )
+        _check(self.z_cut > 0, f"z_cut must be > 0, got {self.z_cut}")
+        _check(self.dpi >= 1, f"dpi must be >= 1, got {self.dpi}")
+        _check_subject_columns(
+            self.subject_info,
+            {self.group_variable: "--group-variable"},
+        )
 
 
 @dataclass(frozen=True)

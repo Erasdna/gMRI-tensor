@@ -68,6 +68,7 @@ from gMRItensor.options import FitOptions
 from gMRItensor.options import GroupMapPlotOptions
 from gMRItensor.options import options_from_json
 from gMRItensor.options import options_to_json
+from gMRItensor.options import OverviewPlotOptions
 from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import RUNNER_METHODS
@@ -302,94 +303,47 @@ def _subject_groups(
     return {s: group for s, group in zip(subjects, groups) if pd.notna(group)}
 
 
-OVERVIEW_FLAG_COLUMNS = [
-    "time_point",
-    "label",
-    "region",
-    "tissue",
-    "subject",
-    "group",
-    "value",
-    "robust_z",
-]
+def _read_roi_signal(
+    path: Path,
+    statistics: Sequence[str],
+    relaxivity: float | None,
+) -> tuple[pd.DataFrame, str]:
+    """`roi_signal.parquet` and its signal (`delta_R1` or `ratio`). Raises
+    if a concentration statistic or `relaxivity` is asked of T1w input."""
+    signal = _metadata(path, "roi_signal").get("signal", "delta_R1")
+    if signal == "ratio":
+        wants_concentration = [s for s in statistics if s in CONCENTRATION_STATISTICS]
+        if wants_concentration:
+            raise ValueError(
+                f"{wants_concentration} need ΔR1, but {path} holds the T1w "
+                "signal ratio: concentration is not available for T1w",
+            )
+        if relaxivity is not None:
+            raise ValueError("relaxivity has no meaning for T1w input")
+    return pd.read_parquet(path), signal
 
 
-def _overview(
-    options: StatisticsPlotOptions,
-    roi_signal: pd.DataFrame,
-    groups: dict[str, Any],
-    signal: str,
-) -> list[Path]:
-    """`--overview`: every label of `roi_signal` for every subject with a
-    group and every session, per statistic. Writes the flagged values
-    (`flag_roi_values`) to `roi_analysis/overview_flags__<statistic>.csv`
-    and four figures to `figures/roi/overview/<statistic>/`: `parenchyma`
-    and `csf` (all labels, `overview_blocks`) and `parenchyma_regions` and
-    `csf_regions` (`overview_regions`); a figure without labels is skipped.
-    """
-    labels = aggregate_roi_signal(roi_signal, labels="all")
-    if any(s in CONCENTRATION_STATISTICS for s in options.statistics):
-        labels = add_concentration(labels, options.relaxivity or DEFAULT_RELAXIVITY)
-    labels = labels[labels["subject"].isin(groups)]
-    labels = labels.assign(
-        group=labels["subject"].map(groups),
-        label=labels["roi"].astype(int),
-    ).rename(columns={"time_point": "timepoint"})
-    ids = labels["label"].unique()
-    blocks = overview_blocks(ids, options.csf_offset)
-    regions = overview_regions(ids, options.csf_offset)
-    block_of = {label: name for part in blocks for name, b in part for label in b}
-    timepoints = sorted(labels["timepoint"].unique())
-    figures = (
-        ("parenchyma", plot_roi_overview, blocks[0], "All parenchyma ROIs"),
-        ("csf", plot_roi_overview, blocks[1], "All CSF ROIs"),
-        ("parenchyma_regions", plot_region_columns, regions[0], "Parenchyma regions"),
-        ("csf_regions", plot_region_columns, regions[1], "CSF regions"),
+def _grouped_frame(
+    frame: pd.DataFrame,
+    statistics: Sequence[str],
+    relaxivity: float | None,
+    subject_info: Path,
+    group_variable: str,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    """`aggregate_roi_signal` output ready for the figures: concentrations
+    added if a statistic needs them, subjects without a group left out
+    (`_subject_groups`), a `group` column, and `time_point` renamed to
+    `timepoint`. Returns the frame and each kept subject's group."""
+    if any(s in CONCENTRATION_STATISTICS for s in statistics):
+        frame = add_concentration(frame, relaxivity or DEFAULT_RELAXIVITY)
+    groups = _subject_groups(
+        sorted(frame["subject"].unique()),
+        subject_info,
+        group_variable,
     )
-
-    written: list[Path] = []
-    for statistic in options.statistics:
-        flags = flag_roi_values(labels, statistic, z_cut=options.overview_z)
-        tissue = np.where(
-            is_csf(flags["label"], options.csf_offset),
-            "csf",
-            "parenchyma",
-        )
-        table = flags.assign(
-            time_point=flags["timepoint"],
-            region=flags["label"].map(block_of),
-            tissue=tissue,
-            value=flags[statistic],
-        )[OVERVIEW_FLAG_COLUMNS]
-        table.sort_values(["time_point", "subject", "label"]).to_csv(
-            Path(options.output_dir)
-            / "roi_analysis"
-            / f"overview_flags__{statistic}.csv",
-            index=False,
-        )
-        directory = Path(options.output_dir) / "figures" / "roi" / "overview"
-        for name, plot, columns, title in figures:
-            if not columns:
-                continue
-            fig, _ = plot(
-                labels,
-                columns,
-                statistic,
-                flags,
-                statistic_label(statistic, signal),
-                title=title,
-                z_cut=options.overview_z,
-                timepoints=timepoints,
-            )
-            written.extend(
-                save_figure(
-                    fig,
-                    directory / statistic / name,
-                    options.formats,
-                    options.dpi,
-                ),
-            )
-    return written
+    frame = frame[frame["subject"].isin(groups)].copy()
+    frame["group"] = frame["subject"].map(groups)
+    return frame.rename(columns={"time_point": "timepoint"}), groups
 
 
 def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult:
@@ -403,41 +357,26 @@ def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult
     cohort mean and SD behind the bands, and `outside_3sd__<stat>.csv`, the
     subjects named for a point beyond +/-3 SD). Then one figure per ROI and
     statistic, drawn from those saved tables, under
-    `<output_dir>/figures/roi/`. With `overview`, also the overview figures
-    and flagged values of every label (`_overview`).
+    `<output_dir>/figures/roi/`.
     """
-    metadata = _metadata(options.roi_signal, "roi_signal")
-    signal = metadata.get("signal", "delta_R1")
-    wants_concentration = [
-        s for s in options.statistics if s in CONCENTRATION_STATISTICS
-    ]
-    if signal == "ratio":
-        if wants_concentration:
-            raise ValueError(
-                f"{wants_concentration} need ΔR1, but {options.roi_signal} holds "
-                "the T1w signal ratio: concentration is not available for T1w",
-            )
-        if options.relaxivity is not None:
-            raise ValueError("relaxivity has no meaning for T1w input")
-
-    roi_signal = pd.read_parquet(options.roi_signal)
+    roi_signal, signal = _read_roi_signal(
+        options.roi_signal,
+        options.statistics,
+        options.relaxivity,
+    )
     regions = options.region_groups()
     if not options.regions:
         # The default (every preset): skip presets with no label in the data;
         # explicitly requested regions still fail in `aggregate_roi_signal`.
         present = set(roi_signal["label"])
         regions = {name: ids for name, ids in regions.items() if present & set(ids)}
-    frame = aggregate_roi_signal(roi_signal, regions, options.label_ids())
-    if wants_concentration:
-        frame = add_concentration(frame, options.relaxivity or DEFAULT_RELAXIVITY)
-    groups = _subject_groups(
-        sorted(frame["subject"].unique()),
+    frame, groups = _grouped_frame(
+        aggregate_roi_signal(roi_signal, regions, options.label_ids()),
+        options.statistics,
+        options.relaxivity,
         options.subject_info,
         options.group_variable,
     )
-    frame = frame[frame["subject"].isin(groups)].copy()
-    frame["group"] = frame["subject"].map(groups)
-    frame = frame.rename(columns={"time_point": "timepoint"})
     categories = sorted(set(groups.values()))
 
     tables_dir = Path(options.output_dir) / "roi_analysis"
@@ -522,10 +461,102 @@ def run_statistics_plots(options: StatisticsPlotOptions) -> StatisticsPlotResult
                     options.dpi,
                 ),
             )
-    if options.overview:
-        written.extend(_overview(options, roi_signal, groups, signal))
     write_provenance(options.output_dir, "plot_statistics", options)
     return StatisticsPlotResult(written, summary)
+
+
+OVERVIEW_FLAG_COLUMNS = [
+    "time_point",
+    "label",
+    "region",
+    "tissue",
+    "subject",
+    "group",
+    "value",
+    "robust_z",
+]
+
+
+def run_overview_plots(options: OverviewPlotOptions) -> list[Path]:
+    """`gmri plot overview`: every label of `roi_signal` for every subject
+    with a group and every session, per statistic.
+
+    Writes the flagged values (`flag_roi_values`) to
+    `<output_dir>/roi_analysis/overview_flags__<statistic>.csv` and four
+    figures to `<output_dir>/figures/roi/overview/<statistic>/`:
+    `parenchyma` and `csf` (all labels, `overview_blocks`) and
+    `parenchyma_regions` and `csf_regions` (`overview_regions`); a figure
+    without labels is skipped. Returns the figure paths.
+    """
+    roi_signal, signal = _read_roi_signal(
+        options.roi_signal,
+        options.statistics,
+        options.relaxivity,
+    )
+    labels, _ = _grouped_frame(
+        aggregate_roi_signal(roi_signal, labels="all"),
+        options.statistics,
+        options.relaxivity,
+        options.subject_info,
+        options.group_variable,
+    )
+    labels["label"] = labels["roi"].astype(int)
+    ids = labels["label"].unique()
+    blocks = overview_blocks(ids, options.csf_offset)
+    regions = overview_regions(ids, options.csf_offset)
+    block_of = {label: name for part in blocks for name, b in part for label in b}
+    timepoints = sorted(labels["timepoint"].unique())
+    figures = (
+        ("parenchyma", plot_roi_overview, blocks[0], "All parenchyma ROIs"),
+        ("csf", plot_roi_overview, blocks[1], "All CSF ROIs"),
+        ("parenchyma_regions", plot_region_columns, regions[0], "Parenchyma regions"),
+        ("csf_regions", plot_region_columns, regions[1], "CSF regions"),
+    )
+
+    tables_dir = Path(options.output_dir) / "roi_analysis"
+    tables_dir.mkdir(parents=True, exist_ok=True)
+    written: list[Path] = []
+    for statistic in options.statistics:
+        flags = flag_roi_values(labels, statistic, z_cut=options.z_cut)
+        tissue = np.where(
+            is_csf(flags["label"], options.csf_offset),
+            "csf",
+            "parenchyma",
+        )
+        table = flags.assign(
+            time_point=flags["timepoint"],
+            region=flags["label"].map(block_of),
+            tissue=tissue,
+            value=flags[statistic],
+        )[OVERVIEW_FLAG_COLUMNS]
+        table.sort_values(["time_point", "subject", "label"]).to_csv(
+            tables_dir / f"overview_flags__{statistic}.csv",
+            index=False,
+        )
+        directory = Path(options.output_dir) / "figures" / "roi" / "overview"
+        for name, plot, columns, title in figures:
+            if not columns:
+                continue
+            fig, _ = plot(
+                labels,
+                columns,
+                statistic,
+                flags,
+                statistic_label(statistic, signal),
+                title=title,
+                z_cut=options.z_cut,
+                timepoints=timepoints,
+            )
+            written.extend(
+                save_figure(
+                    fig,
+                    directory / statistic / name,
+                    options.formats,
+                    options.dpi,
+                ),
+            )
+    write_provenance(options.output_dir, "plot_overview", options)
+    return written
 
 
 # --------------------------------------------------------------------------

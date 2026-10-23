@@ -8,16 +8,17 @@ rows (`subject`, `group`, `timepoint`, `label` and the statistic) and
 from collections.abc import Sequence
 
 import matplotlib
-import matplotlib.pyplot as plt
-import numpy as np
-import pandas as pd
-import scienceplots  # noqa: F401
-from gMRItensor.plotting.utils import get_color_palette
-from gMRItensor.roi_groups import Block
-from matplotlib.lines import Line2D
+
+matplotlib.use("Agg")  # Prevent GUI display errors in containers/terminals
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+import pandas as pd  # noqa: E402
+import scienceplots  # noqa: F401,E402
+from gMRItensor.plotting.utils import get_color_palette  # noqa: E402
+from gMRItensor.roi_groups import Block  # noqa: E402
+from matplotlib.lines import Line2D  # noqa: E402
 
 plt.style.use(["science", "no-latex"])
-matplotlib.use("Agg")
 
 # Width [in] per label of the all-ROI and the region figures, height [in]
 # per session row, and width [in] of the column of row notes.

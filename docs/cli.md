@@ -83,8 +83,6 @@ The command combines labels into ROIs and computes the statistics. It then compa
 | `--min-group-n` | `2` | A time point is tested only if every group has at least this many subjects there. |
 | `--layout` | `rows` | `rows`: mean ± SEM ribbon plus one column of subject curves per group. `panels`: ribbon only. |
 | `--sd-bands` | off | Draw the cohort mean ± 1, 2 and 3 SD (all subjects, regardless of group) behind the subject curves, to spot outlying subjects. Needs `--layout rows`. |
-| `--overview` | off | Also draw every label for every subject and session, and flag outlying values (see [ROI overview](#roi-overview)). |
-| `--overview-z Z` | `3.5` | Flag a value when \|robust z\| > Z. Needs `--overview`. |
 | `--page-width`, `--formats`, `--dpi` | `double`, `pdf png`, `300` | Figure width (`single` 3.5", `onehalf` 5.5", `double` 7.0", or inches), file formats and resolution. |
 
 **Subjects and tests:**
@@ -104,38 +102,6 @@ The command combines labels into ROIs and computes the statistics. It then compa
 - `roi_analysis/summary.csv`: for each ROI and statistic, the significant time points, the smallest adjusted p-value and the group with the higher mean there.
 - With `--sd-bands`, for each statistic: `roi_analysis/cohort__<stat>.parquet` (cohort `mean`, `std` and `n` per ROI and time point) and `roi_analysis/outside_3sd__<stat>.csv` (each subject with a point beyond ±3 SD: its most extreme time point, value and `z`). With 10 or fewer subjects no point can lie beyond 3 SD.
 - `figures/roi/single/<stat>/<roi>__<layout>.<ext>`.
-- With `--overview`, for each statistic: `figures/roi/overview/<stat>/` and `roi_analysis/overview_flags__<stat>.csv` (below).
-
-### ROI overview
-
-`--overview` is for getting to know the data and finding problematic subjects and ROIs, not for publication. For each statistic it draws every label in `roi_signal` (not only the `--region` / `--rois` ones), for every subject with a group and every session. The figures are large; open the PDFs and zoom in.
-
-**Figures** (`figures/roi/overview/<stat>/`):
-- `parenchyma`, `csf`: every label along x, one row per session.
-  - Labels are ordered in blocks, numerically within a block.
-  - Parenchyma blocks: Subcortical GM, WM, Cerebellum, Brainstem, Other, Cortex lh (1000s), Cortex rh (2000s).
-  - CSF blocks: Ventricles + CSF (24), Infratentorial, Pons, Cortical CSF lh and rh, Other.
-- `parenchyma_regions`, `csf_regions`: one column per region, one row per session.
-  - Parenchyma columns: Subcortical GM, WM, Cerebellum, Brainstem. The cortex is only in `parenchyma`.
-  - CSF columns: Supratentorial CSF, Ventricles + CSF (24), Infratentorial CSF, Pontine cistern.
-- Every subject is one dot, coloured by group. Every row (in the region figures, every panel) has its own y-scale, so the spread within a session stays visible.
-- A flagged value gets a black ring and its subject id in tiny type, readable when zoomed.
-- The note beside each row gives the number of flagged values, and names each subject whose flagged values make up at least 10% (and at least 2) of the figure's ROIs in that session. Such a subject has a scan-wide problem (e.g. a failed scan) or deviates generally.
-- A figure without labels (e.g. no CSF atlas) is skipped.
-
-**`roi_analysis/overview_flags__<stat>.csv`:** one row per flagged value, sorted by time point, subject and label. Columns: `time_point`, `label`, `region` (the block), `tissue` (`parenchyma` or `csf`), `subject`, `group`, `value`, `robust_z`.
-
-**How values are flagged:**
-1. **Unit:** one subject's value in one label at one session. Each label and session is judged on its own, against all subjects with a value there.
-2. **Robust z:** the modified z-score of Iglewicz and Hoaglin (1993), `z = (x − median) / (1.4826 · MAD)`. The median and MAD (median absolute deviation from the median) are taken over those subjects' values. 1.4826 · MAD equals the standard deviation for normally distributed data. Unlike the mean and SD, the median and MAD are hardly moved by the outliers being looked for, so a failed scan cannot hide itself by inflating the scale.
-3. **Rule:** flag when |z| > `--overview-z` (3.5, Iglewicz and Hoaglin's recommended cut-off).
-   - It is a distance from the bulk of the data, not a percentile. Under normality |z| > 3.5 has a two-sided probability of about 0.05%.
-   - Both directions are flagged: too high (e.g. partial volume or misregistration) and too low or negative (e.g. a failed scan or a wrong baseline).
-4. **Not judged:** a label and session with fewer than 5 values, or with MAD = 0 (half the values identical).
-5. **Groups are pooled:** the question is whether a scan looks unlike the others, so the reference is the whole cohort. With a large group difference, the upper tail of one group is flagged more often; the CSV keeps `group` to check this.
-6. **A screening tool, not a test:** there is no multiple-comparison correction. Over 200 labels × 24 subjects × 4 sessions, about 10 values are flagged by chance under normality, and more with heavier tails. A flag means "look at this scan or ROI", not "exclude it".
-
-Reference: Iglewicz, B. and Hoaglin, D. C. (1993). *How to Detect and Handle Outliers.* The ASQC Basic References in Quality Control: Statistical Techniques, vol. 16 (E. F. Mykytka, ed.). Milwaukee, WI: ASQC Quality Press.
 
 ### ROI presets
 
@@ -159,6 +125,54 @@ FreeSurfer label ids. CSF labels are the parenchyma ids + 10000. Ventricles coun
 | `parenchyma` | every label 1–9999 except the ventricles and FreeSurfer CSF (24) |
 
 Figures label presets with short names (e.g. `white_matter` → "WM", `cortical_grey_matter_csf` → "Supratentorial CSF"); file names keep the preset name.
+
+## `gmri plot overview`
+
+```bash
+gmri plot overview --roi-signal results/data/roi_signal.parquet --subject-info subjects.csv \
+    --group-variable diagnosis --output-dir results [--statistics median total_amount] [--z-cut 3.5]
+```
+
+The command is for getting to know the data and finding problematic subjects and ROIs, not for publication. For each statistic it draws every label in `roi_signal`, for every subject with a group and every session. The figures are large; open the PDFs and zoom in. It computes no group statistics and writes none of the `plot statistics` outputs.
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `--roi-signal` | required | `roi_signal.parquet` from `gmri preprocess`. |
+| `--subject-info`, `--group-variable` | required | The subject info CSV and the column to colour by. Subjects with a blank cell are left out, and named. |
+| `--output-dir` | required | Results directory. |
+| `--statistics` | `median` | As in `plot statistics`; each gets its own figures and flag table. |
+| `--relaxivity` | `3.2` | r1 in 1/(mM·s) for concentrations. It is an error for T1w input. |
+| `--z-cut Z` | `3.5` | Flag a value when \|robust z\| > Z (below). |
+| `--formats`, `--dpi` | `pdf png`, `300` | File formats and resolution. The width follows the number of labels. |
+
+**Figures** (`figures/roi/overview/<stat>/`):
+- `parenchyma`, `csf`: every label along x, one row per session.
+  - Labels are ordered in blocks, numerically within a block.
+  - Parenchyma blocks: Subcortical GM, WM, Cerebellum, Brainstem, Other, Cortex lh (1000s), Cortex rh (2000s).
+  - CSF blocks: Ventricles + CSF (24), Infratentorial, Pons, Cortical CSF lh and rh, Other.
+- `parenchyma_regions`, `csf_regions`: one column per region, one row per session.
+  - Parenchyma columns: Subcortical GM, WM, Cerebellum, Brainstem. The cortex is only in `parenchyma`.
+  - CSF columns: Supratentorial CSF, Ventricles + CSF (24), Infratentorial CSF, Pontine cistern.
+- Every subject is one dot, coloured by group. Every row (in the region figures, every panel) has its own y-scale, so the spread within a session stays visible.
+- A flagged value gets a black ring and its subject id in tiny type, readable when zoomed.
+- The note beside each row gives the number of flagged values, and names each subject whose flagged values make up at least 10% (and at least 2) of the figure's ROIs in that session. Such a subject has a scan-wide problem (e.g. a failed scan) or deviates generally.
+- A figure without labels (e.g. no CSF atlas) is skipped.
+
+**`roi_analysis/overview_flags__<stat>.csv`:** one row per flagged value, sorted by time point, subject and label. Columns: `time_point`, `label`, `region` (the block), `tissue` (`parenchyma` or `csf`), `subject`, `group`, `value`, `robust_z`.
+
+**How values are flagged:**
+1. **Unit:** one subject's value in one label at one session. Each label and session is judged on its own, against all subjects with a value there.
+2. **Robust z:** the modified z-score of Iglewicz and Hoaglin (1993), `z = (x − median) / (1.4826 · MAD)`. The median and MAD (median absolute deviation from the median) are taken over those subjects' values. 1.4826 · MAD equals the standard deviation for normally distributed data. Unlike the mean and SD, the median and MAD are hardly moved by the outliers being looked for, so a failed scan cannot hide itself by inflating the scale.
+3. **Rule:** flag when |z| > `--z-cut` (3.5, Iglewicz and Hoaglin's recommended cut-off).
+   - It is a distance from the bulk of the data, not a percentile. Under normality |z| > 3.5 has a two-sided probability of about 0.05%.
+   - Both directions are flagged: too high (e.g. partial volume or misregistration) and too low or negative (e.g. a failed scan or a wrong baseline).
+4. **Not judged:** a label and session with fewer than 5 values, or with MAD = 0 (half the values identical).
+5. **Groups are pooled:** the question is whether a scan looks unlike the others, so the reference is the whole cohort. With a large group difference, the upper tail of one group is flagged more often; the CSV keeps `group` to check this.
+6. **A screening tool, not a test:** there is no multiple-comparison correction. Over 200 labels × 24 subjects × 4 sessions, about 10 values are flagged by chance under normality, and more with heavier tails. A flag means "look at this scan or ROI", not "exclude it".
+
+**Compared with `plot statistics --sd-bands`:** the SD bands use the mean ± 3 SD per region, which is not robust (one outlier inflates the SD, and with 10 or fewer subjects nothing can lie beyond 3 SD). The overview judges every label on its own, with the robust z.
+
+Reference: Iglewicz, B. and Hoaglin, D. C. (1993). *How to Detect and Handle Outliers.* The ASQC Basic References in Quality Control: Statistical Techniques, vol. 16 (E. F. Mykytka, ed.). Milwaukee, WI: ASQC Quality Press.
 
 ## `gmri decompose`
 
