@@ -311,6 +311,42 @@ def test_cli_exclude_subjects_in_plan_run_collect(
     assert not (results / "replicability").exists()
 
 
+def test_cli_preprocess_with_a_negative_cutoff(
+    head_study: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = head_study.root / "results"
+    preprocess = [
+        "preprocess",
+        "--manifest",
+        head_study.manifest,
+        "--output-dir",
+        results,
+        "--input-type",
+        "T1map",
+        "--time-unit",
+        "ms",
+        "--n-procs",
+        1,
+    ]
+
+    assert _run([*preprocess, "--negative-cutoff", 4, "--noise-sd", "0.01"]) == 0
+    assert "k4_sd0.01" in capsys.readouterr().out
+    folder = results / "data" / "k4_sd0.01"
+    assert (folder / "noise.csv").exists() and (folder / "invalid_rois.csv").exists()
+
+    assert _run([*preprocess, "--noise-source", "inside"]) == 2
+    assert "noise_source needs negative_cutoff" in capsys.readouterr().err
+    assert _run([*preprocess, "--negative-cutoff", 0]) == 2
+    assert "negative_cutoff must be > 0" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        _run([*preprocess, "--negative-cutoff", 4, "--noise-sd", "brain=0.01"])
+    assert "parenchyma=SD,csf=SD" in capsys.readouterr().err
+    t1w = [*preprocess[:5], "--input-type", "T1w", "--negative-cutoff", 4]
+    assert _run(t1w) == 2
+    assert "T1w" in capsys.readouterr().err
+
+
 def test_cli_replots_reproducibility(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -679,7 +715,18 @@ def test_cli_parses_fit_options_and_modes() -> None:
             ["plot", "decomposition", "--help"],
             ["--segmentation", "--mode-grid", "--slices"],
         ),
-        (["preprocess", "--help"], ["--input-type", "--store-voxels", "--time-unit"]),
+        (
+            ["preprocess", "--help"],
+            [
+                "--input-type",
+                "--store-voxels",
+                "--time-unit",
+                "--negative-cutoff",
+                "--noise-source",
+                "--noise-sd",
+                "--max-invalid-voxel-fraction",
+            ],
+        ),
     ],
 )
 def test_cli_help(

@@ -154,6 +154,71 @@ def _add_preprocess(commands: Any) -> None:
         default=5,
         help="parallel image readers (default: 5)",
     )
+    noise = parser.add_argument_group(
+        "negative values (ΔR1 input; off by default)",
+        "With --negative-cutoff K, values below -K times the study's noise SD "
+        "become invalid (NaN), and ROIs with too many invalid voxels are NaN. "
+        "Written to <output-dir>/data/k<K>[...]/ with noise.csv and "
+        "invalid_rois.csv; the other options here need --negative-cutoff.",
+    )
+    noise.add_argument(
+        "--negative-cutoff",
+        type=float,
+        metavar="K",
+        help="cutoff in noise SDs below 0 (4 is a sensible choice)",
+    )
+    noise.add_argument(
+        "--noise-source",
+        choices=("auto", "outside", "inside"),
+        default="auto",
+        help="estimate the noise outside the brain mask, inside it per "
+        "compartment, or outside when at least half the scans allow it "
+        "(default: auto)",
+    )
+    noise.add_argument(
+        "--noise-shell-mm",
+        type=float,
+        default=10.0,
+        metavar="MM",
+        help="width of the band outside the mask used by the outside source "
+        "(default: 10)",
+    )
+    noise.add_argument(
+        "--noise-sd",
+        type=_noise_sd,
+        metavar="SD",
+        help="fix the noise SD in 1/s instead of estimating it: one value, or "
+        "parenchyma=SD,csf=SD",
+    )
+    noise.add_argument(
+        "--max-invalid-voxel-fraction",
+        type=float,
+        default=0.5,
+        metavar="F",
+        help="an ROI with a larger share of invalid voxels is NaN (default: 0.5)",
+    )
+    noise.add_argument(
+        "--csf-offset",
+        type=int,
+        default=10000,
+        help="id offset of the CSF atlas labels, for the compartments "
+        "(default: 10000)",
+    )
+
+
+def _noise_sd(value: str) -> float | tuple[float, float]:
+    """`--noise-sd`: `0.01`, or `parenchyma=0.01,csf=0.02`."""
+    try:
+        if "=" not in value:
+            return float(value)
+        parts = dict(part.split("=", 1) for part in value.split(","))
+        if sorted(parts) != ["csf", "parenchyma"]:
+            raise ValueError
+        return float(parts["parenchyma"]), float(parts["csf"])
+    except ValueError:
+        raise argparse.ArgumentTypeError(
+            f"expected a number or parenchyma=SD,csf=SD, got {value!r}",
+        ) from None
 
 
 def _add_fit_arguments(
@@ -839,7 +904,7 @@ def _replicability_options(args: argparse.Namespace) -> ReplicabilityOptions:
 
 
 def _run_preprocess(args: argparse.Namespace) -> None:
-    pipeline.run_preprocessing(
+    paths = pipeline.run_preprocessing(
         PreprocessingOptions(
             manifest=args.manifest,
             output_dir=args.output_dir,
@@ -847,8 +912,15 @@ def _run_preprocess(args: argparse.Namespace) -> None:
             time_unit=args.time_unit,
             store_voxels=args.store_voxels,
             n_procs=args.n_procs,
+            negative_cutoff=args.negative_cutoff,
+            noise_source=args.noise_source,
+            noise_shell_mm=args.noise_shell_mm,
+            noise_sd=args.noise_sd,
+            max_invalid_voxel_fraction=args.max_invalid_voxel_fraction,
+            csf_offset=args.csf_offset,
         ),
     )
+    print(f"Wrote {paths.roi_signal.parent}")
 
 
 def _given_flags(args: argparse.Namespace) -> list[str]:

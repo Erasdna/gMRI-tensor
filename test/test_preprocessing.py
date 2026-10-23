@@ -18,6 +18,7 @@ from gMRItensor.preprocessing import _atomic_outputs
 from gMRItensor.preprocessing import _coords_table
 from gMRItensor.preprocessing import _iter_parallel
 from gMRItensor.preprocessing import _load_labeled_tracer_voxels
+from gMRItensor.preprocessing import _shell
 from gMRItensor.preprocessing import _tracer_rows
 from gMRItensor.preprocessing import _TRACER_SCHEMA
 from gMRItensor.preprocessing import _tracer_table
@@ -25,6 +26,7 @@ from gMRItensor.preprocessing import compute_roi_scaling
 from gMRItensor.preprocessing import compute_roi_signal
 from gMRItensor.preprocessing import compute_tracer
 from gMRItensor.preprocessing import delta_r1_per_second
+from gMRItensor.preprocessing import invalidate_rois
 from gMRItensor.preprocessing import load_tensor_from_parquet
 from gMRItensor.preprocessing import load_tensor_with_exclusions
 from gMRItensor.preprocessing import read_signal_metadata
@@ -1189,8 +1191,10 @@ def test_compute_roi_signal_per_label():
         "mean",
         "n_voxels",
         "n_valid",
+        "n_rejected",
         "voxel_volume_mm3",
     ]
+    assert (roi["n_rejected"] == 0).all()
     assert list(roi["label"]) == [1, 2, 4]
     rows = roi.set_index("label")
     assert (rows.loc[1, "median"], rows.loc[1, "mean"]) == (2.0, 2.0)
@@ -1488,3 +1492,55 @@ def test_exclude_subjects_rejects_unknown_ids_and_excluding_everyone(tmp_path):
         load_tensor_from_parquet(path, "cp", exclude_subjects=("a", "zz", "x"))
     with pytest.raises(ValueError, match="every subject is excluded"):
         load_tensor_from_parquet(path, "cp", exclude_subjects=("a", "b"))
+
+
+def test_compute_roi_signal_counts_rejected_voxels() -> None:
+    segmentation = np.array([1, 1, 1, 1, 2, 2, 2, 2])
+    signal = np.array([1.0, np.nan, np.nan, 2.0, 1.0, np.nan, 3.0, 5.0])
+    rejected = np.array([False, True, False, False, False, True, False, False])
+
+    roi = compute_roi_signal(signal, segmentation, 1.0, rejected).set_index("label")
+
+    assert roi["n_rejected"].tolist() == [1, 1]
+    assert roi["n_valid"].tolist() == [2, 3]
+
+
+def test_invalidate_rois_above_the_fraction_only() -> None:
+    roi = pd.DataFrame(
+        {
+            "label": [1, 2, 3],
+            "median": [1.0, 2.0, 3.0],
+            "mean": [1.0, 2.0, 3.0],
+            "n_voxels": [4, 4, 4],
+            "n_valid": [2, 1, 4],  # half invalid; three quarters; none
+            "n_rejected": [1, 2, 0],
+            "voxel_volume_mm3": [1.0, 1.0, 1.0],
+        },
+    )
+
+    out, invalid = invalidate_rois(roi, 0.5)
+
+    assert invalid.to_dict("records") == [
+        {
+            "label": 2,
+            "n_voxels": 4,
+            "n_nonfinite": 1,
+            "n_rejected": 2,
+            "invalid_share": 0.75,
+        },
+    ]
+    assert np.isnan(out.loc[1, ["median", "mean"]].astype(float)).all()
+    assert out["n_valid"].tolist() == [2, 0, 4]  # exactly 50% is kept
+    assert invalidate_rois(roi, 1.0)[1].empty
+
+
+def test_shell_is_measured_in_mm_outside_the_mask() -> None:
+    mask = np.zeros((9, 9, 9))
+    mask[4, 4, 4] = 1
+    affine = np.diag([2.0, 1.0, 1.0, 1.0])  # voxels 2 mm along x
+
+    shell = _shell(mask, affine, 2.0)
+
+    assert not shell[4, 4, 4]  # inside the mask
+    assert shell[5, 4, 4] and not shell[6, 4, 4]  # 2 mm, 4 mm along x
+    assert shell[4, 6, 4] and not shell[4, 7, 4]  # 2 mm, 3 mm along y

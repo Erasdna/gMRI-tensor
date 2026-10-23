@@ -61,6 +61,9 @@ from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
 from gMRItensor.model_io import select_subjects
 from gMRItensor.model_io import sort_components
+from gMRItensor.noise import COMPARTMENTS
+from gMRItensor.noise import cutoffs_from_sigma
+from gMRItensor.noise import summarize_noise
 from gMRItensor.options import CONCENTRATION_STATISTICS
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
@@ -93,8 +96,10 @@ from gMRItensor.plotting.time_mode import plot_time_mode
 from gMRItensor.plotting.utils import resolve_page_width
 from gMRItensor.plotting.utils import save_figure
 from gMRItensor.preprocessing import compute_roi_scaling
+from gMRItensor.preprocessing import estimate_scan_noise
 from gMRItensor.preprocessing import EXCLUDED_COLUMNS
 from gMRItensor.preprocessing import load_tensor_with_exclusions
+from gMRItensor.preprocessing import NegativeCutoff
 from gMRItensor.preprocessing import PreprocessedPaths
 from gMRItensor.preprocessing import read_signal_metadata
 from gMRItensor.preprocessing import scale_tensor
@@ -237,16 +242,205 @@ def read_manifest(options: PreprocessingOptions) -> list[dict[str, Any]]:
 
 
 def run_preprocessing(options: PreprocessingOptions) -> PreprocessedPaths:
-    """`gmri preprocess`: images -> `<output_dir>/data/` ROI (+ voxel) tables."""
+    """`gmri preprocess`: images -> `<output_dir>/data/` ROI (+ voxel) tables.
+
+    With `negative_cutoff`, first the noise pass and the study's cutoff
+    (`_negative_cutoff`), then the tables, `noise.csv` and
+    `invalid_rois.csv` in `options.data_dir()`, with their own
+    `preprocess.json`; a summary of what was rejected goes to stderr.
+    """
+    args_list = read_manifest(options)
+    time_unit = options.time_unit or "ms"  # unused for T1w
+    cutoff = None
+    if options.negative_cutoff is not None:
+        cutoff = _negative_cutoff(options, args_list, time_unit)
+        _report_rerun(options, len(args_list), cutoff)
     paths = write_preprocessed_data(
-        read_manifest(options),
+        args_list,
         options.output_dir,
-        time_unit=options.time_unit or "ms",  # unused for T1w
+        time_unit=time_unit,
         store_voxels=options.store_voxels,
         n_procs=options.n_procs,
+        variant=options.variant(),
+        cutoff=cutoff,
     )
-    write_provenance(options.output_dir, "preprocess", options)
+    write_provenance(
+        options.data_dir() if cutoff is not None else options.output_dir,
+        "preprocess",
+        options,
+    )
+    if cutoff is not None:
+        _report_cutoff_effects(paths)
     return paths
+
+
+def _note(message: str) -> None:
+    print(message, file=sys.stderr)
+
+
+def _negative_cutoff(
+    options: PreprocessingOptions,
+    args_list: list[dict[str, Any]],
+    time_unit: str,
+) -> NegativeCutoff:
+    """The study's cutoffs: from `options.noise_sd`, or from the noise pass
+    (`estimate_scan_noise`, `summarize_noise`). Says on stderr which noise
+    source was used and why, the reference SD and cutoff per compartment,
+    the median per-scan SD per time point, and any warning."""
+    k = cast(float, options.negative_cutoff)
+    fixed = options.noise_sd_by_compartment()
+    table = None
+    if fixed is not None:
+        sigma, source = fixed, "fixed"
+        _note("noise SD fixed by --noise-sd: no noise pass")
+    else:
+        reference = summarize_noise(
+            estimate_scan_noise(
+                args_list,
+                time_unit,
+                options.csf_offset,
+                options.noise_shell_mm,
+                options.n_procs,
+            ),
+            options.noise_source,
+        )
+        sigma, source, table = reference.sigma, reference.source, reference.table
+        _note(f"noise source: {source} ({reference.reason})")
+        by_time = table.pivot_table(
+            index="time_point",
+            columns="set",
+            values="sigma",
+            aggfunc="median",
+        )
+        _note(f"median noise SD per time point [1/s]:\n{by_time.to_string()}")
+        for warning in reference.warnings:
+            _note(f"warning: {warning}")
+    cutoffs = cutoffs_from_sigma(sigma, k)
+    for compartment in COMPARTMENTS:
+        _note(
+            f"{compartment}: noise SD {sigma[compartment]:.4g} 1/s, cutoff "
+            f"{cutoffs[compartment]:.4g} 1/s ({k:g} SD)",
+        )
+
+    def as_json(values: dict[str, float]) -> str:
+        return json.dumps(
+            {
+                name: value if np.isfinite(value) else None
+                for name, value in values.items()
+            },
+        )
+
+    metadata = {
+        "noise_source": source,
+        "noise_sd": as_json(sigma),
+        "negative_cutoff_k": f"{k:g}",
+        "negative_cutoff": as_json(cutoffs),
+        "max_invalid_voxel_fraction": f"{options.max_invalid_voxel_fraction:g}",
+        "csf_offset": str(options.csf_offset),
+    }
+    return NegativeCutoff(
+        cutoffs,
+        options.csf_offset,
+        options.max_invalid_voxel_fraction,
+        table,
+        source,
+        metadata,
+    )
+
+
+def _report_rerun(
+    options: PreprocessingOptions,
+    n_scans: int,
+    cutoff: NegativeCutoff,
+) -> None:
+    """Before an earlier run in the same folder is replaced: say what
+    differs (options, number of scans, noise SD)."""
+    folder = options.data_dir()
+    record_path = folder / "preprocess.json"
+    if not record_path.exists():
+        return
+    old = json.loads(record_path.read_text())["options"]
+    new = _absolute_paths(dataclasses.asdict(options))
+    changes = [
+        f"{key}: {old.get(key)} -> {value}"
+        for key, value in new.items()
+        if old.get(key) != value
+    ]
+    noise_path = folder / "noise.csv"
+    if noise_path.exists():
+        old_noise = pd.read_csv(noise_path)
+        old_scans = len(old_noise[["subject", "time_point"]].drop_duplicates())
+        if old_scans != n_scans:
+            changes.append(f"scans: {old_scans} -> {n_scans}")
+    roi_path = folder / "roi_signal.parquet"
+    if roi_path.exists():
+        old_sd = read_signal_metadata(roi_path).get("noise_sd")
+        if old_sd is not None and old_sd != cutoff.metadata["noise_sd"]:
+            changes.append(f"noise SD: {old_sd} -> {cutoff.metadata['noise_sd']}")
+    relative = folder.relative_to(options.output_dir).as_posix()
+    _note(
+        f"replacing {relative} (an earlier run): "
+        + ("; ".join(changes) if changes else "same settings and scans"),
+    )
+
+
+# A scan is reported as unusual when its robust z exceeds this and it is
+# also off by a practically relevant amount: few scans with nearly equal
+# estimates have a tiny spread, which turns trivial differences into large
+# z-scores.
+_UNUSUAL_Z = 3.5
+_UNUSUAL_SIGMA_RATIO = 1.25
+_UNUSUAL_MODE_SHIFT = 0.5  # in noise SDs
+
+
+def _unusual_scans(noise: pd.DataFrame) -> pd.DataFrame:
+    """Rows of `noise.csv` whose mode or noise SD stands out from the other
+    scans of their set and time point: |z| > 3.5, and the mode at least
+    half a noise SD from their median or the SD at least 25% from it."""
+    by_set = noise.groupby(["set", "time_point"])
+    mode_shift = (noise["mode"] - by_set["mode"].transform("median")).abs()
+    sigma_ratio = noise["sigma"] / by_set["sigma"].transform("median")
+    shifted = (noise["mode_z"].abs() > _UNUSUAL_Z) & (
+        mode_shift > _UNUSUAL_MODE_SHIFT * by_set["sigma"].transform("median")
+    )
+    noisy = (noise["sigma_z"].abs() > _UNUSUAL_Z) & (
+        (sigma_ratio > _UNUSUAL_SIGMA_RATIO) | (sigma_ratio < 1 / _UNUSUAL_SIGMA_RATIO)
+    )
+    return noise[shifted | noisy]
+
+
+def _report_cutoff_effects(paths: PreprocessedPaths) -> None:
+    """Stderr summary of `noise.csv` and `invalid_rois.csv`."""
+    noise = pd.read_csv(cast(Path, paths.noise))
+    invalid = pd.read_csv(cast(Path, paths.invalid_rois))
+    for compartment in COMPARTMENTS:
+        rows = noise[noise["set"] == compartment]
+        n_rejected = int(rows["n_rejected"].sum())
+        message = f"{compartment}: {n_rejected} voxel(s) rejected"
+        if n_rejected:
+            worst = rows.loc[rows["rejected_share"].idxmax()]
+            message += (
+                f"; at most {worst['rejected_share']:.2%} of a scan's voxels "
+                f"({worst['subject']}, t={worst['time_point']})"
+            )
+        _note(message)
+    if invalid.empty:
+        _note("no ROI value invalidated")
+    else:
+        listed = ", ".join(
+            f"{row.label} ({row.subject}, t={row.time_point})"
+            for row in invalid.itertuples()
+        )
+        _note(
+            f"{len(invalid)} ROI value(s) invalidated (see {paths.invalid_rois}): "
+            f"{listed}. PARAFAC2/CMF drop such a label for every subject unless "
+            "its scan or subject is left out",
+        )
+    for row in _unusual_scans(noise).itertuples():
+        _note(
+            f"unusual scan: {row.subject}, t={row.time_point}, {row.set}: "
+            f"mode z {row.mode_z:.1f}, noise SD z {row.sigma_z:.1f}",
+        )
 
 
 def _metadata(path: Path, kind: str) -> dict[str, str]:

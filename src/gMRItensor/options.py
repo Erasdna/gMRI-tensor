@@ -20,6 +20,8 @@ from gMRItensor.group_statistics import AGGREGATES
 from gMRItensor.group_statistics import require_columns
 from gMRItensor.model_io import NEGLIGIBLE_SUBJECT_WEIGHT
 from gMRItensor.model_io import resolve_model
+from gMRItensor.noise import COMPARTMENTS
+from gMRItensor.noise import NOISE_SOURCES
 from gMRItensor.plotting.utils import JOURNAL_WIDTHS
 from gMRItensor.preprocessing import SIGNAL_TYPES
 from gMRItensor.roi_groups import get_roi_presets
@@ -128,7 +130,15 @@ def _check_subject_columns(path: Path, requested: dict[str, str]) -> None:
 
 @dataclass(frozen=True)
 class PreprocessingOptions:
-    """`gmri preprocess`: manifest of scans -> `<output_dir>/data/`."""
+    """`gmri preprocess`: manifest of scans -> `<output_dir>/data/`.
+
+    With `negative_cutoff` k, ΔR1 values below -k times the study's noise
+    SD are invalid, and an ROI with more than `max_invalid_voxel_fraction`
+    invalid voxels is NaN; the noise SD is estimated from `noise_source`
+    (`gMRItensor.noise`) unless `noise_sd` fixes it (one value, or a
+    parenchyma/CSF pair). Such a run writes to `data/<variant()>/`; the
+    other noise options need `negative_cutoff`.
+    """
 
     manifest: Path
     output_dir: Path
@@ -136,8 +146,43 @@ class PreprocessingOptions:
     time_unit: Literal["ms", "s"] | None = None
     store_voxels: bool = False
     n_procs: int = 5
+    negative_cutoff: float | None = None
+    noise_source: Literal["auto", "outside", "inside"] = "auto"
+    noise_shell_mm: float = 10.0
+    noise_sd: float | tuple[float, float] | None = None
+    max_invalid_voxel_fraction: float = 0.5
+    csf_offset: int = 10000
+
+    def variant(self) -> str:
+        """The output folder name under `data/`: `""` without a cutoff, else
+        `k<K>` plus every changed setting that alters the values."""
+        if self.negative_cutoff is None:
+            return ""
+        parts = [f"k{self.negative_cutoff:g}"]
+        if self.noise_sd is not None:
+            sds = (
+                self.noise_sd if isinstance(self.noise_sd, tuple) else (self.noise_sd,)
+            )
+            parts.append("sd" + "-".join(f"{sd:g}" for sd in sds))
+        defaults = {f.name: f.default for f in dataclasses.fields(self)}
+        if self.max_invalid_voxel_fraction != defaults["max_invalid_voxel_fraction"]:
+            parts.append(f"f{self.max_invalid_voxel_fraction:g}")
+        if self.noise_source != defaults["noise_source"]:
+            parts.append(self.noise_source)
+        if self.noise_shell_mm != defaults["noise_shell_mm"]:
+            parts.append(f"shell{self.noise_shell_mm:g}")
+        if self.csf_offset != defaults["csf_offset"]:
+            parts.append(f"csf{self.csf_offset}")
+        return "_".join(parts)
+
+    def data_dir(self) -> Path:
+        """Where this run writes: `<output_dir>/data/<variant()>`."""
+        return Path(self.output_dir) / "data" / self.variant()
 
     def __post_init__(self) -> None:
+        if isinstance(self.noise_sd, list):
+            object.__setattr__(self, "noise_sd", tuple(self.noise_sd))
+        self._check_noise_options()
         _check(
             self.input_type in SIGNAL_TYPES,
             f"input_type must be one of {SIGNAL_TYPES}, got {self.input_type!r}",
@@ -154,6 +199,60 @@ class PreprocessingOptions:
         )
         _check(self.n_procs >= 1, f"n_procs must be >= 1, got {self.n_procs}")
         _require_file(self.manifest, "manifest")
+
+    def _check_noise_options(self) -> None:
+        k = self.negative_cutoff
+        if k is None:
+            defaults = {f.name: f.default for f in dataclasses.fields(self)}
+            for name in (
+                "noise_source",
+                "noise_shell_mm",
+                "noise_sd",
+                "max_invalid_voxel_fraction",
+                "csf_offset",
+            ):
+                _check(
+                    getattr(self, name) == defaults[name],
+                    f"{name} needs negative_cutoff (--negative-cutoff)",
+                )
+            return
+        _check(
+            self.input_type != "T1w",
+            "negative_cutoff needs ΔR1 input (T1map or R1map), not T1w",
+        )
+        _check(np.isfinite(k) and k > 0, f"negative_cutoff must be > 0, got {k}")
+        _check(
+            self.noise_source in NOISE_SOURCES,
+            f"noise_source must be one of {NOISE_SOURCES}, got {self.noise_source!r}",
+        )
+        _check(
+            self.noise_shell_mm > 0,
+            f"noise_shell_mm must be > 0, got {self.noise_shell_mm}",
+        )
+        if self.noise_sd is not None:
+            pair = isinstance(self.noise_sd, tuple)
+            sds = (
+                self.noise_sd if isinstance(self.noise_sd, tuple) else (self.noise_sd,)
+            )
+            _check(
+                len(sds) == (2 if pair else 1) and all(sd > 0 for sd in sds),
+                "noise_sd must be one value > 0, or a parenchyma, csf pair, got "
+                f"{self.noise_sd}",
+            )
+        _check(
+            0.0 <= self.max_invalid_voxel_fraction <= 1.0,
+            "max_invalid_voxel_fraction must be in [0, 1], got "
+            f"{self.max_invalid_voxel_fraction}",
+        )
+        _check(self.csf_offset >= 1, f"csf_offset must be >= 1, got {self.csf_offset}")
+
+    def noise_sd_by_compartment(self) -> dict[str, float] | None:
+        """The fixed `noise_sd` per compartment, or None to estimate it."""
+        if self.noise_sd is None:
+            return None
+        if isinstance(self.noise_sd, tuple):
+            return dict(zip(COMPARTMENTS, self.noise_sd))
+        return dict.fromkeys(COMPARTMENTS, float(self.noise_sd))
 
 
 @dataclass(frozen=True)

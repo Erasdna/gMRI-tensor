@@ -30,6 +30,8 @@ gmri preprocess --manifest scans.csv --output-dir results --input-type T1map --t
 | `--time-unit` | required for T1map/R1map | Unit of the maps: T1 in `ms`/`s`, R1 in 1/`ms` or 1/`s`. There is no default, because a wrong unit scales ΔR1 by 1000. Ignored for T1w. |
 | `--store-voxels` | off | Also store every voxel's value, for a voxel-wise decomposition. All scans must be on one common template. |
 | `--n-procs` | `5` | Images read in parallel. |
+| `--negative-cutoff K` | off | Make ΔR1 values below −K × the study's noise SD invalid, and ROIs with too many invalid voxels NaN; `4` is a sensible choice. See [Negative values and noise](#negative-values-and-noise). |
+| `--noise-source`, `--noise-shell-mm`, `--noise-sd`, `--max-invalid-voxel-fraction`, `--csf-offset` | `auto`, `10`, estimated, `0.5`, `10000` | Settings of the cutoff; each needs `--negative-cutoff`. |
 
 **Signal:**
 - **T1map:** converted to R1 = 1/T1. The signal is ΔR1 = R1_post − R1_baseline, always stored in 1/s whatever `--time-unit` is.
@@ -54,9 +56,48 @@ sub-01,24,sub-01/T1map_ses-00.nii.gz,sub-01/T1map_ses-24.nii.gz,sub-01/mask.nii.
 
 | File | Contents |
 |---|---|
-| `data/roi_signal.parquet` | One row per subject × time point × label: `median`, `mean`, `n_voxels`, `n_valid` (finite voxels), `voxel_volume_mm3`. |
+| `data/roi_signal.parquet` | One row per subject × time point × label: `median`, `mean`, `n_voxels`, `n_valid` (the finite voxels the median and mean are taken over), `n_rejected` (voxels below the negative cutoff; 0 without one), `voxel_volume_mm3`. |
 | `data/voxels.parquet` | With `--store-voxels`: one row per scan × labeled voxel (`labels`, `label_index`, `values`). |
 | `data/voxels.coords.parquet` | Each voxel's `(labels, label_index)` key and `(i, j, k)` index. The template `shape` and `affine` are stored in the file metadata, with `template`, the resolved path of the first scan's segmentation. That path is a record only: the template check compares labels and voxel coordinates, not files. |
+
+### Negative values and noise
+
+ΔR1 of a voxel without tracer is noise around 0, so some values are negative. That is expected, and clipping them to 0 would push the noise to the positive side. Values far below 0 are not noise but artifacts (misregistration, partial volume, a bad baseline), and they work against the non-negative decompositions. `--negative-cutoff K` makes such values invalid:
+
+```bash
+gmri preprocess --manifest scans.csv --output-dir results --input-type T1map --time-unit ms --negative-cutoff 4
+```
+
+1. **Noise pass.** Every scan is read once more, and the noise SD of its ΔR1 is estimated for three sets of voxels:
+   - `outside`: the voxels outside the mask within `--noise-shell-mm` of it (skull, scalp), whose baseline lies within a factor 4 of the brain's 1st–99th percentile range of baseline values (fat and muscle stay in; air and fitting failures near 0 or far above any tissue value do not). No tracer is expected there.
+   - `parenchyma` and `csf`: the labelled voxels inside the mask, split as in the ROI presets (`--csf-offset`).
+
+   The estimate is σ = 1.4826 · median(m − x | x < m), where m is the half-sample mode of the values (Bickel, D. R. and Frühwirth, R. (2006). On a fast, robust estimator of the mode. *Computational Statistics & Data Analysis* 50, 3500–3530). Only the half below the mode is used, because positive values can be real tracer. Anchoring at the mode instead of 0 keeps both a uniform low uptake and an overall shift of the scan out of σ. Where the concentrations themselves vary a lot (late CSF), σ comes out too high, i.e. the cutoff is lenient. A set with fewer than 1000 values has no estimate.
+2. **One noise level for the study.** No scan is judged against its own estimate, so a shifted or unusually noisy scan is flagged instead of setting its own threshold.
+   - `--noise-source outside`: the median of the outside estimates over scans, for both compartments.
+   - `--noise-source inside`: per compartment, the lower quartile over scans. It favours the scans least inflated by real concentration spread.
+   - `auto` (default): `outside` when at least half the scans have an outside estimate (skull-stripped maps have none), otherwise `inside`.
+   - A warning is printed when the outside and the parenchyma estimates differ by more than a factor of 2.
+   - A compartment without any estimate gets no cutoff.
+   - `--noise-sd` fixes the noise SD (one value, or `parenchyma=SD,csf=SD`) and skips the noise pass, for example to keep the cutoffs when subjects are added later.
+3. **Cutoff.** In every scan, a value below −K × σ of its compartment becomes NaN; the cutoff is anchored at 0, the physical lower limit. Under Gaussian noise about 3·10⁻⁵ of the voxels without tracer fall below −4σ by chance, so removing only the negative tail biases nothing measurably.
+4. **Invalid ROIs.** An ROI with more than `--max-invalid-voxel-fraction` (default 0.5) invalid voxels, i.e. mapping failures plus rejected values, gets NaN `median` and `mean` and `n_valid` 0 for that scan. With `--store-voxels`, the rejected voxels and every voxel of an invalid ROI are NaN in `voxels.parquet` as well.
+
+**Outputs** go to their own folder, `data/k<K>/`, so runs with different settings never overwrite each other or the default `data/`. Every setting that changes the values and differs from its default is added to the name in this order: `_sd<SD>` (`_sd<P>-<C>` for a pair), `_f<F>`, `_outside`/`_inside`, `_shell<MM>`, `_csf<OFFSET>` (e.g. `data/k4/`, `data/k4_f0.25_inside/`). The folder holds `roi_signal.parquet` (and the voxel files), its own `preprocess.json`, and:
+
+| File | Contents |
+|---|---|
+| `noise.csv` | One row per scan and set (`outside`, `parenchyma`, `csf`). The scan's own estimate: `n` (values used), `mode`, `sigma`; `mode_z` and `sigma_z` (robust z of the mode and of log σ among the scans of the same set and time point; a large negative `mode_z` points to a shifted scan, e.g. a bad baseline); `used_in_reference`. Then the `cutoff` applied (1/s) and its effect: `n_rejected`, `rejected_share`, `n_invalid_rois`; those are empty for `outside`, whose voxels are only measured. |
+| `invalid_rois.csv` | One row per invalidated ROI value: `subject, time_point, label, compartment, n_voxels, n_nonfinite` (mapping failures), `n_rejected, invalid_share`. |
+
+The parquet metadata records `noise_source`, `noise_sd`, `negative_cutoff_k`, `negative_cutoff` (1/s per compartment), `max_invalid_voxel_fraction` and `csf_offset`. On stderr the command reports the noise source and why, the noise SD and cutoff per compartment, the median noise SD per time point (a rise over time means the estimate includes real concentration spread), the voxels rejected, every invalidated ROI value, and the scans that stand out (|z| > 3.5 and a noise SD at least 25% or a mode at least half a noise SD from the other scans). A rerun into an existing folder replaces it and says what changed (settings, number of scans, noise SD).
+
+**Caveats:**
+- The outside noise is a proxy: closeness to the coils, other tissue T1 and scalp misregistration can make it differ from the brain's. `noise.csv` has both estimates for every scan.
+- Partial volume at CSF/tissue borders gives artifacts of both signs, and only the negative ones are removed; prefer the `median` statistic there.
+- Smoothed or interpolated maps cluster the rejected voxels; integer-valued T1 maps give exact zeros.
+- The noise level, and so the cutoff, depends on the scans in the manifest unless `--noise-sd` fixes it.
+- PARAFAC2 and CMF drop a label (or, for voxel input, a voxel) that is NaN in any scan they keep. An invalid ROI in one scan therefore removes that label for every subject, unless the scan's session or the subject is left out (`--max-invalid-fraction`, `--exclude-subjects`).
 
 ## `gmri plot statistics`
 

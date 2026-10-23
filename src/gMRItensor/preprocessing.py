@@ -28,7 +28,13 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.compute as pc
 import pyarrow.parquet as pq
+from gMRItensor.noise import noise_scale
+from gMRItensor.noise import NOISE_SETS
+from gMRItensor.noise import reject_negative
+from gMRItensor.noise import SCAN_NOISE_COLUMNS
+from gMRItensor.roi_groups import is_csf
 from nibabel.nifti1 import Nifti1Image
+from scipy.ndimage import distance_transform_edt
 from scipy.ndimage import labeled_comprehension
 from tqdm import tqdm
 
@@ -74,6 +80,33 @@ def _within_group_rank(values: np.ndarray) -> np.ndarray:
     return pd.Series(values).groupby(values).cumcount().to_numpy()
 
 
+class _Images(NamedTuple):
+    baseline: np.ndarray
+    post: np.ndarray
+    mask: np.ndarray
+    segmentation: np.ndarray
+    affine: np.ndarray
+
+
+def _load_aligned_images(
+    baseline_path: Path,
+    post_injection_path: Path,
+    mask_path: Path,
+    segmentation_path: Path,
+) -> _Images:
+    """The four images of a scan as arrays, reoriented to the closest
+    canonical (RAS+) orientation; `ValueError` unless they share a grid."""
+    niftis = [
+        cast(Nifti1Image, nib.as_closest_canonical(nib.load(path)))
+        for path in (baseline_path, post_injection_path, mask_path, segmentation_path)
+    ]
+    for nifti, name in zip(niftis[1:], ("post-injection", "mask", "segmentation")):
+        if not np.allclose(niftis[0].affine, nifti.affine):
+            raise ValueError(f"Baseline and {name} images are not aligned")
+    baseline, post, mask, segmentation = (nifti.get_fdata() for nifti in niftis)
+    return _Images(baseline, post, mask, segmentation, niftis[0].affine)
+
+
 def _load_labeled_tracer_voxels(
     baseline_path: Path,
     post_injection_path: Path,
@@ -98,41 +131,25 @@ def _load_labeled_tracer_voxels(
     `segmentation` the raw (unrounded) ids, plus the volume of one voxel
     from the affine.
     """
-    baseline_nifti = cast(
-        Nifti1Image,
-        nib.as_closest_canonical(nib.load(baseline_path)),
+    images = _load_aligned_images(
+        baseline_path,
+        post_injection_path,
+        mask_path,
+        segmentation_path,
     )
-    post_injection_nifti = cast(
-        Nifti1Image,
-        nib.as_closest_canonical(nib.load(post_injection_path)),
-    )
-    mask_nifti = cast(Nifti1Image, nib.as_closest_canonical(nib.load(mask_path)))
-
-    if not np.allclose(baseline_nifti.affine, post_injection_nifti.affine):
-        raise ValueError("Baseline and post-injection images are not aligned")
-    if not np.allclose(baseline_nifti.affine, mask_nifti.affine):
-        raise ValueError("Baseline and mask images are not aligned")
-
-    segmentation_nifti = cast(
-        Nifti1Image,
-        nib.as_closest_canonical(nib.load(segmentation_path)),
-    )
-    if not np.allclose(baseline_nifti.affine, segmentation_nifti.affine):
-        raise ValueError("Baseline and segmentation images are not aligned")
-
-    mask = mask_nifti.get_fdata()
+    mask = images.mask
     tracer = compute_tracer(
-        baseline_nifti.get_fdata()[mask > 0],
-        post_injection_nifti.get_fdata()[mask > 0],
+        images.baseline[mask > 0],
+        images.post[mask > 0],
         signal_type,
     )
-    segmentation = segmentation_nifti.get_fdata()[mask > 0]
+    segmentation = images.segmentation[mask > 0]
     voxel_coords = np.argwhere(mask > 0)
 
     # Background/unlabeled voxels (segmentation id ~0) are never real ROIs
     # -- excluded up front, for every downstream product.
     labeled_voxels = segmentation > 1e-6
-    voxel_volume_mm3 = float(abs(np.linalg.det(baseline_nifti.affine[:3, :3])))
+    voxel_volume_mm3 = float(abs(np.linalg.det(images.affine[:3, :3])))
     return (
         tracer[labeled_voxels],
         segmentation[labeled_voxels],
@@ -349,6 +366,7 @@ _ROI_SIGNAL_DTYPES = {
     "mean": np.float64,
     "n_voxels": np.int64,
     "n_valid": np.int64,
+    "n_rejected": np.int64,
     "voxel_volume_mm3": np.float64,
 }
 
@@ -357,13 +375,16 @@ def compute_roi_signal(
     signal: np.ndarray,
     segmentation: np.ndarray,
     voxel_volume_mm3: float,
+    rejected: np.ndarray | None = None,
 ) -> pd.DataFrame:
     """Median, mean and voxel counts of `signal` per segmentation label.
 
     `segmentation` ids are rounded. `n_voxels` counts every voxel of the
     label, `n_valid` the finite ones the median/mean are taken over (NaN if
-    none). One row per label, ascending; `voxel_volume_mm3` is repeated so
-    region volumes and totals can be computed later.
+    none), and `n_rejected` those marked in `rejected` (already NaN in
+    `signal`; see `reject_negative`). One row per label, ascending;
+    `voxel_volume_mm3` is repeated so region volumes and totals can be
+    computed later.
     """
     labels = np.rint(segmentation).astype(np.int64)
     order = np.argsort(labels, kind="stable")
@@ -379,6 +400,11 @@ def compute_roi_signal(
                 "mean": float(np.mean(finite)) if finite.size else np.nan,
                 "n_voxels": len(values),
                 "n_valid": finite.size,
+                "n_rejected": (
+                    int(np.count_nonzero(rejected[voxels]))
+                    if rejected is not None
+                    else 0
+                ),
                 "voxel_volume_mm3": voxel_volume_mm3,
             },
         )
@@ -397,9 +423,47 @@ _ROI_SIGNAL_SCHEMA = pa.schema(
         ("mean", pa.float64()),
         ("n_voxels", pa.int64()),
         ("n_valid", pa.int64()),
+        ("n_rejected", pa.int64()),
         ("voxel_volume_mm3", pa.float64()),
     ],
 )
+
+#: Columns of `invalid_rois.csv`.
+INVALID_ROI_COLUMNS = [
+    "subject",
+    "time_point",
+    "label",
+    "compartment",
+    "n_voxels",
+    "n_nonfinite",
+    "n_rejected",
+    "invalid_share",
+]
+
+
+def invalidate_rois(
+    roi: pd.DataFrame,
+    max_invalid_voxel_fraction: float,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """`compute_roi_signal` output with every label whose share of invalid
+    voxels (non-finite, rejected ones included) exceeds
+    `max_invalid_voxel_fraction` set to NaN `median`/`mean` and `n_valid`
+    0, so no statistic and no region weight comes from it.
+
+    Returns the frame and the invalidated labels' `label, n_voxels,
+    n_nonfinite` (invalid before any rejection), `n_rejected` and
+    `invalid_share`.
+    """
+    share = 1 - roi["n_valid"] / roi["n_voxels"]
+    invalid = share > max_invalid_voxel_fraction
+    table = roi.assign(
+        n_nonfinite=roi["n_voxels"] - roi["n_valid"] - roi["n_rejected"],
+        invalid_share=share,
+    ).loc[invalid, ["label", "n_voxels", "n_nonfinite", "n_rejected", "invalid_share"]]
+    out = roi.copy()
+    out.loc[invalid, ["median", "mean"]] = np.nan
+    out.loc[invalid, "n_valid"] = 0
+    return out, table.reset_index(drop=True)
 
 
 def _roi_signal_table(subject: Any, time_point: Any, roi: pd.DataFrame) -> pa.Table:
@@ -418,19 +482,53 @@ def _roi_signal_table(subject: Any, time_point: Any, roi: pd.DataFrame) -> pa.Ta
 
 class PreprocessedPaths(NamedTuple):
     """Files written by `write_preprocessed_data`; voxel files None unless
-    `store_voxels`."""
+    `store_voxels`, QC files None without a negative cutoff."""
 
     roi_signal: Path
     voxels: Path | None
     coords: Path | None
+    noise: Path | None = None
+    invalid_rois: Path | None = None
+
+
+class NegativeCutoff(NamedTuple):
+    """The negative-value rule `write_preprocessed_data` applies.
+
+    `cutoffs` per compartment in 1/s (NaN: no cutoff there); `noise` the
+    per-scan estimates (`gMRItensor.noise.summarize_noise` table), None
+    when the noise SD was fixed; `source` `outside`, `inside` or `fixed`;
+    `metadata` is added to the parquet files.
+    """
+
+    cutoffs: dict[str, float]
+    csf_offset: int
+    max_invalid_voxel_fraction: float
+    noise: pd.DataFrame | None
+    source: str
+    metadata: dict[str, str]
+
+
+class _Rule(NamedTuple):
+    """What a pass-2 worker needs of `NegativeCutoff` (cheap to pickle)."""
+
+    cutoffs: dict[str, float]
+    csf_offset: int
+    max_invalid_voxel_fraction: float
+
+
+def _compartments(segmentation: np.ndarray, csf_offset: int) -> np.ndarray:
+    """True for CSF voxels (`is_csf`) of raw segmentation ids."""
+    return is_csf(np.rint(segmentation).astype(np.int64), csf_offset)
 
 
 def _preprocess_worker(
     args: dict[str, Any],
     time_unit: str,
     store_voxels: bool,
-) -> tuple[pd.DataFrame, tuple[Any, ...] | None]:
-    """Load one scan once; return its ROI signal and, optionally, voxel rows."""
+    rule: _Rule | None = None,
+) -> tuple[pd.DataFrame, tuple[Any, ...] | None, dict[str, Any] | None]:
+    """Load one scan once; return its ROI signal, optionally its voxel rows,
+    and with a `rule` what the rule did (`_apply_rule`)."""
     tracer, segmentation, voxel_coords, voxel_volume_mm3 = _load_labeled_tracer_voxels(
         args["baseline_path"],
         args["post_injection_path"],
@@ -439,11 +537,209 @@ def _preprocess_worker(
         args["segmentation_path"],
     )
     signal = delta_r1_per_second(tracer, args["signal_type"], time_unit)
-    roi = compute_roi_signal(signal, segmentation, voxel_volume_mm3)
+    effects = None
+    if rule is None:
+        roi = compute_roi_signal(signal, segmentation, voxel_volume_mm3)
+    else:
+        signal, roi, effects = _apply_rule(signal, segmentation, voxel_volume_mm3, rule)
     rows = (
         _tracer_rows(signal, segmentation, voxel_coords, None) if store_voxels else None
     )
-    return roi, rows
+    return roi, rows, effects
+
+
+def _apply_rule(
+    signal: np.ndarray,
+    segmentation: np.ndarray,
+    voxel_volume_mm3: float,
+    rule: _Rule,
+) -> tuple[np.ndarray, pd.DataFrame, dict[str, Any]]:
+    """Reject the values below their compartment's cutoff and invalidate
+    the ROIs with too many invalid voxels; every voxel of such an ROI is
+    NaN in the returned signal too, so the voxel data agree with the ROIs.
+
+    Returns the signal, the ROI frame and the effects: per compartment the
+    labelled voxels, the rejected ones and the invalidated ROIs, and the
+    `invalidate_rois` table with a `compartment` column.
+    """
+    csf = _compartments(segmentation, rule.csf_offset)
+    rejected = reject_negative(signal, csf, rule.cutoffs)
+    signal = np.where(rejected, np.nan, signal)
+    roi, invalid = invalidate_rois(
+        compute_roi_signal(signal, segmentation, voxel_volume_mm3, rejected),
+        rule.max_invalid_voxel_fraction,
+    )
+    labels = np.rint(segmentation).astype(np.int64)
+    signal = np.where(np.isin(labels, invalid["label"]), np.nan, signal)
+    invalid_csf = is_csf(invalid["label"].to_numpy(), rule.csf_offset)
+    invalid["compartment"] = np.where(invalid_csf, "csf", "parenchyma")
+    counts = {"parenchyma": (~csf, ~invalid_csf), "csf": (csf, invalid_csf)}
+    effects = {
+        "compartments": {
+            name: {
+                "n_voxels": int(np.count_nonzero(voxels)),
+                "n_rejected": int(np.count_nonzero(rejected & voxels)),
+                "n_invalid_rois": int(np.count_nonzero(rois)),
+            }
+            for name, (voxels, rois) in counts.items()
+        },
+        "invalid_rois": invalid,
+    }
+    return signal, roi, effects
+
+
+def _shell(
+    mask: np.ndarray,
+    affine: np.ndarray,
+    shell_mm: float,
+) -> np.ndarray:
+    """Voxels outside `mask` within `shell_mm` of it (Euclidean, in mm)."""
+    inside = mask > 0
+    voxel_sizes = np.sqrt((affine[:3, :3] ** 2).sum(axis=0))
+    distance = distance_transform_edt(~inside, sampling=voxel_sizes)
+    return ~inside & (distance <= shell_mm)
+
+
+# Outside the mask, a baseline value further than this factor from the
+# brain's range is air or a fitting failure, not tissue.
+_BASELINE_WINDOW = 4.0
+
+
+def _noise_worker(
+    args: dict[str, Any],
+    time_unit: str,
+    csf_offset: int,
+    shell_mm: float,
+) -> list[tuple[str, int, float, float]]:
+    """Pass 1 for one scan: `(set, n, mode, sigma)` of its ΔR1 [1/s] per
+    `NOISE_SETS` set (`noise_scale`).
+
+    `outside`: the voxels outside the mask within `shell_mm` of it whose
+    baseline lies within a factor `_BASELINE_WINDOW` of the brain's 1st-99th
+    percentile range (other tissue such as fat or muscle stays in; air and
+    fitting failures near 0 or far above any tissue value do not);
+    `parenchyma` and `csf`: the labelled voxels inside the mask.
+    """
+    images = _load_aligned_images(
+        args["baseline_path"],
+        args["post_injection_path"],
+        args["mask_path"],
+        args["segmentation_path"],
+    )
+    signal_type = args["signal_type"]
+
+    def delta_r1(where: np.ndarray) -> np.ndarray:
+        tracer = compute_tracer(images.baseline[where], images.post[where], signal_type)
+        return delta_r1_per_second(tracer, signal_type, time_unit)
+
+    labelled = (images.mask > 0) & (images.segmentation > 1e-6)
+    brain_baseline = images.baseline[labelled]
+    brain_baseline = brain_baseline[np.isfinite(brain_baseline) & (brain_baseline != 0)]
+    outside = _shell(images.mask, images.affine, shell_mm)
+    if brain_baseline.size:
+        low, high = np.percentile(brain_baseline, [1, 99])
+        outside &= (images.baseline >= low / _BASELINE_WINDOW) & (
+            images.baseline <= high * _BASELINE_WINDOW
+        )
+    inside = delta_r1(labelled)
+    csf = _compartments(images.segmentation[labelled], csf_offset)
+    sets = {
+        "outside": delta_r1(outside),
+        "parenchyma": inside[~csf],
+        "csf": inside[csf],
+    }
+    rows = []
+    for name in NOISE_SETS:
+        values = sets[name]
+        mode, sigma = noise_scale(values)
+        rows.append((name, int(np.count_nonzero(np.isfinite(values))), mode, sigma))
+    return rows
+
+
+def estimate_scan_noise(
+    args_list: list[dict[str, Any]],
+    time_unit: str,
+    csf_offset: int,
+    shell_mm: float,
+    n_procs: int,
+) -> pd.DataFrame:
+    """Pass 1: every scan's noise estimate per set (`SCAN_NOISE_COLUMNS`),
+    in `args_list` order."""
+    worker = partial(
+        _noise_worker,
+        time_unit=time_unit,
+        csf_offset=csf_offset,
+        shell_mm=shell_mm,
+    )
+    rows = [
+        (args["subject"], args["time_point"], *row)
+        for args, scan_rows in _iter_parallel(
+            args_list,
+            worker,
+            n_procs,
+            desc="Estimating noise",
+        )
+        for row in scan_rows
+    ]
+    return pd.DataFrame(rows, columns=SCAN_NOISE_COLUMNS)
+
+
+#: Columns of `noise.csv`.
+NOISE_COLUMNS = [
+    *SCAN_NOISE_COLUMNS,
+    "mode_z",
+    "sigma_z",
+    "used_in_reference",
+    "cutoff",
+    "n_rejected",
+    "rejected_share",
+    "n_invalid_rois",
+]
+
+
+def _noise_table(
+    cutoff: NegativeCutoff,
+    scans: list[tuple[Any, Any]],
+    effects: list[dict[str, Any]],
+) -> pd.DataFrame:
+    """`noise.csv`: the pass-1 estimates per scan and set (all NaN when the
+    noise SD was fixed), the cutoff applied, and what it did."""
+    if cutoff.noise is None:
+        table = pd.DataFrame(
+            [(subject, t, name) for subject, t in scans for name in NOISE_SETS],
+            columns=["subject", "time_point", "set"],
+        )
+        for column in ("n", "mode", "sigma", "mode_z", "sigma_z"):
+            table[column] = np.nan
+        table["used_in_reference"] = False
+    else:
+        table = cutoff.noise.copy()
+    outside_cutoff = (
+        cutoff.cutoffs["parenchyma"] if cutoff.source == "outside" else np.nan
+    )
+    table["cutoff"] = table["set"].map({**cutoff.cutoffs, "outside": outside_cutoff})
+    done = pd.DataFrame(
+        [
+            {
+                "subject": subject,
+                "time_point": t,
+                "set": name,
+                "n_rejected": counts["n_rejected"],
+                "rejected_share": counts["n_rejected"] / counts["n_voxels"]
+                if counts["n_voxels"]
+                else np.nan,
+                "n_invalid_rois": counts["n_invalid_rois"],
+            }
+            for (subject, t), scan in zip(scans, effects)
+            for name, counts in scan["compartments"].items()
+        ],
+    )
+    table = table.astype({"subject": str}).merge(
+        done.astype({"subject": str}),
+        on=["subject", "time_point", "set"],
+        how="left",
+    )
+    return table[NOISE_COLUMNS]
 
 
 def _template_metadata(segmentation_path: Path) -> dict[str, str]:
@@ -467,8 +763,11 @@ def write_preprocessed_data(
     time_unit: str = "ms",
     store_voxels: bool = False,
     n_procs: int = 5,
+    variant: str = "",
+    cutoff: NegativeCutoff | None = None,
 ) -> PreprocessedPaths:
-    """Read every scan once and write the data products to `output_dir/data/`.
+    """Read every scan once and write the data products to
+    `output_dir/data/<variant>/` (`output_dir/data/` by default).
 
     Each `args_list` entry holds a scan's `subject`, `time_point`,
     `baseline_path`, `post_injection_path`, `mask_path`, `segmentation_path`
@@ -484,6 +783,12 @@ def write_preprocessed_data(
       `shape`/`affine` in its metadata). Every scan must have the same
       labeled voxels as the first -- one common template -- or `ValueError`.
 
+    - With a `cutoff`: values below their compartment's cutoff become NaN
+      and ROIs with too many invalid voxels are invalidated
+      (`_apply_rule`), in both the ROI and the voxel data; `noise.csv`
+      (`NOISE_COLUMNS`) and `invalid_rois.csv` (`INVALID_ROI_COLUMNS`) say
+      what was estimated and done.
+
     Each file records `read_signal_metadata`. One row group per scan; files
     are only moved into place on success.
     """
@@ -498,18 +803,39 @@ def write_preprocessed_data(
         )
     (signal_type,) = signal_types
 
-    data_dir = Path(output_dir) / "data"
+    data_dir = Path(output_dir) / "data" / variant
     data_dir.mkdir(parents=True, exist_ok=True)
     roi_path = data_dir / "roi_signal.parquet"
     voxels_path = data_dir / "voxels.parquet"
     coords_path = data_dir / "voxels.coords.parquet"
-    roi_metadata = _signal_metadata("roi_signal", signal_type)
-    voxels_metadata = _signal_metadata("voxels", signal_type)
-    worker = partial(_preprocess_worker, time_unit=time_unit, store_voxels=store_voxels)
+    noise_path = data_dir / "noise.csv"
+    invalid_path = data_dir / "invalid_rois.csv"
+    extra = cutoff.metadata if cutoff is not None else {}
+    roi_metadata = {**_signal_metadata("roi_signal", signal_type), **extra}
+    voxels_metadata = {**_signal_metadata("voxels", signal_type), **extra}
+    rule = (
+        None
+        if cutoff is None
+        else _Rule(cutoff.cutoffs, cutoff.csf_offset, cutoff.max_invalid_voxel_fraction)
+    )
+    worker = partial(
+        _preprocess_worker,
+        time_unit=time_unit,
+        store_voxels=store_voxels,
+        rule=rule,
+    )
+    scans: list[tuple[Any, Any]] = []
+    effects: list[dict[str, Any]] = []
 
     with ExitStack() as stack:
-        tmp_roi, tmp_voxels, tmp_coords = stack.enter_context(
-            _atomic_outputs(roi_path, voxels_path, coords_path),
+        tmp_roi, tmp_voxels, tmp_coords, tmp_noise, tmp_invalid = stack.enter_context(
+            _atomic_outputs(
+                roi_path,
+                voxels_path,
+                coords_path,
+                noise_path,
+                invalid_path,
+            ),
         )
         roi_writer = stack.enter_context(
             pq.ParquetWriter(tmp_roi, _ROI_SIGNAL_SCHEMA.with_metadata(roi_metadata)),
@@ -525,7 +851,7 @@ def write_preprocessed_data(
             else None
         )
         first: TracerResult | None = None
-        for args, (roi, rows) in _iter_parallel(
+        for args, (roi, rows, scan_effects) in _iter_parallel(
             args_list,
             worker,
             n_procs,
@@ -533,6 +859,9 @@ def write_preprocessed_data(
         ):
             roi_table = _roi_signal_table(args["subject"], args["time_point"], roi)
             roi_writer.write_table(_with_metadata(roi_table, roi_metadata))
+            if scan_effects is not None:
+                scans.append((args["subject"], args["time_point"]))
+                effects.append(scan_effects)
             if voxels_writer is None:
                 continue
             result = TracerResult(args["subject"], args["time_point"], *rows)
@@ -562,11 +891,26 @@ def write_preprocessed_data(
                 _with_metadata(table, voxels_metadata),
                 row_group_size=max(table.num_rows, 1),
             )
+        if cutoff is not None:
+            _noise_table(cutoff, scans, effects).to_csv(tmp_noise, index=False)
+            invalid = [
+                scan["invalid_rois"].assign(subject=subject, time_point=t)
+                for (subject, t), scan in zip(scans, effects)
+                if len(scan["invalid_rois"])
+            ]
+            table = (
+                pd.concat(invalid)[INVALID_ROI_COLUMNS]
+                if invalid
+                else pd.DataFrame(columns=INVALID_ROI_COLUMNS)
+            )
+            table.to_csv(tmp_invalid, index=False)
 
     return PreprocessedPaths(
         roi_path,
         voxels_path if store_voxels else None,
         coords_path if store_voxels else None,
+        noise_path if cutoff is not None else None,
+        invalid_path if cutoff is not None else None,
     )
 
 

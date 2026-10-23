@@ -54,7 +54,7 @@ gmri plot group-maps --input results/data/voxels.parquet --subject-info subjects
 gmri plot reproducibility results/parafac2/restarts/parafac2_rank_3/reproducibility.csv
 ```
 
-- **`preprocess`:** stores the per-label median, mean and voxel counts (and, with `--store-voxels`, every voxel's value) as ΔR1 in 1/s, or as the ratio for T1w.
+- **`preprocess`:** stores the per-label median, mean and voxel counts (and, with `--store-voxels`, every voxel's value) as ΔR1 in 1/s, or as the ratio for T1w. `--negative-cutoff 4` also makes values below −4 noise SDs invalid, with the noise level estimated from the data, and writes to `data/k4/` with QC tables (`noise.csv`, `invalid_rois.csv`).
 - **`plot statistics`:**
   - **Regions:** combines labels into regions, either presets or `--region name=ids`.
   - **Concentration:** converts to concentration (`--relaxivity`, default 3.2).

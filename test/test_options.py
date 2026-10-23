@@ -50,6 +50,77 @@ def test_preprocessing_options(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize(
+    "settings, name",
+    [
+        ({}, ""),
+        ({"negative_cutoff": 4.0}, "k4"),
+        ({"negative_cutoff": 3.5}, "k3.5"),
+        ({"negative_cutoff": 4.0, "noise_sd": 0.01}, "k4_sd0.01"),
+        ({"negative_cutoff": 4.0, "noise_sd": (0.01, 0.025)}, "k4_sd0.01-0.025"),
+        ({"negative_cutoff": 4.0, "max_invalid_voxel_fraction": 0.25}, "k4_f0.25"),
+        ({"negative_cutoff": 4.0, "noise_source": "inside"}, "k4_inside"),
+        ({"negative_cutoff": 4.0, "noise_shell_mm": 15.0}, "k4_shell15"),
+        ({"negative_cutoff": 4.0, "csf_offset": 20000}, "k4_csf20000"),
+        (
+            {
+                "negative_cutoff": 4.0,
+                "csf_offset": 20000,
+                "noise_source": "outside",
+                "max_invalid_voxel_fraction": 0.3,
+                "noise_sd": 0.02,
+                "noise_shell_mm": 5.0,
+            },
+            "k4_sd0.02_f0.3_outside_shell5_csf20000",
+        ),
+    ],
+)
+def test_preprocessing_variant_names_every_changed_setting(
+    tmp_path: Path,
+    settings: dict[str, Any],
+    name: str,
+) -> None:
+    manifest = tmp_path / "scans.csv"
+    manifest.touch()
+
+    options = PreprocessingOptions(manifest, tmp_path, "T1map", "ms", **settings)
+
+    assert options.variant() == name
+    assert options.data_dir() == tmp_path / "data" / name
+
+
+@pytest.mark.parametrize(
+    "settings, match",
+    [
+        ({"negative_cutoff": 0.0}, "negative_cutoff must be > 0"),
+        ({"negative_cutoff": float("inf")}, "negative_cutoff must be > 0"),
+        ({"negative_cutoff": 4.0, "max_invalid_voxel_fraction": 1.5}, "in \\[0, 1\\]"),
+        ({"negative_cutoff": 4.0, "noise_shell_mm": 0.0}, "noise_shell_mm"),
+        ({"negative_cutoff": 4.0, "noise_sd": -0.01}, "noise_sd"),
+        ({"negative_cutoff": 4.0, "noise_sd": (0.01,)}, "noise_sd"),
+        ({"negative_cutoff": 4.0, "noise_source": "nearby"}, "noise_source"),
+        ({"negative_cutoff": 4.0, "csf_offset": 0}, "csf_offset"),
+        ({"noise_source": "inside"}, "noise_source needs negative_cutoff"),
+        ({"noise_sd": 0.01}, "noise_sd needs negative_cutoff"),
+        ({"max_invalid_voxel_fraction": 0.2}, "needs negative_cutoff"),
+        ({"noise_shell_mm": 5.0}, "needs negative_cutoff"),
+        ({"csf_offset": 20000}, "needs negative_cutoff"),
+    ],
+)
+def test_preprocessing_noise_options_are_checked(
+    tmp_path: Path,
+    settings: dict[str, Any],
+    match: str,
+) -> None:
+    manifest = tmp_path / "scans.csv"
+    manifest.touch()
+
+    with pytest.raises(ValueError, match=match):
+        PreprocessingOptions(manifest, tmp_path, "T1map", "ms", **settings)
+    with pytest.raises(ValueError, match="T1w"):
+        PreprocessingOptions(manifest, tmp_path, "T1w", negative_cutoff=4.0)
+
+
+@pytest.mark.parametrize(
     "modes, expected",
     [("auto", "auto"), (None, None), ((2, 0, 2), (0, 2))],
 )

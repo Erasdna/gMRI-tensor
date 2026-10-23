@@ -6,6 +6,8 @@
 - **ROI overview:** `gmri plot overview` draws every label for every subject and session, one row per session (all parenchyma, all CSF, and one column per region), and flags values with |modified z-score| > 3.5 among all subjects for that label and session (`--z-cut`; Iglewicz & Hoaglin 1993). Each flagged value is ringed and named in the figures and listed in `roi_analysis/overview_flags__<statistic>.csv`. See `docs/cli.md`.
 - **Excluding subjects:** `decompose` and `replicability` (`run` and `plan`) take `--exclude-subjects ID ...`; the subjects are left out as if absent from the input, and an unknown ID is an error. Every left-out subject, also those dropped for missing or unusable sessions (naming the time points), is listed with the reason in `excluded_subjects.csv`, per model directory for `decompose`.
 
+- **Negative cutoff:** `preprocess --negative-cutoff K` (off by default) estimates the study's ΔR1 noise level from the data (outside the brain mask, or per compartment inside it; `gMRItensor.noise`), makes values below −K noise SDs invalid, and makes an ROI NaN when more than `--max-invalid-voxel-fraction` (0.5) of its voxels are invalid, in the ROI and the voxel data alike. Each setting writes to its own folder, `data/k<K>[...]/`, with `noise.csv` (per-scan noise estimates, z-scores, cutoff, rejected voxels) and `invalid_rois.csv`. `roi_signal.parquet` gains an `n_rejected` column (0 without a cutoff).
+
 ### Changed
 - The loader's notes on dropped sessions and subjects go to stderr, so the stdout of `plan` stays the job count.
 
