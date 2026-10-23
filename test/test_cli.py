@@ -260,6 +260,57 @@ def test_cli_plan_run_collect(
     assert (results / command / output).exists()
 
 
+def test_cli_exclude_subjects_in_plan_run_collect(
+    synthetic_study: Any,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    results = _preprocess(synthetic_study)
+    out = results / "decompose"
+    plan = ["decompose", "plan", *_fit_args(results, "decompose")]
+    capsys.readouterr()
+
+    assert _run([*plan, "--exclude-subjects", "sub-99", "sub-01"]) == 2
+    assert "not in the data: ['sub-99']" in capsys.readouterr().err
+    assert not (out / "plan.json").exists()
+
+    assert _run([*plan, "--exclude-subjects", "sub-01"]) == 0
+    captured = capsys.readouterr()
+    n_jobs = int(captured.out)  # the notes go to stderr
+    assert "Rejected at command line: 1 subject(s): sub-01" in captured.err
+    assert (out / "excluded_subjects.csv").exists()
+    for job in range(n_jobs):
+        assert _run(["decompose", "run", "--output-dir", out, "--job", job]) == 0
+    assert _run(["decompose", "collect", "--output-dir", out]) == 0
+    excluded = (out / "parafac2_rank_1" / "excluded_subjects.csv").read_text()
+    assert "sub-01,rejected at command line" in excluded
+
+    # The jobs take the exclusion from plan.json only.
+    run_job = ["decompose", "run", "--output-dir", out, "--job", 0]
+    assert _run([*run_job, "--exclude-subjects", "sub-02"]) == 2
+    assert "--exclude-subjects cannot be used with --job" in capsys.readouterr().err
+
+    # A failed plan with --overwrite leaves the stored restarts alone.
+    stored = sorted((out / "restarts").rglob("*"))
+    assert stored
+    assert _run([*plan, "--exclude-subjects", "sub-99", "--overwrite"]) == 2
+    assert sorted((out / "restarts").rglob("*")) == stored
+
+    replicability = [
+        "replicability",
+        "run",
+        *_fit_args(results, "replicability"),
+        "--engine",
+        "halfhalf",
+        "--repeats",
+        1,
+        "--exclude-subjects",
+        "sub-99",
+    ]
+    assert _run(replicability) == 2
+    assert "sub-99" in capsys.readouterr().err
+    assert not (results / "replicability").exists()
+
+
 def test_cli_replots_reproducibility(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -617,8 +668,9 @@ def test_cli_parses_fit_options_and_modes() -> None:
         (["decompose", "--help"], ["plan", "run", "collect"]),
         (
             ["decompose", "plan", "--help"],
-            ["--ranks", "--tasks-per-job", "--center", "cmf"],
+            ["--ranks", "--tasks-per-job", "--center", "cmf", "--exclude-subjects"],
         ),
+        (["decompose", "run", "--help"], ["--exclude-subjects"]),
         (["replicability", "run", "--help"], ["--job", "--engine"]),
         (["plot", "--help"], ["statistics", "overview", "decomposition"]),
         (["plot", "statistics", "--help"], ["--region", "--rois", "--relaxivity"]),

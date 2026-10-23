@@ -475,6 +475,144 @@ def test_run_decomposition_from_roi_signal(
     _assert_saved_largest_first(out / "parafac2_rank_2" / "model.h5")
 
 
+def test_run_decomposition_lists_every_left_out_subject(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    stub_fits(monkeypatch)
+    _drop_session(synthetic_study, "sub-02", 6)
+    preprocess(synthetic_study)
+    options = decomposition_options(
+        synthetic_study,
+        tensor=TensorOptions(exclude_subjects=("sub-01",)),
+    )
+
+    run_decomposition(options)
+
+    assert "Rejected at command line: 1 subject(s): sub-01" in capsys.readouterr().err
+    for rank in (1, 2):
+        model_dir = options.output_dir / f"parafac2_rank_{rank}"
+        saved = load_decomposition(model_dir / "model.h5")
+        assert list(saved.subjects) == ["sub-00", "sub-03", "sub-04", "sub-05"]
+        excluded = pd.read_csv(model_dir / "excluded_subjects.csv")
+        assert excluded.values.tolist() == [
+            ["sub-01", "rejected at command line"],
+            [
+                "sub-02",
+                "too few valid time points (2 of 3; needs 3): time point 6 missing",
+            ],
+        ]
+        record = json.loads((model_dir / "decompose.json").read_text())
+        assert record["options"]["tensor"]["exclude_subjects"] == ["sub-01"]
+
+    # Rerun without exclusions: the files list only sub-02 now.
+    run_decomposition(decomposition_options(synthetic_study))
+    excluded = pd.read_csv(
+        options.output_dir / "parafac2_rank_1" / "excluded_subjects.csv",
+    )
+    assert list(excluded["subject"]) == ["sub-02"]
+
+
+def test_excluded_subjects_file_has_a_header_when_nobody_is_left_out(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    options = decomposition_options(synthetic_study, ranks=(1,))
+
+    run_decomposition(options)
+
+    path = options.output_dir / "parafac2_rank_1" / "excluded_subjects.csv"
+    assert path.read_text().splitlines() == ["subject,reason"]
+
+
+def test_exclude_subjects_rejects_unknown_ids_before_writing(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    options = decomposition_options(
+        synthetic_study,
+        tensor=TensorOptions(exclude_subjects=("sub-01", "sub-99")),
+    )
+
+    with pytest.raises(ValueError, match=r"not in the data: \['sub-99'\]"):
+        run_decomposition(options)
+    with pytest.raises(ValueError, match="sub-99"):
+        plan_decomposition(options)
+    assert not calls
+    assert not options.output_dir.exists()
+
+
+def test_fingerprint_unchanged_without_exclusions() -> None:
+    """Stores fitted before `exclude_subjects` existed stay valid: the
+    default leaves the fingerprint as it was (value from before the
+    option), and an exclusion changes it."""
+    options = DecompositionOptions(
+        input=Path("/data/roi_signal.parquet"),
+        output_dir=Path("/out"),
+        method="parafac2",
+        ranks=(2,),
+    )
+    excluded = dataclasses.replace(
+        options,
+        tensor=TensorOptions(exclude_subjects=("sub-01",)),
+    )
+
+    assert pipeline.settings_fingerprint(options) == "40cd606578e8cc98"
+    assert pipeline.settings_fingerprint(excluded) != "40cd606578e8cc98"
+
+
+def test_distributed_decomposition_with_exclusions(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    options = decomposition_options(
+        synthetic_study,
+        ranks=(1,),
+        tensor=TensorOptions(exclude_subjects=("sub-04",)),
+    )
+
+    n_jobs = plan_decomposition(options)
+
+    planned = pd.read_csv(options.output_dir / "excluded_subjects.csv")
+    assert planned.values.tolist() == [["sub-04", "rejected at command line"]]
+    for job in range(n_jobs):
+        run_decomposition_job(options.output_dir, job)
+    collect_decomposition(options.output_dir)
+    model_dir = options.output_dir / "parafac2_rank_1"
+    assert "sub-04" not in load_decomposition(model_dir / "model.h5").subjects
+    assert (model_dir / "excluded_subjects.csv").read_text() == (
+        options.output_dir / "excluded_subjects.csv"
+    ).read_text()
+
+
+def test_replicability_with_exclusions_needs_no_subject_info_row(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    info = pd.read_csv(synthetic_study.subject_info)
+    trimmed = synthetic_study.root / "trimmed.csv"
+    info[info["subjects"] != "sub-00"].to_csv(trimmed, index=False)
+    options = replicability_options(
+        synthetic_study,
+        subject_info=trimmed,
+        tensor=TensorOptions(exclude_subjects=("sub-00",)),
+    )
+
+    run_replicability(options)
+
+    excluded = pd.read_csv(options.output_dir / "excluded_subjects.csv")
+    assert excluded.values.tolist() == [["sub-00", "rejected at command line"]]
+
+
 def _assert_saved_largest_first(path: Path) -> None:
     """The file itself (not only `load_decomposition`) is sorted."""
     weights = component_weights(_read_decomposition(path))
@@ -1869,6 +2007,30 @@ def test_plot_outliers_part_writes_figure_and_table(
     assert table["leverage"].sum() == pytest.approx(2)
     assert table["residual"].sum() == pytest.approx(1)
     assert "Possible outliers" in capsys.readouterr().out
+
+
+def test_plot_outliers_reloads_a_fit_with_excluded_subjects(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    (model,) = run_decomposition(
+        decomposition_options(
+            synthetic_study,
+            ranks=(2,),
+            tensor=TensorOptions(exclude_subjects=("sub-03",)),
+        ),
+    )
+
+    run_decomposition_plots(plot_options(synthetic_study, model, parts=("outliers",)))
+
+    table = pd.read_csv(
+        _figures(synthetic_study) / "parafac2_rank_2__outliers.csv",
+        dtype={"subject": str},
+    )
+    assert "sub-03" not in set(table["subject"])
+    assert len(table) == 5
 
 
 def test_plot_outliers_needs_the_fitted_data(

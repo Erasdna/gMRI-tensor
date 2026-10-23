@@ -2,10 +2,12 @@
 statistics, and the tensors the decompositions are fitted to.
 """
 import json
+import sys
 import warnings
 from collections import deque
 from collections.abc import Callable
 from collections.abc import Iterator
+from collections.abc import Sequence
 from contextlib import contextmanager
 from contextlib import ExitStack
 from functools import partial
@@ -802,6 +804,118 @@ def _warn_imputed_entries(
         )
 
 
+TensorParts = tuple[
+    np.ndarray | list[np.ndarray],
+    np.ndarray,
+    np.ndarray | list[np.ndarray],
+    np.ndarray,
+    np.ndarray,
+]
+
+#: Columns of the `excluded` table of `load_tensor_with_exclusions`.
+EXCLUDED_COLUMNS = ["subject", "reason"]
+REJECTED_AT_COMMAND_LINE = "rejected at command line"
+
+
+def _judge_subjects(
+    invalid_fraction: dict[tuple[str, int], float],
+    max_invalid_fraction: float,
+    min_timepoints: int | None,
+    exclude_subjects: Sequence[str],
+) -> tuple[dict[str, np.ndarray], pd.DataFrame]:
+    """Which subjects to keep, and why each other one is left out.
+
+    `exclude_subjects` are left out first (`REJECTED_AT_COMMAND_LINE`), so
+    they decide neither the study's time points nor the default
+    `min_timepoints` (all of them). A session with more than
+    `max_invalid_fraction` non-finite values is not valid; a subject with
+    fewer than `min_timepoints` valid sessions is left out, its reason
+    naming each missing or invalid time point. Notes go to stderr, so the
+    stdout of `plan` stays the job count.
+
+    Returns `{subject: sorted valid time points}` of the kept subjects and
+    the `EXCLUDED_COLUMNS` table, sorted by subject. Raises for an id in
+    `exclude_subjects` that is not in `invalid_fraction`, or when nobody
+    is kept.
+    """
+    present = {subject for subject, _ in invalid_fraction}
+    unknown = sorted(set(exclude_subjects) - present)
+    if unknown:
+        raise ValueError(f"--exclude-subjects: subject(s) not in the data: {unknown}")
+    rejected = sorted(set(exclude_subjects))
+    if rejected:
+        print(
+            f"Rejected at command line: {len(rejected)} subject(s): "
+            f"{', '.join(rejected)}",
+            file=sys.stderr,
+        )
+    if len(rejected) == len(present):
+        raise ValueError("every subject is excluded (--exclude-subjects)")
+
+    sessions: dict[str, dict[int, float]] = {}
+    for (subject, time_point), fraction in sorted(invalid_fraction.items()):
+        if subject not in rejected:
+            sessions.setdefault(subject, {})[time_point] = fraction
+    invalid_sessions = [
+        (subject, time_point, round(fraction, 3))
+        for subject, fractions in sessions.items()
+        for time_point, fraction in fractions.items()
+        if fraction > max_invalid_fraction
+    ]
+    if invalid_sessions:
+        print(
+            f"load_tensor_from_parquet: dropped {len(invalid_sessions)} session(s) "
+            f"with more than {max_invalid_fraction:.0%} invalid values "
+            f"(subject, time_point, fraction): {invalid_sessions}",
+            file=sys.stderr,
+        )
+
+    valid = {
+        subject: [t for t, f in fractions.items() if f <= max_invalid_fraction]
+        for subject, fractions in sessions.items()
+    }
+    study = sorted({t for fractions in sessions.values() for t in fractions})
+    required = (
+        len({t for time_points in valid.values() for t in time_points})
+        if min_timepoints is None
+        else min_timepoints
+    )
+    kept: dict[str, np.ndarray] = {}
+    reasons = {subject: REJECTED_AT_COMMAND_LINE for subject in rejected}
+    dropped_subjects = []
+    for subject, time_points in valid.items():
+        if len(time_points) >= max(required, 1):
+            kept[subject] = np.array(sorted(time_points), dtype=int)
+            continue
+        dropped_subjects.append((subject, len(time_points)))
+        problems = [
+            f"time point {t} missing"
+            if t not in sessions[subject]
+            else f"time point {t} has {sessions[subject][t]:.0%} invalid values "
+            f"(more than --max-invalid-fraction {max_invalid_fraction:g})"
+            for t in study
+            if t not in time_points
+        ]
+        reasons[subject] = (
+            f"too few valid time points ({len(time_points)} of {len(study)}; "
+            f"needs {required})" + (": " + "; ".join(problems) if problems else "")
+        )
+
+    if dropped_subjects:
+        print(
+            f"load_tensor_from_parquet: dropped {len(dropped_subjects)} subject(s) "
+            f"with fewer than {required} valid time points: {dropped_subjects}",
+            file=sys.stderr,
+        )
+    if not kept:
+        raise ValueError(
+            f"No subject has {required} valid time points; lower min_timepoints "
+            "or raise max_invalid_fraction",
+        )
+    excluded = pd.DataFrame(sorted(reasons.items()), columns=EXCLUDED_COLUMNS)
+    return kept, excluded
+
+
 def load_tensor_from_parquet(
     path: Path | str,
     model: Literal["cp", "parafac2"],
@@ -810,14 +924,42 @@ def load_tensor_from_parquet(
     max_invalid_fraction: float = 0.9,
     dtype: npt.DTypeLike = np.float32,
     impute_missing: bool = False,
+    exclude_subjects: Sequence[str] = (),
+) -> TensorParts:
+    """The subject x time x label tensor of a long-format tracer parquet:
+    `load_tensor_with_exclusions` without the table of left-out subjects."""
+    *parts, _ = load_tensor_with_exclusions(
+        path,
+        model,
+        group_filtering,
+        min_timepoints,
+        max_invalid_fraction,
+        dtype,
+        impute_missing,
+        exclude_subjects,
+    )
+    return cast(TensorParts, tuple(parts))
+
+
+def load_tensor_with_exclusions(
+    path: Path | str,
+    model: Literal["cp", "parafac2"],
+    group_filtering: tuple[str, str] | None = None,
+    min_timepoints: int | None = None,
+    max_invalid_fraction: float = 0.9,
+    dtype: npt.DTypeLike = np.float32,
+    impute_missing: bool = False,
+    exclude_subjects: Sequence[str] = (),
 ) -> tuple[
     np.ndarray | list[np.ndarray],
     np.ndarray,
     np.ndarray | list[np.ndarray],
     np.ndarray,
     np.ndarray,
+    pd.DataFrame,
 ]:
-    """The subject x time x label tensor of a long-format tracer parquet.
+    """The subject x time x label tensor of a long-format tracer parquet,
+    and the subjects left out of it with the reason (`_judge_subjects`).
 
     The file has one row per scan and label (or voxel), as
     `write_preprocessed_data` writes `voxels.parquet`. It is streamed one
@@ -866,14 +1008,20 @@ def load_tensor_from_parquet(
     impute_missing : bool, optional
         Keep the NaN entries of the `"cp"` tensor for imputation rather than
         dropping their columns (see above). Default False.
+    exclude_subjects : Sequence[str], optional
+        Subjects to leave out, as if their rows were not in the file: they
+        decide neither the time points nor the columns. An id not in the
+        file raises.
 
     Returns
     -------
-    For `"cp"`: `(tensor, subjects, time_points, labels, label_index)`, the
-    tensor `(subjects, time_points, labels)`. For `"parafac2"`: `(slices,
-    subjects, timepoints_per_subject, labels, label_index)`, `slices[i]` of
-    shape `(len(timepoints_per_subject[i]), labels)`. Column `j` is the
-    pair `(labels[j], label_index[j])`.
+    For `"cp"`: `(tensor, subjects, time_points, labels, label_index,
+    excluded)`, the tensor `(subjects, time_points, labels)`. For
+    `"parafac2"`: `(slices, subjects, timepoints_per_subject, labels,
+    label_index, excluded)`, `slices[i]` of shape
+    `(len(timepoints_per_subject[i]), labels)`. Column `j` is the pair
+    `(labels[j], label_index[j])`. `excluded` lists every subject in the
+    file that is left out, with the reason (`EXCLUDED_COLUMNS`).
     """
     if model not in ("cp", "parafac2"):
         raise ValueError(f"model must be 'cp' or 'parafac2', got {model!r}")
@@ -885,48 +1033,14 @@ def load_tensor_from_parquet(
     if not invalid_fraction:
         raise ValueError("No tracer rows left to build a tensor from")
 
-    observed: dict[str, set[int]] = {}
-    invalid_sessions = []
-    for (subject, time_point), fraction in sorted(invalid_fraction.items()):
-        valid_time_points = observed.setdefault(subject, set())
-        if fraction > max_invalid_fraction:
-            invalid_sessions.append((subject, time_point, round(fraction, 3)))
-        else:
-            valid_time_points.add(time_point)
-
-    if invalid_sessions:
-        print(
-            f"load_tensor_from_parquet: dropped {len(invalid_sessions)} session(s) "
-            f"with more than {max_invalid_fraction:.0%} invalid values "
-            f"(subject, time_point, fraction): {invalid_sessions}",
-        )
-
-    required = (
-        len(set().union(*observed.values()))
-        if min_timepoints is None
-        else min_timepoints
+    kept_sessions, excluded = _judge_subjects(
+        invalid_fraction,
+        max_invalid_fraction,
+        min_timepoints,
+        exclude_subjects,
     )
-    subjects = []
-    timepoints_per_subject = []
-    dropped_subjects = []
-    for subject in sorted(observed):
-        time_points = np.array(sorted(observed[subject]), dtype=int)
-        if len(time_points) < max(required, 1):
-            dropped_subjects.append((subject, len(time_points)))
-            continue
-        subjects.append(subject)
-        timepoints_per_subject.append(time_points)
-
-    if dropped_subjects:
-        print(
-            f"load_tensor_from_parquet: dropped {len(dropped_subjects)} subject(s) "
-            f"with fewer than {required} valid time points: {dropped_subjects}",
-        )
-    if not subjects:
-        raise ValueError(
-            f"No subject has {required} valid time points; lower min_timepoints "
-            "or raise max_invalid_fraction",
-        )
+    subjects = sorted(kept_sessions)
+    timepoints_per_subject = [kept_sessions[subject] for subject in subjects]
 
     sessions = {
         (subject, int(t))
@@ -1000,5 +1114,5 @@ def load_tensor_from_parquet(
     label_index = (valid_keys & _KEY_MASK).astype(int)
     subjects_arr = np.array(subjects).astype(str)
     if model == "cp":
-        return output, subjects_arr, all_timepoints, labels, label_index
-    return output, subjects_arr, timepoints_per_subject, labels, label_index
+        return output, subjects_arr, all_timepoints, labels, label_index, excluded
+    return output, subjects_arr, timepoints_per_subject, labels, label_index, excluded

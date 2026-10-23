@@ -252,10 +252,19 @@ def test_decomposition_plot_options(tmp_path: Path) -> None:
         DecompositionPlotOptions(**common, input=tmp_path / "missing.parquet")
 
 
+def test_exclude_subjects_are_sorted_unique_ids() -> None:
+    tensor = TensorOptions(exclude_subjects=("sub-07", "sub-03", "sub-07"))
+
+    assert tensor.exclude_subjects == ("sub-03", "sub-07")
+    assert TensorOptions().exclude_subjects == ()
+    with pytest.raises(ValueError, match="exclude_subjects"):
+        TensorOptions(exclude_subjects=("sub-03", " "))
+
+
 def test_options_json_round_trip() -> None:
     options = _decomposition(
         ranks=(2, 3),
-        tensor=TensorOptions(min_timepoints=2),
+        tensor=TensorOptions(min_timepoints=2, exclude_subjects=("sub-03",)),
         fit=FitOptions(non_negative_modes=(0, 2), extra={"progress_bar": True}),
     )
 

@@ -26,6 +26,7 @@ from gMRItensor.preprocessing import compute_roi_signal
 from gMRItensor.preprocessing import compute_tracer
 from gMRItensor.preprocessing import delta_r1_per_second
 from gMRItensor.preprocessing import load_tensor_from_parquet
+from gMRItensor.preprocessing import load_tensor_with_exclusions
 from gMRItensor.preprocessing import read_signal_metadata
 from gMRItensor.preprocessing import scale_tensor
 from gMRItensor.preprocessing import TracerResult
@@ -1413,3 +1414,77 @@ def test_zero_in_an_r1_map_is_not_a_valid_voxel() -> None:
 
     assert np.isnan(tracer[:2]).all()
     assert tracer[2] == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("model", ["cp", "parafac2"])
+def test_excluded_subjects_are_left_out_as_if_absent(tmp_path, model, capsys):
+    # "c" alone has time point 3 and alone has label 30 NaN at 1: without it,
+    # every time point is 0-2 and every label is kept.
+    df = make_long_df(
+        {"a": [0, 1, 2], "b": [0, 1, 2], "c": [0, 1, 2, 3]},
+        missing={("c", 1, 30)},
+    )
+    path = _write_long_df(df, tmp_path / "tracer.parquet", row_group_size=4)
+
+    got = load_tensor_from_parquet(path, model, exclude_subjects=("c",))
+
+    assert len(got) == 5
+    np.testing.assert_array_equal(got[1], ["a", "b"])
+    np.testing.assert_array_equal(got[3], [10, 20, 30])
+    _assert_matches_prepare_tensor(got, df[df["subject"] != "c"], model)
+    assert "Rejected at command line: 1 subject(s): c" in capsys.readouterr().err
+
+
+def test_excluded_subjects_reasons(tmp_path):
+    labels = tuple(range(1, 21))
+    df = make_long_df(
+        {"a": [0, 1, 2], "b": [0, 2], "c": [0, 1, 2], "d": [0, 1]},
+        labels=labels,
+        # c's session 1 is 95% NaN: invalid at the 0.9 default.
+        missing={("c", 1, label) for label in labels[:19]},
+    )
+    path = _write_long_df(df, tmp_path / "tracer.parquet")
+
+    *tensor, excluded = load_tensor_with_exclusions(
+        path,
+        "parafac2",
+        exclude_subjects=("d",),
+    )
+
+    np.testing.assert_array_equal(tensor[1], ["a"])
+    assert list(excluded.columns) == ["subject", "reason"]
+    reasons = dict(zip(excluded["subject"], excluded["reason"]))
+    assert list(reasons) == ["b", "c", "d"]
+    assert reasons["b"] == (
+        "too few valid time points (2 of 3; needs 3): time point 1 missing"
+    )
+    assert reasons["c"] == (
+        "too few valid time points (2 of 3; needs 3): time point 1 has 95% "
+        "invalid values (more than --max-invalid-fraction 0.9)"
+    )
+    # Short of sessions too, but only the command-line reason is given.
+    assert reasons["d"] == "rejected at command line"
+
+
+def test_excluded_subjects_empty_without_exclusions(tmp_path):
+    path = _write_long_df(
+        make_long_df({"a": [0, 1], "b": [0, 1]}),
+        tmp_path / "tracer.parquet",
+    )
+
+    *_, excluded = load_tensor_with_exclusions(path, "cp")
+
+    assert excluded.empty
+    assert list(excluded.columns) == ["subject", "reason"]
+
+
+def test_exclude_subjects_rejects_unknown_ids_and_excluding_everyone(tmp_path):
+    path = _write_long_df(
+        make_long_df({"a": [0, 1], "b": [0, 1]}),
+        tmp_path / "tracer.parquet",
+    )
+
+    with pytest.raises(ValueError, match=r"not in the data: \['x', 'zz'\]"):
+        load_tensor_from_parquet(path, "cp", exclude_subjects=("a", "zz", "x"))
+    with pytest.raises(ValueError, match="every subject is excluded"):
+        load_tensor_from_parquet(path, "cp", exclude_subjects=("a", "b"))

@@ -158,14 +158,23 @@ class PreprocessingOptions:
 
 @dataclass(frozen=True)
 class TensorOptions:
-    """How the input becomes a tensor; see `load_tensor_from_parquet`."""
+    """How the input becomes a tensor; see `load_tensor_from_parquet`.
+    `exclude_subjects` are left out as if absent from the input (stored
+    sorted and de-duplicated)."""
 
     scale: bool = True
     center: bool = False
     min_timepoints: int | None = None
     max_invalid_fraction: float = 0.9
+    exclude_subjects: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        excluded = tuple(sorted({str(s) for s in self.exclude_subjects}))
+        _check(
+            all(s.strip() for s in excluded),
+            f"exclude_subjects may not hold empty ids, got {list(excluded)}",
+        )
+        object.__setattr__(self, "exclude_subjects", excluded)
         _check(
             self.min_timepoints is None or self.min_timepoints >= 1,
             f"min_timepoints must be >= 1, got {self.min_timepoints}",

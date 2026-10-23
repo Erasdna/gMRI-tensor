@@ -6,8 +6,8 @@
 |---|---|---|
 | `gmri preprocess` | manifest CSV, NIfTI images | `<output-dir>/data/` |
 | `gmri plot statistics` | `roi_signal.parquet`, subject info CSV | `<output-dir>/roi_analysis/`, `<output-dir>/figures/roi/` |
-| `gmri decompose run\|plan\|collect` | `roi_signal.parquet` or `voxels.parquet` | one directory per model, `<method>_rank_<r>/` (`model.h5`, `decompose.json`), `fits.csv`, the restarts and their reproducibility in `<store>/<method>_rank_<r>/` |
-| `gmri replicability run\|plan\|collect` | the same, plus the subject info CSV with `--stratify-by` | `replicability.csv` |
+| `gmri decompose run\|plan\|collect` | `roi_signal.parquet` or `voxels.parquet` | one directory per model, `<method>_rank_<r>/` (`model.h5`, `decompose.json`, `excluded_subjects.csv`), `fits.csv`, the restarts and their reproducibility in `<store>/<method>_rank_<r>/` |
+| `gmri replicability run\|plan\|collect` | the same, plus the subject info CSV with `--stratify-by` | `replicability.csv`, `excluded_subjects.csv` |
 | `gmri plot decomposition` | a model directory, subject info CSV, optionally a segmentation; for `--outliers`, the data the model was fitted to | `<output-dir>/figures/decomposition/` |
 | `gmri plot group-maps` | `roi_signal.parquet` (plus a segmentation) or `voxels.parquet`, subject info CSV | `<output-dir>/figures/group_maps/` |
 | `gmri plot reproducibility` | a `reproducibility.csv` | the figure, next to the CSV or at `--output` |
@@ -192,6 +192,7 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 | `--center` | off | Subtract each column's mean. Centered data is negative, so this needs `--non-negative-modes none`. |
 | `--min-timepoints` | all | Minimum valid time points to keep a subject. CP imputes the missing sessions of the subjects it keeps, with a warning. PARAFAC2 and CMF fit those subjects with shorter time courses. |
 | `--max-invalid-fraction` | `0.9` | A scan whose fraction of non-finite values is larger counts as missing. In the scans that are kept, CP imputes the remaining non-finite values and drops only the columns that are never finite. PARAFAC2 and CMF drop every column that is non-finite in any kept scan. `0` imputes no scattered values, `1` imputes all it can. CP's reported error covers the observed entries only. |
+| `--exclude-subjects ID ...` | none | Leave these subjects out, as if their rows were not in the input: they decide neither the time points, the columns, nor the scaling. An ID that is not in the input stops the command before anything is fitted or written (for `plan`: no `plan.json`, and with `--overwrite` no stored restarts removed). Part of the plan for distributed runs. |
 | `--restarts` | `50` | Random initialisations per fit; the best accepted one is kept. |
 | `--max-iter`, `--tolerance` | `2000`, see below | Iteration limit and convergence tolerance per restart. Without `--tolerance`: TensorLy's own `tol` for CP (`1e-8`, non-negative `1e-6`) and PARAFAC2 (`1e-8`); for matcouply (PARAFAC2 and CMF) `1e-7` on the relative change of its penalized objective (matcouply's own default is `1e-8`; set it with `--fit-option aoadmm_loss_tolerance=1e-8`). A TensorLy restart that has not converged by its `tol` within `--max-iter` is rejected; a matcouply one is kept, as matcouply returns it, with a warning. With matcouply, `--tolerance` adds a gate on the reconstruction-error change: restarts that settle within it are accepted, even at the iteration limit, and the rest are rejected. |
 | `--restart-procs` | `1` | Parallel processes for the restarts (`decompose` only; `replicability` uses `--n-procs`). |
@@ -219,6 +220,7 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 **Outputs:**
 - `<method>_rank_<r>/model.h5` (e.g. `cmf_rank_3/model.h5`): the fitted factors, components ordered by weight, largest first (`model_io.component_weights`: the weight times each mode's L2 norm), plus the subjects, time points, label ids and scaling needed to read them. Voxel models also store each voxel's template coordinates, the template's shape and affine, and the recorded template path. Load a model with `gMRItensor.model_io.load_decomposition`.
 - `<method>_rank_<r>/decompose.json`: the settings that model was fitted with (input, statistic, tensor and fit options). `plot decomposition --outliers` reloads the data from it, so several methods and ranks can share one `--output-dir`.
+- `<method>_rank_<r>/excluded_subjects.csv`: `subject, reason`, every subject in the input that the model leaves out. The reason is `rejected at command line` (`--exclude-subjects`), or `too few valid time points (2 of 3; needs 3): time point 6 missing; time point 24 has 95% invalid values (more than --max-invalid-fraction 0.9)` for a subject short of valid sessions (`--min-timepoints`, by default all time points). Written with only the header when nobody is left out. `plan` writes the same file to `--output-dir`, so it can be checked before the jobs run.
 - `fits.csv`: `method, rank, error, model`, one row per model in `--output-dir`. A later run replaces the rows of the methods and ranks it fits and keeps the others.
 - **A rank that does not converge:** the ranks that did are still written; the command then exits with code 2 and names the failed ranks.
 - `<store>/<method>_rank_<r>/full/seed_<NNNN>.pt`: every restart, failures included. Both `run` and `collect` keep them. A `run` without `--job` refits every restart and overwrites what the store held.
@@ -241,7 +243,7 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 | `--n-procs` | `1` | Parallel fits (every split and restart in one pool). Use 1 on a GPU. `--restart-procs` does not apply. |
 | `--seed` | `0` | Seed of the splits; every rank uses the same splits. |
 
-The output is `replicability.csv`. It has columns `method, rank, split, fms` for `halfhalf`, or `method, rank, fold_i, fold_j, n_common, fms` for `cv`, where fms is the factor match score. Scaling and centering are applied to the full tensor before splitting. A single-process `run` keeps its fits in memory: only the distributed `plan` / `run --job` / `collect` path writes them to the store.
+The output is `replicability.csv`. It has columns `method, rank, split, fms` for `halfhalf`, or `method, rank, fold_i, fold_j, n_common, fms` for `cv`, where fms is the factor match score. `excluded_subjects.csv` lists the left-out subjects as for `decompose`; they need no `--subject-info` row. Scaling and centering are applied to the full tensor before splitting. A single-process `run` keeps its fits in memory: only the distributed `plan` / `run --job` / `collect` path writes them to the store.
 
 ## CPU and GPU
 
@@ -269,7 +271,7 @@ gmri decompose run --output-dir results/parafac2 --job $SLURM_ARRAY_TASK_ID
 ```
 
 - **Settings:** `plan` saves all arguments to `<output-dir>/plan.json`, so `run --job` and `collect` need only `--output-dir`. All jobs therefore use the same settings: `run --job` refuses any other argument, and `--fit-option` cannot override a setting that has its own flag (such as `max_iter`). Run `plan` again to change the settings.
-- **Changed settings:** every stored restart records a fingerprint of the settings that change a fit (input, statistic, tensor and fit options). Restarts stored with the same settings are reused; more `--restarts` or another `--tasks-per-job` keep them. A restart stored with other settings (or by another plan, or unreadable) is stale: the job that owns it fits it again and overwrites it. `plan` says on stderr how many stored restarts will be reused and how many refitted; its stdout stays the job count. Do not run `plan` again while an array of the previous plan is still running: jobs that start afterwards use the new plan.
+- **Changed settings:** every stored restart records a fingerprint of the settings that change a fit (input, statistic, tensor and fit options, including `--exclude-subjects`). Restarts stored with the same settings are reused; more `--restarts` or another `--tasks-per-job` keep them. A restart stored with other settings (or by another plan, or unreadable) is stale: the job that owns it fits it again and overwrites it. `plan` says on stderr how many stored restarts will be reused and how many refitted, and which subjects are left out; its stdout stays the job count. Do not run `plan` again while an array of the previous plan is still running: jobs that start afterwards use the new plan.
 - **Tasks:** each restart of each fit is one task, and a job runs `--tasks-per-job` of them, one after another or in parallel with `--restart-procs` (decompose) / `--n-procs` (replicability). Request `--cpus-per-task` to match.
 
 | Command | Tasks | Example, `--tasks-per-job 4` |

@@ -215,6 +215,16 @@ def _add_fit_arguments(
         "imputes the other non-finite values, PARAFAC2/CMF drop their columns "
         "(default: 0.9)",
     )
+    tensor.add_argument(
+        "--exclude-subjects",
+        nargs="+",
+        default=[],
+        metavar="ID",
+        help="leave these subjects out, as if absent from the input; an id not "
+        "in the input is an error. Every left-out subject, these and those "
+        "short of valid time points, is listed with the reason in "
+        "excluded_subjects.csv",
+    )
     fit = parser.add_argument_group("fit")
     fit.add_argument(
         "--restarts",
@@ -789,6 +799,7 @@ def _fit_settings(args: argparse.Namespace) -> dict[str, Any]:
             center=args.center,
             min_timepoints=args.min_timepoints,
             max_invalid_fraction=args.max_invalid_fraction,
+            exclude_subjects=tuple(args.exclude_subjects),
         ),
         "fit": FitOptions(
             restarts=args.restarts,

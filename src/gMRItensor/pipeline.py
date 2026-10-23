@@ -93,7 +93,8 @@ from gMRItensor.plotting.time_mode import plot_time_mode
 from gMRItensor.plotting.utils import resolve_page_width
 from gMRItensor.plotting.utils import save_figure
 from gMRItensor.preprocessing import compute_roi_scaling
-from gMRItensor.preprocessing import load_tensor_from_parquet
+from gMRItensor.preprocessing import EXCLUDED_COLUMNS
+from gMRItensor.preprocessing import load_tensor_with_exclusions
 from gMRItensor.preprocessing import PreprocessedPaths
 from gMRItensor.preprocessing import read_signal_metadata
 from gMRItensor.preprocessing import scale_tensor
@@ -564,8 +565,9 @@ def run_overview_plots(options: OverviewPlotOptions) -> list[Path]:
 
 
 class DecompositionInput(NamedTuple):
-    """`load_tensor_from_parquet` output as torch, plus the preprocessing
-    applied and, for voxel input, where each column sits on the template."""
+    """`load_tensor_with_exclusions` output as torch, plus the preprocessing
+    applied, for voxel input where each column sits on the template, and
+    the left-out subjects with their reasons (`excluded`)."""
 
     data: torch.Tensor | list[torch.Tensor]
     subjects: np.ndarray
@@ -579,6 +581,7 @@ class DecompositionInput(NamedTuple):
     template_shape: np.ndarray | None = None
     template_affine: np.ndarray | None = None
     template_path: str | None = None
+    excluded: pd.DataFrame | None = None
 
 
 def _roi_tensor_source(path: Path, statistic: str) -> pa.BufferReader:
@@ -645,12 +648,20 @@ def load_decomposition_input(
             f"{path} is neither roi_signal.parquet nor voxels.parquet from "
             "`gmri preprocess`",
         )
-    data, subjects, timepoints, labels, label_index = load_tensor_from_parquet(
+    (
+        data,
+        subjects,
+        timepoints,
+        labels,
+        label_index,
+        excluded,
+    ) = load_tensor_with_exclusions(
         source,
         "cp" if method == "cp" else "parafac2",
         min_timepoints=tensor.min_timepoints,
         max_invalid_fraction=tensor.max_invalid_fraction,
         impute_missing=method == "cp",
+        exclude_subjects=tensor.exclude_subjects,
     )
     mean = std = None
     if tensor.scale:
@@ -676,6 +687,7 @@ def load_decomposition_input(
         std,
         tensor.center,
         *template,
+        excluded=excluded,
     )
 
 
@@ -773,6 +785,10 @@ def settings_fingerprint(options: DecompositionOptions | ReplicabilityOptions) -
         if key not in _RUNTIME_FIT_EXTRAS
     }
     values["fit"] = fit
+    if not values["tensor"]["exclude_subjects"]:
+        # Left out while empty: stores fitted before the option existed
+        # keep their fingerprint.
+        del values["tensor"]["exclude_subjects"]
     text = json.dumps(values, sort_keys=True, default=str)
     return hashlib.sha256(text.encode()).hexdigest()[:16]
 
@@ -1049,13 +1065,38 @@ def _update_fits_table(path: Path, fits: list[SavedDecomposition]) -> None:
     rows.sort_values(["method", "rank"]).to_csv(path, index=False)
 
 
+EXCLUDED_FILE = "excluded_subjects.csv"
+
+
+def _write_excluded(directories: Sequence[Path], data: DecompositionInput) -> None:
+    """`excluded_subjects.csv` (`EXCLUDED_COLUMNS`: every subject of the
+    input left out of the fit, and why) in each of `directories`. Written
+    even when empty, so no earlier list lingers."""
+    excluded = (
+        pd.DataFrame(columns=EXCLUDED_COLUMNS)
+        if data.excluded is None
+        else data.excluded
+    )
+    for directory in directories:
+        directory.mkdir(parents=True, exist_ok=True)
+        excluded.to_csv(directory / EXCLUDED_FILE, index=False)
+    if len(excluded):
+        where = ", ".join(str(directory / EXCLUDED_FILE) for directory in directories)
+        print(
+            f"{len(excluded)} subject(s) left out, with the reasons, in {where}",
+            file=sys.stderr,
+        )
+
+
 def _write_decompositions(
     options: DecompositionOptions,
     fits: list[SavedDecomposition],
+    data: DecompositionInput,
 ) -> list[Path]:
     """One directory per fit, `<output_dir>/<method>_rank_<r>/`, holding
-    `model.h5` and `decompose.json` (the settings of that fit), and
-    `fits.csv` in `output_dir`, one row per model there."""
+    `model.h5`, `decompose.json` (the settings of that fit) and
+    `excluded_subjects.csv` (`_write_excluded`), and `fits.csv` in
+    `output_dir`, one row per model there."""
     output_dir = Path(options.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
     written = []
@@ -1069,6 +1110,10 @@ def _write_decompositions(
             dataclasses.replace(options, ranks=(saved.rank,)),
         )
         written.append(model_dir / MODEL_FILE)
+    _write_excluded(
+        [output_dir / _model_name(saved.method, saved.rank) for saved in fits],
+        data,
+    )
     _update_fits_table(output_dir / "fits.csv", fits)
     return written
 
@@ -1122,7 +1167,7 @@ def _finish_ranks(
             fits.append(_finish_rank(plan, options, rank, fit_kwargs, data))
         except ConvergenceError as error:
             failed.append(error)
-    written = _write_decompositions(options, fits) if fits else []
+    written = _write_decompositions(options, fits, data) if fits else []
     if failed:
         kept = (
             f"; the other ranks were written to {options.output_dir}" if written else ""
@@ -1161,6 +1206,7 @@ def plan_decomposition(options: DecompositionOptions, overwrite: bool = False) -
     else:
         _report_store(options, plan)
     _write_plan(options)
+    _write_excluded([Path(options.output_dir)], data)
     return n_jobs(plan, options.distributed.tasks_per_job)
 
 
@@ -1330,6 +1376,7 @@ def _score_rows(
 def _write_replicability(
     options: ReplicabilityOptions,
     rows: list[dict[str, Any]],
+    data: DecompositionInput,
 ) -> Path:
     columns = (
         ["method", "rank", "fold_i", "fold_j", "n_common", "fms"]
@@ -1341,6 +1388,7 @@ def _write_replicability(
     path = output_dir / "replicability.csv"
     pd.DataFrame(rows, columns=columns).to_csv(path, index=False)
     write_provenance(output_dir, "replicability", options)
+    _write_excluded([output_dir], data)
     return path
 
 
@@ -1366,7 +1414,7 @@ def run_replicability(options: ReplicabilityOptions) -> Path:
             **_fit_options(options.fit, options.method),
         )
         rows.extend(_score_rows(options, rank, scores))
-    return _write_replicability(options, rows)
+    return _write_replicability(options, rows, data)
 
 
 def _replicability_plans(
@@ -1403,6 +1451,7 @@ def plan_replicability_jobs(
     else:
         _report_store(options, plan)
     _write_plan(options)
+    _write_excluded([Path(options.output_dir)], data)
     return n_jobs(plan, options.distributed.tasks_per_job)
 
 
@@ -1437,7 +1486,7 @@ def collect_replicability(output_dir: Path) -> Path:
     for rank, plan in plans.items():
         summaries = _collect_rank(plan, options, rank, fit_kwargs)
         rows.extend(_score_rows(options, rank, _engine(options).compute_fms(summaries)))
-    return _write_replicability(options, rows)
+    return _write_replicability(options, rows, data)
 
 
 # --------------------------------------------------------------------------
