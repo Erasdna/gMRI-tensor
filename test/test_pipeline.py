@@ -28,6 +28,7 @@ from gMRItensor.model_io import load_decomposition
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import select_subjects
 from gMRItensor.model_io import sort_components
+from gMRItensor.model_io import subject_coefficients
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
 from gMRItensor.options import DistributedOptions
@@ -57,6 +58,8 @@ from gMRItensor.pipeline import run_replicability
 from gMRItensor.pipeline import run_replicability_job
 from gMRItensor.pipeline import run_reproducibility_plot
 from gMRItensor.pipeline import run_statistics_plots
+from gMRItensor.plotting.evolving_mode import scaled_evolving_curves
+from gMRItensor.plotting.utils import scale_mode
 from gMRItensor.reproducibility import read_reproducibility
 from gMRItensor.reproducibility import write_reproducibility
 
@@ -1752,7 +1755,7 @@ def test_plots_sort_models_saved_unsorted(
 
     expected = sort_components(flipped)
     np.testing.assert_array_equal(drawn["subject_mode"], expected.subject_mode)
-    # Each subject's own B_i: the subject weights only decide which are drawn.
+    # Each subject's own B_i, scaled by its subject weight when drawn.
     assert expected.evolving_states is not None
     for got, want in zip(drawn["evolving_states"], expected.evolving_states):
         np.testing.assert_array_equal(got, want)
@@ -1763,37 +1766,55 @@ def test_plots_sort_models_saved_unsorted(
     np.testing.assert_array_equal(drawn["subject_mode"], saved.subject_mode)
 
 
-def test_plots_share_the_subject_coefficient_cutoff(
+def test_cmf_plots_use_the_evolving_norms(
     synthetic_study: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The evolving mode and the mode grid drop the same subjects."""
+    """Every CMF figure gets each subject's B_i norms as its coefficients,
+    not the RMS the fit saves."""
     stub_fits(monkeypatch)
     preprocess(synthetic_study)
-    (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
-    seen: dict[str, float] = {}
+    (model,) = run_decomposition(
+        decomposition_options(synthetic_study, method="cmf", ranks=(2,), fit=CMF_FIT),
+    )
+    seen: dict[str, np.ndarray] = {}
 
-    def fake_mode_grid(*args: Any, **kwargs: Any) -> Any:
-        seen["mode_grid"] = kwargs["negligible_atol"]
+    def fake_mode_grid(
+        spatial: Any,
+        time: Any,
+        subject_mode: Any,
+        *a: Any,
+        **k: Any,
+    ) -> Any:
+        seen["mode_grid"] = subject_mode
+        return plt.figure(), None
+
+    def fake_subject_mode(subject_mode: np.ndarray, *a: Any, **k: Any) -> Any:
+        seen["subject_mode"] = subject_mode
         return plt.figure(), None
 
     def fake_evolving_mode(*args: Any, **kwargs: Any) -> Any:
-        seen["time"] = kwargs["negligible_atol"]
+        seen["time"] = kwargs["subject_mode"]
         return plt.figure(), None, pd.DataFrame()
 
     monkeypatch.setattr(pipeline, "plot_mode_grid", fake_mode_grid)
+    monkeypatch.setattr(pipeline, "plot_subject_mode", fake_subject_mode)
     monkeypatch.setattr(pipeline, "plot_evolving_mode", fake_evolving_mode)
     run_decomposition_plots(
         plot_options(
             synthetic_study,
             model,
-            parts=("mode_grid", "time"),
+            parts=("mode_grid", "subject_mode", "time"),
             segmentation=synthetic_study.root / "images" / "seg.nii",
-            min_subject_coefficient=1e-3,
         ),
     )
 
-    assert seen == {"mode_grid": 1e-3, "time": 1e-3}
+    saved = load_decomposition(model)
+    assert saved.evolving_states is not None
+    norms = np.array([np.linalg.norm(B, axis=0) for B in saved.evolving_states])
+    assert set(seen) == {"mode_grid", "subject_mode", "time"}
+    for coefficients in seen.values():
+        np.testing.assert_allclose(coefficients, norms)
 
 
 def test_subject_prefix_renames_only_the_subject_mode_figure(
@@ -1925,6 +1946,101 @@ def test_plots_report_component_weights(
     np.testing.assert_allclose(table["weight"], expected, rtol=1e-6)
     np.testing.assert_allclose(table["relative_weight"], expected / expected.sum())
     assert table["weight"].is_monotonic_decreasing
+
+
+@pytest.mark.parametrize("method", ["cp", "parafac2", "cmf"])
+def test_plots_save_the_plotted_coefficients(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+) -> None:
+    """The subject and time coefficients as drawn, of the subjects drawn:
+    scaled like the figures, after subjects without a group are left out."""
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    fit = CMF_FIT if method == "cmf" else QUICK_FIT
+    (model,) = run_decomposition(
+        decomposition_options(synthetic_study, method=method, ranks=(2,), fit=fit),
+    )
+    info = pd.read_csv(synthetic_study.subject_info, dtype={"subjects": str})
+    gaps = _subject_info_with_gaps(
+        synthetic_study,
+        drop=[info["subjects"][0]],
+        blank=[],
+    )
+
+    run_decomposition_plots(
+        plot_options(
+            synthetic_study,
+            model,
+            subject_info=gaps,
+            parts=("subject_mode", "time"),
+        ),
+    )
+
+    saved = load_decomposition(model)
+    kept = select_subjects(saved, range(1, len(saved.subjects)))
+    coefficients = subject_coefficients(kept)
+    components = ["component_1", "component_2"]
+    figures = _figures(synthetic_study)
+
+    subject_table = pd.read_csv(
+        figures / f"{method}_rank_2__subject_coefficients.csv",
+        dtype={"subject": str},
+    )
+    assert list(subject_table.columns) == ["subject", *components]
+    assert list(subject_table["subject"]) == [str(s) for s in kept.subjects]
+    np.testing.assert_allclose(
+        subject_table[components],
+        scale_mode(coefficients),
+        rtol=1e-6,
+    )
+
+    time_table = pd.read_csv(
+        figures / f"{method}_rank_2__time_coefficients.csv",
+        dtype={"subject": str},
+    )
+    if method == "cp":
+        assert kept.time_mode is not None
+        assert list(time_table.columns) == ["timepoint", *components]
+        np.testing.assert_array_equal(time_table["timepoint"], kept.timepoints)
+        expected = scale_mode(kept.time_mode)
+    else:
+        assert kept.evolving_states is not None
+        assert list(time_table.columns) == ["subject", "timepoint", *components]
+        assert list(time_table["subject"]) == [
+            str(subject)
+            for subject, timepoints in zip(kept.subjects, kept.timepoints)
+            for _ in timepoints
+        ]
+        np.testing.assert_array_equal(
+            time_table["timepoint"],
+            np.concatenate(kept.timepoints),
+        )
+        expected = np.vstack(
+            scaled_evolving_curves(kept.evolving_states, coefficients),
+        )
+    np.testing.assert_allclose(time_table[components], expected, rtol=1e-6)
+
+
+@pytest.mark.parametrize(
+    ("part", "written"),
+    [("subject_mode", "subject"), ("time", "time")],
+)
+def test_coefficient_tables_come_with_their_part(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    part: str,
+    written: str,
+) -> None:
+    stub_fits(monkeypatch)
+    preprocess(synthetic_study)
+    (model,) = run_decomposition(decomposition_options(synthetic_study, ranks=(2,)))
+
+    run_decomposition_plots(plot_options(synthetic_study, model, parts=(part,)))
+
+    tables = sorted(p.name for p in _figures(synthetic_study).glob("*coefficients.csv"))
+    assert tables == [f"parafac2_rank_2__{written}_coefficients.csv"]
 
 
 def test_plots_need_two_subjects_per_group(

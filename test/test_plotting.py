@@ -1,5 +1,4 @@
 import warnings
-from typing import Any
 
 import matplotlib
 import matplotlib.pyplot as plt
@@ -12,6 +11,7 @@ from gMRItensor.outliers import OutlierCutoffs
 from gMRItensor.plotting.evolving_mode import build_long_evolving_dataframe
 from gMRItensor.plotting.evolving_mode import evolving_factors_to_numpy
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
+from gMRItensor.plotting.evolving_mode import scaled_evolving_curves
 from gMRItensor.plotting.mode_grid import plot_mode_grid
 from gMRItensor.plotting.outliers import plot_outliers
 from gMRItensor.plotting.reproducibility import plot_reproducibility
@@ -726,10 +726,62 @@ def _ribbon_means(ax: matplotlib.axes.Axes) -> dict[str, np.ndarray]:
     }
 
 
-def test_plot_evolving_mode_draws_negligible_subject_as_zero() -> None:
+def test_scaled_evolving_curves_parafac2_is_scaled_weight_times_shape() -> None:
+    """B_i = P_i B: every subject's columns share one norm, so each curve is
+    the unit-norm B_i times its scaled weight, a_ir / ||a_r||."""
+    rng = np.random.default_rng(0)
+    B = rng.random((5, 2))
+    states = [np.linalg.qr(rng.normal(size=(5, 5)))[0] @ B for _ in range(4)]
+    a = rng.uniform(0.5, 2.0, (4, 2))
+    a[1, 1] = -0.3
+
+    curves = scaled_evolving_curves(states, a)
+
+    for i, (curve, B_i) in enumerate(zip(curves, states)):
+        expected = a[i] / np.linalg.norm(a, axis=0) * B_i / np.linalg.norm(B_i, axis=0)
+        np.testing.assert_allclose(curve, expected)
+    # A negative weight flips the curve: it is the subject's contribution.
+    assert np.all(np.sign(curves[1][:, 1]) == -np.sign(states[1][:, 1]))
+
+
+def test_scaled_evolving_curves_cmf_keeps_the_relative_scale() -> None:
+    """With each subject's B_i norms as coefficients (CMF), the curves are
+    the B_i over the component's norm across all subjects."""
+    rng = np.random.default_rng(1)
+    states = [rng.random((n, 2)) * rng.uniform(0.01, 3.0, 2) for n in (4, 5, 6)]
+    norms = np.array([np.linalg.norm(B, axis=0) for B in states])
+
+    curves = scaled_evolving_curves(states, norms)
+
+    stacked_norm = np.linalg.norm(np.vstack(states), axis=0)
+    for curve, B_i in zip(curves, states):
+        np.testing.assert_allclose(curve, B_i / stacked_norm)
+
+
+def test_scaled_evolving_curves_zero_weight_is_a_flat_curve() -> None:
+    evolving_factors, *_ = make_evolving_factors()
+    weights = np.ones((len(evolving_factors), 2))
+    weights[0, 0] = 0.0
+
+    curves = scaled_evolving_curves(evolving_factors, weights)
+
+    assert np.all(curves[0][:, 0] == 0)
+    assert np.any(curves[0][:, 1] != 0)
+
+
+def test_scaled_evolving_curves_without_weights_are_unit_shapes() -> None:
+    evolving_factors, *_ = make_evolving_factors()
+    for curve, factor in zip(
+        scaled_evolving_curves(evolving_factors),
+        evolving_factors,
+    ):
+        np.testing.assert_allclose(curve, scale_mode(factor))
+
+
+def test_plot_evolving_mode_draws_the_scaled_curves() -> None:
     evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
-    subject_mode = np.ones((len(subjects), 2))
-    subject_mode[0, 0] = 5e-7  # sub-00 does not express component 1
+    subject_mode = np.random.default_rng(2).uniform(0.5, 2.0, (len(subjects), 2))
+    subject_mode[0, 0] = 1e-3
 
     fig, axs, _ = plot_evolving_mode(
         evolving_factors,
@@ -740,105 +792,40 @@ def test_plot_evolving_mode_draws_negligible_subject_as_zero() -> None:
         subject_mode=subject_mode,
     )
 
-    # sub-00 is group A's first curve.
-    assert np.all(axs[0, 1].get_lines()[0].get_ydata() == 0)
-    assert np.any(axs[1, 1].get_lines()[0].get_ydata() != 0)
+    expected = scaled_evolving_curves(evolving_factors, subject_mode)
+    for component in range(2):
+        drawn = [line.get_ydata() for line in axs[component, 1].get_lines()]
+        for i in range(3):  # group A: sub-00 .. sub-02
+            np.testing.assert_allclose(drawn[i], expected[i][:, component])
     plt.close(fig)
 
 
-def test_plot_evolving_mode_leaves_negligible_subject_out_of_ribbon_and_tests() -> None:
+def test_plot_evolving_mode_keeps_a_weak_subject_in_the_ribbon() -> None:
+    """A small weight gives a near-flat curve, still counted in its group."""
     (
         evolving_factors,
         timepoints,
         subjects,
         subject_info,
     ) = make_evolving_factors_shared_timepoints(n_subjects_per_group=4)
-    evolving_factors = [np.hstack([f, f[::-1]]) for f in evolving_factors]
-    subject_mode = np.ones((len(subjects), 2))
-    subject_mode[0, 0] = 0.0
+    subject_mode = np.ones((len(subjects), 1))
+    subject_mode[0, 0] = 1e-3
 
-    def plot(
-        keep: slice,
-        weights: np.ndarray,
-    ) -> tuple[list[dict[str, np.ndarray]], pd.DataFrame]:
-        fig, axs, significance = plot_evolving_mode(
-            evolving_factors[keep],
-            timepoints[keep],
-            subjects[keep],
-            subject_info,
-            group_variable="group",
-            subject_mode=weights[keep],
-        )
-        means = [_ribbon_means(axs[c, 0]) for c in range(2)]
-        plt.close(fig)
-        return means, significance
-
-    masked_means, masked = plot(slice(None), subject_mode)
-    full_means, _ = plot(slice(None), np.ones_like(subject_mode))
-    without_means, without = plot(slice(1, None), subject_mode)  # no sub-00
-
-    # Component 1 as if sub-00 were absent; component 2 keeps sub-00.
-    np.testing.assert_allclose(masked_means[0]["A"], without_means[0]["A"])
-    np.testing.assert_allclose(masked_means[1]["A"], full_means[1]["A"])
-    assert not np.allclose(without_means[1]["A"], masked_means[1]["A"])
-    pd.testing.assert_frame_equal(
-        masked[masked["component"] == 0].reset_index(drop=True),
-        without[without["component"] == 0].reset_index(drop=True),
+    fig, axs, significance = plot_evolving_mode(
+        evolving_factors,
+        timepoints,
+        subjects,
+        subject_info,
+        group_variable="group",
+        subject_mode=subject_mode,
     )
 
-
-def test_plot_evolving_mode_does_not_flip_negative_weights() -> None:
-    """Curves show each subject's B_i shape; the weight's sign belongs to the
-    subject-mode plot, so a negative (non-negligible) weight is drawn and
-    counted exactly as a positive one."""
-    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
-    positive = np.ones((len(subjects), 2))
-    negative = positive.copy()
-    negative[0, 0] = -0.8
-
-    def draw(subject_mode: np.ndarray) -> tuple[np.ndarray, dict[str, np.ndarray]]:
-        fig, axs, _ = plot_evolving_mode(
-            evolving_factors,
-            timepoints,
-            subjects,
-            subject_info,
-            group_variable="group",
-            subject_mode=subject_mode,
-        )
-        curve = np.asarray(axs[0, 1].get_lines()[0].get_ydata())  # sub-00
-        means = _ribbon_means(axs[0, 0])
-        plt.close(fig)
-        return curve, means
-
-    curve, means = draw(negative)
-    np.testing.assert_allclose(curve, scale_mode(evolving_factors[0])[:, 0])
-    _, positive_means = draw(positive)
-    np.testing.assert_allclose(means["A"], positive_means["A"])
-
-
-def test_plot_evolving_mode_drops_curves_that_scaling_zeroes() -> None:
-    """A column `scale_mode` zeroes (negligible next to the subject's other
-    column) is drawn as zero and kept out of the ribbon, even at atol=0."""
-    evolving_factors, timepoints, subjects, subject_info = make_evolving_factors()
-    evolving_factors = [factor.copy() for factor in evolving_factors]
-    evolving_factors[0][:, 0] *= 1e-12
-    subject_mode = np.ones((len(subjects), 2))
-
-    def ribbon_a(keep: slice) -> np.ndarray:
-        fig, axs, _ = plot_evolving_mode(
-            evolving_factors[keep],
-            timepoints[keep],
-            subjects[keep],
-            subject_info,
-            group_variable="group",
-            subject_mode=subject_mode[keep],
-            negligible_atol=0.0,
-        )
-        mean = _ribbon_means(axs[0, 0])["A"]
-        plt.close(fig)
-        return mean
-
-    np.testing.assert_allclose(ribbon_a(slice(None)), ribbon_a(slice(1, None)))
+    curves = scaled_evolving_curves(evolving_factors, subject_mode)
+    np.testing.assert_allclose(
+        _ribbon_means(axs[0, 0])["A"],
+        np.mean([curves[i][:, 0] for i in range(4)], axis=0),
+    )
+    plt.close(fig)
 
 
 def test_plot_evolving_mode_rejects_misshaped_subject_mode() -> None:
@@ -1522,44 +1509,20 @@ def test_plot_mode_grid_parafac2_ribbon_matches_boxplot_colors():
     plt.close(fig)
 
 
-def test_plot_mode_grid_leaves_negligible_subject_out_of_ribbon() -> None:
+def test_plot_mode_grid_ribbon_uses_the_scaled_curves() -> None:
     kwargs = make_mode_grid_parafac2_fixture()
     kwargs["subject_mode"] = kwargs["subject_mode"].copy()
-    kwargs["subject_mode"][0, 0] = 5e-7  # sub-00 does not express component 1
+    kwargs["subject_mode"][0, 0] = 1e-3
 
     fig, axs = plot_mode_grid(**kwargs)
-    masked = [_ribbon_means(axs[c, 0]) for c in range(2)]
+    ribbon = _ribbon_means(axs[0, 0])["A"]
     plt.close(fig)
 
-    without = dict(kwargs)
-    for key in ("time_mode", "time_points", "subjects"):
-        without[key] = kwargs[key][1:]
-    without["subject_mode"] = kwargs["subject_mode"][1:]
-    fig, axs = plot_mode_grid(**without)
-    removed = [_ribbon_means(axs[c, 0]) for c in range(2)]
-    plt.close(fig)
-
-    np.testing.assert_allclose(masked[0]["A"], removed[0]["A"])
-    assert not np.allclose(masked[1]["A"], removed[1]["A"])
-
-
-def test_plot_mode_grid_honours_negligible_atol() -> None:
-    kwargs = make_mode_grid_parafac2_fixture()
-    kwargs["subject_mode"] = kwargs["subject_mode"].copy()
-    kwargs["subject_mode"][0, 0] = 5e-5
-
-    def ribbon_a(**overrides: Any) -> np.ndarray:
-        fig, axs = plot_mode_grid(**{**kwargs, **overrides})
-        mean = _ribbon_means(axs[0, 0])["A"]
-        plt.close(fig)
-        return mean
-
-    without = {
-        key: kwargs[key][1:]
-        for key in ("time_mode", "time_points", "subjects", "subject_mode")
-    }
-    np.testing.assert_allclose(ribbon_a(negligible_atol=1e-4), ribbon_a(**without))
-    assert not np.allclose(ribbon_a(), ribbon_a(**without))
+    curves = scaled_evolving_curves(kwargs["time_mode"], kwargs["subject_mode"])
+    groups = kwargs["subject_info"].set_index("subjects").loc[kwargs["subjects"]]
+    group_a = np.flatnonzero(groups["group"].to_numpy() == "A")
+    # Every subject is scanned at the first time point.
+    assert ribbon[0] == pytest.approx(np.mean([curves[i][0, 0] for i in group_a]))
 
 
 def test_plot_mode_grid_single_component():

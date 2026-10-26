@@ -170,10 +170,8 @@ def _zero_negligible_loadings(
 
     Scaled per component rather than absolutely, so it adapts to however the
     fit distributed scale between the modes. This only removes residue,
-    relative to its own column (sign safety). Whether a subject expresses a
-    component at all is decided at plot time, by the absolute
-    `model_io.NEGLIGIBLE_SUBJECT_WEIGHT` (`--min-subject-coefficient`): a
-    column that is small throughout keeps its largest entries here.
+    relative to its own column (sign safety): a column that is small
+    throughout keeps its largest entries here.
     """
     if rtol <= 0:
         return factor

@@ -61,6 +61,7 @@ from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
 from gMRItensor.model_io import select_subjects
 from gMRItensor.model_io import sort_components
+from gMRItensor.model_io import subject_coefficients
 from gMRItensor.options import CONCENTRATION_STATISTICS
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
@@ -78,6 +79,7 @@ from gMRItensor.outliers import data_slices
 from gMRItensor.outliers import FLAG_COLUMNS
 from gMRItensor.outliers import outlier_table
 from gMRItensor.plotting.evolving_mode import plot_evolving_mode
+from gMRItensor.plotting.evolving_mode import scaled_evolving_curves
 from gMRItensor.plotting.mode_grid import plot_mode_grid
 from gMRItensor.plotting.outliers import plot_outliers
 from gMRItensor.plotting.reproducibility import plot_reproducibility
@@ -92,6 +94,7 @@ from gMRItensor.plotting.subject_mode import plot_subject_mode
 from gMRItensor.plotting.time_mode import plot_time_mode
 from gMRItensor.plotting.utils import resolve_page_width
 from gMRItensor.plotting.utils import save_figure
+from gMRItensor.plotting.utils import scale_mode
 from gMRItensor.preprocessing import compute_roi_scaling
 from gMRItensor.preprocessing import EXCLUDED_COLUMNS
 from gMRItensor.preprocessing import load_tensor_with_exclusions
@@ -1659,6 +1662,49 @@ def _component_weights_table(weights: np.ndarray) -> pd.DataFrame:
     )
 
 
+def _component_columns(values: np.ndarray) -> dict[str, np.ndarray]:
+    """`component_1`, `component_2`, ...: the columns of `values`."""
+    return {f"component_{r + 1}": values[:, r] for r in range(values.shape[1])}
+
+
+def _subject_coefficients_table(
+    subjects: list[str],
+    coefficients: np.ndarray,
+) -> pd.DataFrame:
+    """`subject` and one column per component: `coefficients` scaled as the
+    subject-mode figures draw them (`scale_mode`)."""
+    return pd.DataFrame(
+        {"subject": subjects, **_component_columns(scale_mode(coefficients))},
+    )
+
+
+def _time_coefficients_table(
+    saved: SavedDecomposition,
+    subjects: list[str],
+    coefficients: np.ndarray,
+) -> pd.DataFrame:
+    """The time curves as drawn, one column per component: CP's shared time
+    mode by `timepoint`; PARAFAC2/CMF's `scaled_evolving_curves` by
+    `subject` and `timepoint`."""
+    if saved.time_mode is not None:
+        return pd.DataFrame(
+            {
+                "timepoint": np.asarray(saved.timepoints),
+                **_component_columns(scale_mode(np.asarray(saved.time_mode))),
+            },
+        )
+    assert saved.evolving_states is not None
+    timepoints = [np.asarray(t) for t in saved.timepoints]
+    curves = scaled_evolving_curves(saved.evolving_states, coefficients)
+    return pd.DataFrame(
+        {
+            "subject": [s for s, t in zip(subjects, timepoints) for _ in t],
+            "timepoint": np.concatenate(timepoints),
+            **_component_columns(np.vstack(curves)),
+        },
+    )
+
+
 def _same_values(a: Any, b: Any) -> bool:
     """Whether two saved fields hold the same values: None only equals
     None, ragged lists compare element by element, numbers to 1e-5."""
@@ -1762,7 +1808,11 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
     mode gets `<subject_prefix>_` in front when one is set. Every run also
     writes `<model>__component_weights.csv` there: each component's
     amplitude once its modes are normalised (`component_weights`), the
-    scale the figures leave out. Parts that group subjects leave out (and
+    scale the figures leave out. The values drawn are written there too:
+    `<model>__subject_coefficients.csv` with the subject mode or mode grid,
+    `<model>__time_coefficients.csv` with the time part or mode grid. For
+    CMF the subject coefficients are the norms of each subject's `B_i`
+    (`subject_coefficients`). Parts that group subjects leave out (and
     name) subjects without a `group_variable` value, as long as every group
     keeps 2 (`subjects_with_groups`). Spatial parts of an ROI model need a
     segmentation: without one they are skipped with a note if no part was
@@ -1777,8 +1827,9 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
     `<model>` is the model's name: its directory, or the stem of any other
     model file (`resolve_model`).
 
-    Returns the figure files only: the CSVs (component weights, evolving-mode
-    significance, outliers) are written next to them but not listed.
+    Returns the figure files only: the CSVs (component weights,
+    coefficients, evolving-mode significance, outliers) are written next to
+    them but not listed.
     """
     model_file, stem = resolve_model(options.model)
     saved = load_decomposition(model_file)
@@ -1851,6 +1902,17 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
         out_dir / f"{stem}__component_weights.csv",
         index=False,
     )
+    coefficients = subject_coefficients(saved)
+    if {"mode_grid", "subject_mode"} & set(parts):
+        _subject_coefficients_table(subjects, coefficients).to_csv(
+            out_dir / f"{stem}__subject_coefficients.csv",
+            index=False,
+        )
+    if {"mode_grid", "time"} & set(parts):
+        _time_coefficients_table(saved, subjects, coefficients).to_csv(
+            out_dir / f"{stem}__time_coefficients.csv",
+            index=False,
+        )
 
     written: list[Path] = []
 
@@ -1868,7 +1930,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
         fig, _ = plot_mode_grid(
             spatial.mode,
             time_mode,
-            saved.subject_mode,
+            coefficients,
             spatial.index_list,
             spatial.csf,
             ~spatial.csf,
@@ -1879,12 +1941,11 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
             subject_info,
             options.group_variable,
             page_width=page_width,
-            negligible_atol=options.min_subject_coefficient,
         )
         save(fig, "mode_grid")
     if "subject_mode" in parts:
         fig, _ = plot_subject_mode(
-            saved.subject_mode,
+            coefficients,
             subjects,
             subject_info,
             options.group_variable,
@@ -1909,8 +1970,7 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
                 page_width=page_width,
                 min_group_n=options.min_group_n,
                 significance_alpha=options.alpha,
-                subject_mode=saved.subject_mode,
-                negligible_atol=options.min_subject_coefficient,
+                subject_mode=coefficients,
             )
             save(fig, "evolving_mode")
             significance.to_csv(

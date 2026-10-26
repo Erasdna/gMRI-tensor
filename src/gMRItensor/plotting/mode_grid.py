@@ -8,12 +8,10 @@ import pandas as pd
 import scienceplots  # noqa: F401
 from gMRItensor.group_statistics import resolve_subject_groups
 from gMRItensor.group_statistics import summarize_groups_over_time
-from gMRItensor.model_io import NEGLIGIBLE_SUBJECT_WEIGHT
 from gMRItensor.plotting.evolving_mode import all_timepoints
 from gMRItensor.plotting.evolving_mode import build_long_evolving_dataframe
 from gMRItensor.plotting.evolving_mode import group_legend
-from gMRItensor.plotting.evolving_mode import negligible_mask
-from gMRItensor.plotting.evolving_mode import with_zeroed_curves
+from gMRItensor.plotting.evolving_mode import scaled_evolving_curves
 from gMRItensor.plotting.spatial_mode import percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
 from gMRItensor.plotting.subject_mode import make_subject_boxplot
@@ -89,7 +87,6 @@ def plot_mode_grid(
     group_variable: str,
     page_width: float = 7.0,
     share_colorbar_scaling: bool = False,
-    negligible_atol: float = NEGLIGIBLE_SUBJECT_WEIGHT,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
     """Plot a component-per-row grid: time, subject boxplot, and spatial mode.
 
@@ -98,13 +95,12 @@ def plot_mode_grid(
     - CP: `time_mode` is one shared `(n_timepoints, rank)` array and
       `time_points` its timepoints; drawn as a single line per component.
     - PARAFAC2/CMF: `time_mode` is a list of per-subject `(n_timepoints_i, rank)`
-      evolving states `B_i` (e.g. from `evolving_factors_to_numpy`), each
-      scaled to unit norm, and `time_points` the matching list of
-      per-subject timepoint arrays, both in `subjects` order. Drawn as a
-      per-group mean +/- SEM ribbon, as in the left column of
+      evolving states `B_i` (e.g. from `evolving_factors_to_numpy`), and
+      `time_points` the matching list of per-subject timepoint arrays, both
+      in `subjects` order. Each subject's curves are its unit-norm `B_i`
+      times its scaled `subject_mode` coefficient (`scaled_evolving_curves`),
+      drawn as a per-group mean +/- SEM ribbon, as in the left column of
       `plot_evolving_mode`, with group colors matching the subject boxplot.
-      A subject whose `subject_mode` weight is below `negligible_atol` in
-      absolute value is left out of that component's ribbon.
 
     The Parenchyma/CSF columns use the same masking and percentile scaling
     as `plot_spatial_mode`. `share_colorbar_scaling` likewise mirrors that
@@ -139,24 +135,14 @@ def plot_mode_grid(
         groups = resolve_subject_groups(subjects, subject_info, group_variable)
         categories = sorted(set(groups))
         color_by_group = dict(zip(categories, get_color_palette(len(categories))))
-        # Per-subject scaling and dropped subjects, as in `plot_evolving_mode`.
-        scaled_factors = [scale_mode(np.asarray(factor)) for factor in time_mode]
-        negligible = with_zeroed_curves(
-            negligible_mask(
-                subject_mode,
-                len(subjects),
-                n_components,
-                negligible_atol,
-            ),
-            scaled_factors,
-        )
+        # The same curves as `plot_evolving_mode`.
+        scaled_factors = scaled_evolving_curves(time_mode, subject_mode)
         long_df = build_long_evolving_dataframe(
             scaled_factors,
             [np.asarray(timepoints) for timepoints in time_points],
             subjects,
             groups,
             n_components,
-            negligible,
         )
         evolving_timepoints = all_timepoints(time_points)
         ribbon_stats = summarize_groups_over_time(long_df, facet="component")
