@@ -373,10 +373,6 @@ def test_decomposition_plot_options_split_subject_variables(tmp_path: Path) -> N
     assert options.numerical == ("age",)
     with pytest.raises(ValueError, match="min_panel_width"):
         DecompositionPlotOptions(**common, min_panel_width=0.0)
-    assert DecompositionPlotOptions(**common).min_subject_coefficient == 1e-6
-    assert DecompositionPlotOptions(**common, min_subject_coefficient=0.0)
-    with pytest.raises(ValueError, match="min_subject_coefficient"):
-        DecompositionPlotOptions(**common, min_subject_coefficient=-1e-6)
 
 
 @pytest.mark.parametrize("prefix", ["a/b", "a\\b", ".hidden"])

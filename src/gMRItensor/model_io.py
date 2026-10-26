@@ -110,26 +110,15 @@ def component_weights(saved: SavedDecomposition) -> np.ndarray:
     return weights * evolving * label
 
 
-#: A subject-mode entry below this, in absolute value, means the subject
-#: does not express that component (`gmri plot decomposition
-#: --min-subject-coefficient`). Unlike the fit's `negligible_rtol`, which
-#: removes solver residue relative to each column, it is absolute, on the
-#: raw (never normalised) subject mode.
-NEGLIGIBLE_SUBJECT_WEIGHT = 1e-6
-
-
-def negligible_subjects(
-    subject_mode: np.ndarray,
-    atol: float = NEGLIGIBLE_SUBJECT_WEIGHT,
-) -> np.ndarray:
-    """`(n_subjects, rank)` mask of subject-mode entries below `atol` in
-    absolute value: those subjects' time courses are drawn as zero and left
-    out of the group ribbons and tests. Reads the raw subject mode, on the
-    scale the fit left it (see `NEGLIGIBLE_SUBJECT_WEIGHT`). An exact zero,
-    a loading the fit removed as residue, is always negligible, also at
-    `atol=0`."""
-    magnitude = np.abs(np.asarray(subject_mode))
-    return (magnitude < atol) | (magnitude == 0)
+def subject_coefficients(saved: SavedDecomposition) -> np.ndarray:
+    """`(n_subjects, rank)` subject coefficients the figures draw: the
+    subject mode, except for CMF, whose `B_i` carry each subject's amplitude:
+    there it is the L2 norm of each subject's `B_i` columns (the saved
+    `subject_mode` is their RMS, which also depends on the number of time
+    points)."""
+    if saved.method == "cmf":
+        return np.array([_column_norms(B) for B in saved.evolving_states or []])
+    return np.asarray(saved.subject_mode)
 
 
 def sort_components(saved: SavedDecomposition) -> SavedDecomposition:

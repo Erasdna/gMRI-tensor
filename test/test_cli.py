@@ -206,8 +206,6 @@ def test_cli_plot_subject_mode_variables(
                 *variables,
                 "--min-panel-width",
                 2,
-                "--min-subject-coefficient",
-                1e-3,
             ],
         )
         == 0
@@ -217,7 +215,6 @@ def test_cli_plot_subject_mode_variables(
     provenance = (results / "plot_decomposition.json").read_text()
     assert '"categorical": [\n      "sex",\n      "apoe"\n    ]' in provenance
     assert '"min_panel_width": 2.0' in provenance
-    assert '"min_subject_coefficient": 0.001' in provenance
 
     assert _run([*plot, *variables, "--subject-prefix", "sleep"]) == 0
     assert (figure.parent / "sleep_parafac2_rank_1__subject_mode.png").exists()

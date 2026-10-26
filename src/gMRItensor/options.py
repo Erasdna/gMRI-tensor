@@ -18,7 +18,6 @@ from gMRItensor.decomposition.restarts import _resolve_options
 from gMRItensor.group_statistics import Aggregate
 from gMRItensor.group_statistics import AGGREGATES
 from gMRItensor.group_statistics import require_columns
-from gMRItensor.model_io import NEGLIGIBLE_SUBJECT_WEIGHT
 from gMRItensor.model_io import resolve_model
 from gMRItensor.noise import COMPARTMENTS
 from gMRItensor.noise import NOISE_SOURCES
@@ -620,8 +619,6 @@ class DecompositionPlotOptions:
     subject_prefix: str = ""
     alpha: float = 0.05
     min_group_n: int = 2
-    # PARAFAC2/CMF only: CP has no per-subject time curves to drop.
-    min_subject_coefficient: float = NEGLIGIBLE_SUBJECT_WEIGHT
     outlier_alpha: float = 0.01
     input: Path | None = None
     page_width: str | float = "double"
@@ -642,10 +639,6 @@ class DecompositionPlotOptions:
         _check(
             self.min_panel_width is None or self.min_panel_width > 0,
             f"min_panel_width must be > 0, got {self.min_panel_width}",
-        )
-        _check(
-            self.min_subject_coefficient >= 0,
-            f"min_subject_coefficient must be >= 0, got {self.min_subject_coefficient}",
         )
         _check(
             0 < self.outlier_alpha < 1,

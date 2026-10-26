@@ -5,7 +5,7 @@
 ### Added
 - **ROI overview:** `gmri plot overview` draws every label for every subject and session, one row per session (all parenchyma, all CSF, and one column per region), and flags values with |modified z-score| > 3.5 among all subjects for that label and session (`--z-cut`; Iglewicz & Hoaglin 1993). Each flagged value is ringed and named in the figures and listed in `roi_analysis/overview_flags__<statistic>.csv`. See `docs/cli.md`.
 - **Excluding subjects:** `decompose` and `replicability` (`run` and `plan`) take `--exclude-subjects ID ...`; the subjects are left out as if absent from the input, and an unknown ID is an error. Every left-out subject, also those dropped for missing or unusable sessions (naming the time points), is listed with the reason in `excluded_subjects.csv`, per model directory for `decompose`.
-
+- **Coefficient tables:** `plot decomposition` writes the subject and time coefficients exactly as drawn, `<model>__subject_coefficients.csv` (one row per subject) and `<model>__time_coefficients.csv` (per time point; per subject and time point for PARAFAC2 and CMF), so a subject can be looked up.
 - **Negative cutoff:** `preprocess --negative-cutoff K` (off by default) estimates the study's ΔR1 noise level from the data (outside the brain mask, or per compartment inside it; `gMRItensor.noise`), makes values below −K noise SDs invalid, and makes an ROI NaN when more than `--max-invalid-voxel-fraction` (0.5) of its voxels are invalid, in the ROI and the voxel data alike. Each setting writes to its own folder, `data/k<K>[...]/`, with `noise.csv` (per-scan noise estimates, z-scores, cutoff, rejected voxels) and `invalid_rois.csv`. `roi_signal.parquet` gains an `n_rejected` column (0 without a cutoff).
 - **Dropped columns listed:** `decompose` and `replicability` write `excluded_columns.csv` next to `excluded_subjects.csv`: per label, the columns left out of the fit (PARAFAC2/CMF drop any column non-finite in a kept scan) and the scans that caused it.
 
@@ -13,6 +13,11 @@
 - The loader's notes on dropped sessions and subjects go to stderr, so the stdout of `plan` stays the job count.
 - **`total_amount`** is mean concentration × the full ROI volume (it was × the valid volume), so invalid voxels count at the ROI's mean concentration instead of lowering the total.
 - For data preprocessed with `--negative-cutoff`, `plot statistics` makes a region NaN when its share of invalid voxels exceeds the `--max-invalid-voxel-fraction` used then.
+- **Evolving-mode curves** (PARAFAC2, CMF; `--time` and `--mode-grid`): each subject's curve is its unit-norm shape times its scaled subject coefficient, so a subject that barely expresses a component is a near-flat line instead of a full-height curve. Every subject counts in the ribbons and group tests. A negative PARAFAC2 coefficient flips the curve.
+- **CMF subject coefficient:** the figures use the L2 norm of each subject's time course, not the RMS the fit saves (they differ when subjects have different numbers of time points).
+
+### Removed
+- `plot decomposition --min-subject-coefficient`: with curves scaled by the subject coefficient, no cutoff is needed.
 
 ## 0.2.0
 

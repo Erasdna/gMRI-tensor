@@ -20,7 +20,6 @@ from typing import Any
 from gMRItensor import pipeline
 from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.group_statistics import AGGREGATES
-from gMRItensor.model_io import NEGLIGIBLE_SUBJECT_WEIGHT
 from gMRItensor.options import DECOMPOSITION_PARTS
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
@@ -699,15 +698,6 @@ def _add_decomposition_plot(kinds: Any) -> None:
     )
     _add_test_arguments(parser, "evolving-mode significance (default: 0.05)")
     parser.add_argument(
-        "--min-subject-coefficient",
-        type=float,
-        default=NEGLIGIBLE_SUBJECT_WEIGHT,
-        metavar="C",
-        help="PARAFAC2/CMF: drop a subject from a component's time curves, "
-        "ribbon and tests when |subject mode| < C (default: %(default)g; 0 "
-        "drops only loadings the fit set to zero; ignored for CP)",
-    )
-    parser.add_argument(
         "--outlier-alpha",
         type=float,
         default=0.01,
@@ -1084,7 +1074,6 @@ def _plot_decomposition(args: argparse.Namespace) -> None:
             subject_prefix=args.subject_prefix,
             alpha=args.alpha,
             min_group_n=args.min_group_n,
-            min_subject_coefficient=args.min_subject_coefficient,
             outlier_alpha=args.outlier_alpha,
             input=args.input,
             page_width=_page_width(args.page_width),

@@ -8,11 +8,11 @@ import numpy as np
 import pytest
 from gMRItensor.model_io import component_weights
 from gMRItensor.model_io import load_decomposition
-from gMRItensor.model_io import negligible_subjects
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
 from gMRItensor.model_io import select_subjects
 from gMRItensor.model_io import sort_components
+from gMRItensor.model_io import subject_coefficients
 
 
 def _common(rank: int, rng: np.random.Generator) -> dict[str, Any]:
@@ -322,16 +322,20 @@ def test_select_subjects_keeps_the_subject_indexed_fields(method: str) -> None:
         )
 
 
-def test_negligible_subjects_is_strict_and_absolute() -> None:
-    subject_mode = np.array([[1.0, 1e-6], [-5e-7, 0.0], [-2.0, 1e-3]])
-    expected = np.array([[False, False], [True, True], [False, False]])
-    np.testing.assert_array_equal(negligible_subjects(subject_mode), expected)
+def test_cmf_subject_coefficients_are_the_evolving_norms() -> None:
+    """Not the stored RMS, which divides by each subject's number of time
+    points (ragged here)."""
+    saved = _unsorted("cmf", np.random.default_rng(11))
+    assert saved.evolving_states is not None
+    expected = np.array([np.linalg.norm(B, axis=0) for B in saved.evolving_states])
+    rms = np.array([np.sqrt((B**2).mean(axis=0)) for B in saved.evolving_states])
+    saved = replace(saved, subject_mode=rms)
+
+    np.testing.assert_allclose(subject_coefficients(saved), expected)
+    assert not np.allclose(subject_coefficients(saved), saved.subject_mode)
 
 
-def test_negligible_subjects_always_drops_exact_zeros() -> None:
-    """A loading the fit set to zero is not expressed, even with no cutoff."""
-    subject_mode = np.array([[0.0, 1e-9], [-0.0, 2.0]])
-    np.testing.assert_array_equal(
-        negligible_subjects(subject_mode, atol=0.0),
-        [[True, False], [True, False]],
-    )
+@pytest.mark.parametrize("method", ["cp", "parafac2"])
+def test_subject_coefficients_are_the_subject_mode(method: str) -> None:
+    saved = _unsorted(method, np.random.default_rng(12))
+    np.testing.assert_array_equal(subject_coefficients(saved), saved.subject_mode)
