@@ -52,7 +52,10 @@ def test_without_a_cutoff_preprocessing_is_unchanged(head_study: Any) -> None:
     data = head_study.root / "results" / "data"
     assert paths.roi_signal == data / "roi_signal.parquet"
     assert paths.noise is None and paths.invalid_rois is None
-    assert sorted(p.name for p in data.iterdir()) == ["roi_signal.parquet"]
+    assert sorted(p.name for p in data.iterdir()) == [
+        "roi_signal.csv",
+        "roi_signal.parquet",
+    ]
     assert (head_study.root / "results" / "preprocess.json").exists()
     roi = pd.read_parquet(paths.roi_signal)
     assert (roi["n_rejected"] == 0).all()
@@ -73,6 +76,7 @@ def test_cutoff_writes_its_own_folder_with_the_qc_tables(
         folder / "invalid_rois.csv",
     )
     assert (folder / "preprocess.json").exists()
+    assert (folder / "roi_signal.csv").exists()
     assert not (head_study.root / "results" / "preprocess.json").exists()
     assert not (head_study.root / "results" / "data" / "roi_signal.parquet").exists()
     err = capsys.readouterr().err

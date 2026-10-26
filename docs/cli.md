@@ -57,6 +57,7 @@ sub-01,24,sub-01/T1map_ses-00.nii.gz,sub-01/T1map_ses-24.nii.gz,sub-01/mask.nii.
 | File | Contents |
 |---|---|
 | `data/roi_signal.parquet` | One row per subject × time point × label: `median`, `mean`, `n_voxels`, `n_valid` (the finite voxels the median and mean are taken over), `n_rejected` (voxels below the negative cutoff; 0 without one), `voxel_volume_mm3`. |
+| `data/roi_signal.csv` | The same table as CSV, for viewing. It has no metadata; the other commands read the parquet. |
 | `data/voxels.parquet` | With `--store-voxels`: one row per scan × labeled voxel (`labels`, `label_index`, `values`). |
 | `data/voxels.coords.parquet` | Each voxel's `(labels, label_index)` key and `(i, j, k)` index. The template `shape` and `affine` are stored in the file metadata, with `template`, the resolved path of the first scan's segmentation. That path is a record only: the template check compares labels and voxel coordinates, not files. |
 
@@ -83,7 +84,7 @@ gmri preprocess --manifest scans.csv --output-dir results --input-type T1map --t
 3. **Cutoff.** In every scan, a value below −K × σ of its compartment becomes NaN; the cutoff is anchored at 0, the physical lower limit. Under Gaussian noise about 3·10⁻⁵ of the voxels without tracer fall below −4σ by chance, so removing only the negative tail biases nothing measurably.
 4. **Invalid ROIs.** An ROI with more than `--max-invalid-voxel-fraction` (default 0.5) invalid voxels, i.e. mapping failures plus rejected values, gets NaN `median` and `mean` and `n_valid` 0 for that scan. `plot statistics` applies the same fraction to the regions it combines. With `--store-voxels`, the rejected voxels and every voxel of an invalid ROI are NaN in `voxels.parquet` as well.
 
-**Outputs** go to their own folder, `data/k<K>/`, so runs with different settings never overwrite each other or the default `data/`. Every setting that changes the values and differs from its default is added to the name in this order: `_sd<SD>` (`_sd<P>-<C>` for a pair), `_f<F>`, `_outside`/`_inside`, `_shell<MM>`, `_csf<OFFSET>` (e.g. `data/k4/`, `data/k4_f0.25_inside/`). The folder holds `roi_signal.parquet` (and the voxel files), its own `preprocess.json`, and:
+**Outputs** go to their own folder, `data/k<K>/`, so runs with different settings never overwrite each other or the default `data/`. Every setting that changes the values and differs from its default is added to the name in this order: `_sd<SD>` (`_sd<P>-<C>` for a pair), `_f<F>`, `_outside`/`_inside`, `_shell<MM>`, `_csf<OFFSET>` (e.g. `data/k4/`, `data/k4_f0.25_inside/`). The folder holds `roi_signal.parquet` and `roi_signal.csv` (and the voxel files), its own `preprocess.json`, and:
 
 | File | Contents |
 |---|---|

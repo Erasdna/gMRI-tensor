@@ -1228,6 +1228,12 @@ def test_write_preprocessed_data_roi_signal(tmp_path):
     assert paths.roi_signal == tmp_path / "out" / "data" / "roi_signal.parquet"
     assert paths.voxels is None and paths.coords is None
     roi = pd.read_parquet(paths.roi_signal)
+    # The same table as CSV, for viewing.
+    assert paths.roi_signal_csv == tmp_path / "out" / "data" / "roi_signal.csv"
+    pd.testing.assert_frame_equal(
+        pd.read_csv(paths.roi_signal_csv, dtype={"subject": str}),
+        roi,
+    )
     assert list(roi.columns[:2]) == ["subject", "time_point"]
     for args in args_list:
         got = roi.query(
@@ -1294,6 +1300,8 @@ def test_write_preprocessed_data_store_voxels(tmp_path, n_procs):
         pd.read_parquet(expected_coords),
     )
     assert read_signal_metadata(paths.voxels)["kind"] == "voxels"
+    # Only the ROI table gets a CSV copy.
+    assert [p.name for p in paths.voxels.parent.glob("*.csv")] == ["roi_signal.csv"]
     coords_metadata = read_signal_metadata(paths.coords)
     assert json.loads(coords_metadata["shape"]) == [2, 2, 2]
     np.testing.assert_array_equal(json.loads(coords_metadata["affine"]), np.eye(4))

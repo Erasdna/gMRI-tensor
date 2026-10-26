@@ -490,6 +490,8 @@ class PreprocessedPaths(NamedTuple):
     coords: Path | None
     noise: Path | None = None
     invalid_rois: Path | None = None
+    #: `roi_signal` as CSV, for viewing (without the parquet metadata).
+    roi_signal_csv: Path | None = None
 
 
 class NegativeCutoff(NamedTuple):
@@ -777,7 +779,8 @@ def write_preprocessed_data(
     maps) and the post/baseline ratio for T1w.
 
     - `roi_signal.parquet`: `compute_roi_signal` per scan, with leading
-      `subject`/`time_point` columns.
+      `subject`/`time_point` columns; `roi_signal.csv` is the same table
+      (without the metadata), for viewing.
     - With `store_voxels`: `voxels.parquet` (one row per labeled voxel, in
       the schema `load_tensor_from_parquet` reads) and `voxels.coords.parquet` (each voxel's
       `(labels, label_index)` key and `(i, j, k)` index, with the template
@@ -807,6 +810,7 @@ def write_preprocessed_data(
     data_dir = Path(output_dir) / "data" / variant
     data_dir.mkdir(parents=True, exist_ok=True)
     roi_path = data_dir / "roi_signal.parquet"
+    roi_csv_path = data_dir / "roi_signal.csv"
     voxels_path = data_dir / "voxels.parquet"
     coords_path = data_dir / "voxels.coords.parquet"
     noise_path = data_dir / "noise.csv"
@@ -827,11 +831,20 @@ def write_preprocessed_data(
     )
     scans: list[tuple[Any, Any]] = []
     effects: list[dict[str, Any]] = []
+    roi_tables: list[pa.Table] = []
 
     with ExitStack() as stack:
-        tmp_roi, tmp_voxels, tmp_coords, tmp_noise, tmp_invalid = stack.enter_context(
+        (
+            tmp_roi,
+            tmp_roi_csv,
+            tmp_voxels,
+            tmp_coords,
+            tmp_noise,
+            tmp_invalid,
+        ) = stack.enter_context(
             _atomic_outputs(
                 roi_path,
+                roi_csv_path,
                 voxels_path,
                 coords_path,
                 noise_path,
@@ -860,6 +873,7 @@ def write_preprocessed_data(
         ):
             roi_table = _roi_signal_table(args["subject"], args["time_point"], roi)
             roi_writer.write_table(_with_metadata(roi_table, roi_metadata))
+            roi_tables.append(roi_table)
             if scan_effects is not None:
                 scans.append((args["subject"], args["time_point"]))
                 effects.append(scan_effects)
@@ -892,6 +906,7 @@ def write_preprocessed_data(
                 _with_metadata(table, voxels_metadata),
                 row_group_size=max(table.num_rows, 1),
             )
+        pa.concat_tables(roi_tables).to_pandas().to_csv(tmp_roi_csv, index=False)
         if cutoff is not None:
             _noise_table(cutoff, scans, effects).to_csv(tmp_noise, index=False)
             invalid = [
@@ -912,6 +927,7 @@ def write_preprocessed_data(
         coords_path if store_voxels else None,
         noise_path if cutoff is not None else None,
         invalid_path if cutoff is not None else None,
+        roi_csv_path,
     )
 
 
