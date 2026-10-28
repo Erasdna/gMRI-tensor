@@ -119,6 +119,13 @@ def _check_slices(slices: tuple[int, int, int] | None) -> None:
     )
 
 
+def _check_subject_prefix(prefix: str) -> None:
+    _check(
+        not any(c in prefix for c in "/\\") and not prefix.startswith("."),
+        f"subject_prefix may not contain '/' or '\\' or start with '.', got {prefix!r}",
+    )
+
+
 def _check_subject_columns(path: Path, requested: dict[str, str]) -> None:
     """Raise unless the subject-info CSV has every `requested` column
     (name -> its flag), reading only the header."""
@@ -627,12 +634,7 @@ class DecompositionPlotOptions:
 
     def __post_init__(self) -> None:
         bad = [p for p in self.parts if p not in DECOMPOSITION_PARTS]
-        _check(
-            not any(c in self.subject_prefix for c in "/\\")
-            and not self.subject_prefix.startswith("."),
-            "subject_prefix may not contain '/' or '\\' or start with '.', "
-            f"got {self.subject_prefix!r}",
-        )
+        _check_subject_prefix(self.subject_prefix)
         _check(not bad, f"parts must be from {DECOMPOSITION_PARTS}, got {bad}")
         _check_slices(self.slices)
         _check(0 < self.alpha < 1, f"alpha must be in (0, 1), got {self.alpha}")
@@ -660,6 +662,73 @@ class DecompositionPlotOptions:
         """The parts to draw, in `DECOMPOSITION_PARTS` order."""
         chosen = self.parts or DECOMPOSITION_PARTS
         return tuple(part for part in DECOMPOSITION_PARTS if part in chosen)
+
+
+@dataclass(frozen=True)
+class SubjectStatisticsOptions:
+    """`gmri stats`: covariate-adjusted tests of one model's subject
+    coefficients.
+
+    Each primary column (e.g. diagnosis, sex, age) is tested adjusted for
+    the other primary columns, each clinical column adjusted for every
+    primary column (`gMRItensor.subject_statistics`). Every column is named
+    once, as categorical or numerical; a categorical column is compared
+    against its first sorted level. p-values come from `n_permutations`
+    Freedman-Lane permutations drawn from `seed`, and `significant` is the
+    Benjamini-Hochberg p below `alpha`. A `subject_prefix` is prepended to
+    the table names as `<prefix>_`.
+    """
+
+    model: Path
+    subject_info: Path
+    output_dir: Path
+    primary_categorical: tuple[str, ...] = ()
+    primary_numerical: tuple[str, ...] = ()
+    clinical_categorical: tuple[str, ...] = ()
+    clinical_numerical: tuple[str, ...] = ()
+    n_permutations: int = 10000
+    seed: int = 0
+    alpha: float = 0.05
+    subject_prefix: str = ""
+
+    @property
+    def primary(self) -> tuple[str, ...]:
+        return self.primary_categorical + self.primary_numerical
+
+    @property
+    def clinical(self) -> tuple[str, ...]:
+        return self.clinical_categorical + self.clinical_numerical
+
+    @property
+    def categorical(self) -> tuple[str, ...]:
+        return self.primary_categorical + self.clinical_categorical
+
+    def __post_init__(self) -> None:
+        flags = {
+            "--primary-categorical": self.primary_categorical,
+            "--primary-numerical": self.primary_numerical,
+            "--clinical-categorical": self.clinical_categorical,
+            "--clinical-numerical": self.clinical_numerical,
+        }
+        named = [column for columns in flags.values() for column in columns]
+        repeated = sorted({column for column in named if named.count(column) > 1})
+        _check(bool(self.primary), "at least one primary column is needed")
+        _check(not repeated, f"columns named more than once: {repeated}")
+        _check(
+            "subjects" not in named,
+            "'subjects' is the subject id column, not a variable",
+        )
+        _check(
+            self.n_permutations >= 100,
+            f"n_permutations must be >= 100, got {self.n_permutations}",
+        )
+        _check(0 < self.alpha < 1, f"alpha must be in (0, 1), got {self.alpha}")
+        _check_subject_prefix(self.subject_prefix)
+        _require_file(resolve_model(self.model)[0], "model")
+        _check_subject_columns(
+            self.subject_info,
+            {column: flag for flag, columns in flags.items() for column in columns},
+        )
 
 
 @dataclass(frozen=True)

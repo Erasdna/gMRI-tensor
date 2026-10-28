@@ -13,6 +13,7 @@ from gMRItensor.options import OverviewPlotOptions
 from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import StatisticsPlotOptions
+from gMRItensor.options import SubjectStatisticsOptions
 from gMRItensor.options import TensorOptions
 
 
@@ -458,3 +459,58 @@ def test_misspelled_subject_columns_list_the_available_ones(tmp_path: Path) -> N
         assert "subjects.csv" in message
         assert missing in message
         assert "available columns: subjects, diagnosis, sex, age" in message
+
+
+def test_subject_statistics_options(tmp_path: Path) -> None:
+    model = tmp_path / "cp_rank_2.h5"
+    model.touch()
+    common: dict[str, Any] = {
+        "model": model,
+        "subject_info": _subject_info(tmp_path),
+        "output_dir": tmp_path,
+    }
+
+    options = SubjectStatisticsOptions(
+        **common,
+        primary_categorical=("diagnosis", "sex"),
+        primary_numerical=("age",),
+    )
+    assert options.primary == ("diagnosis", "sex", "age")
+    assert options.clinical == ()
+    assert options.categorical == ("diagnosis", "sex")
+
+    with pytest.raises(ValueError, match="at least one primary"):
+        SubjectStatisticsOptions(**common, clinical_numerical=("age",))
+    with pytest.raises(ValueError, match=r"more than once: \['age'\]"):
+        SubjectStatisticsOptions(
+            **common,
+            primary_numerical=("age",),
+            clinical_categorical=("age",),
+        )
+    with pytest.raises(ValueError, match="'subjects' is the subject id"):
+        SubjectStatisticsOptions(**common, primary_categorical=("subjects",))
+    with pytest.raises(ValueError, match="n_permutations"):
+        SubjectStatisticsOptions(
+            **common,
+            primary_numerical=("age",),
+            n_permutations=10,
+        )
+    with pytest.raises(ValueError, match="alpha"):
+        SubjectStatisticsOptions(**common, primary_numerical=("age",), alpha=1.0)
+    with pytest.raises(ValueError, match="subject_prefix"):
+        SubjectStatisticsOptions(
+            **common,
+            primary_numerical=("age",),
+            subject_prefix="a/b",
+        )
+    with pytest.raises(ValueError, match="'egfr' \\(--clinical-numerical\\)"):
+        SubjectStatisticsOptions(
+            **common,
+            primary_numerical=("age",),
+            clinical_numerical=("egfr",),
+        )
+    with pytest.raises(FileNotFoundError, match="model"):
+        SubjectStatisticsOptions(
+            **dict(common, model=tmp_path / "missing.h5"),
+            primary_numerical=("age",),
+        )

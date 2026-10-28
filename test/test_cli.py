@@ -1,11 +1,15 @@
 from pathlib import Path
 from typing import Any
 
+import numpy as np
+import pandas as pd
 import pytest
 import torch
 from gMRItensor.cli import main
 from gMRItensor.jobs import FitTask
 from gMRItensor.jobs import RestartResult
+from gMRItensor.model_io import save_decomposition
+from gMRItensor.model_io import SavedDecomposition
 from gMRItensor.reproducibility import write_reproducibility
 
 
@@ -737,3 +741,86 @@ def test_cli_help(
     assert excinfo.value.code == 0
     out = capsys.readouterr().out
     assert all(word in out for word in expected)
+
+
+def test_cli_stats(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    rng = np.random.default_rng(0)
+    n = 16
+    subjects = [f"sub-{i:02d}" for i in range(n)]
+    diagnosis = np.repeat(["Control", "PD"], n // 2)
+    subject_mode = np.column_stack(
+        [1 + 2 * (diagnosis == "PD") + rng.normal(0, 0.1, n), rng.uniform(1, 2, n)],
+    )
+    model_dir = tmp_path / "cp_rank_2"
+    model_dir.mkdir()
+    save_decomposition(
+        model_dir / "model.h5",
+        SavedDecomposition(
+            method="cp",
+            rank=2,
+            error=0.1,
+            weights=np.ones(2),
+            subject_mode=subject_mode,
+            label_mode=rng.uniform(size=(4, 2)),
+            subjects=np.array(subjects),
+            timepoints=np.arange(3),
+            labels=np.arange(4),
+            label_index=np.zeros(4, dtype=int),
+            time_mode=rng.uniform(size=(3, 2)),
+        ),
+    )
+    info = pd.DataFrame(
+        {
+            "subjects": subjects[1:],  # sub-00 has no row
+            "diagnosis": diagnosis[1:],
+            "sex": np.tile(["F", "M"], n // 2)[1:],
+            "age": rng.normal(65, 8, n - 1).round(1),
+            "egfr": rng.normal(90, 10, n - 1).round(0),
+            "apoe": rng.choice([2, 3], n - 1),
+        },
+    )
+    subject_info = tmp_path / "subjects.csv"
+    info.to_csv(subject_info, index=False)
+    results = tmp_path / "results"
+
+    argv = [
+        "stats",
+        "--model",
+        model_dir,
+        "--subject-info",
+        subject_info,
+        "--output-dir",
+        results,
+        "--primary-categorical",
+        "diagnosis",
+        "sex",
+        "--primary-numerical",
+        "age",
+        "--clinical-categorical",
+        "apoe",
+        "--clinical-numerical",
+        "egfr",
+        "--n-permutations",
+        200,
+        "--subject-prefix",
+        "clinical",
+    ]
+    assert _run(argv) == 0
+
+    out = capsys.readouterr().out
+    assert "Leaving out 1 subject(s) without a row" in out
+    assert "Primary: significant effects" in out
+    primary = pd.read_csv(
+        results / "statistics" / "clinical_cp_rank_2__subject_stats_primary.csv",
+    )
+    clinical = pd.read_csv(
+        results / "statistics" / "clinical_cp_rank_2__subject_stats_clinical.csv",
+    )
+    assert set(primary["term"]) == {"diagnosis", "sex", "age"}
+    assert set(clinical["term"]) == {"apoe", "egfr"}
+    assert (primary["n"] == n - 1).all()
+    first = primary[(primary["component"] == 1) & (primary["term"] == "diagnosis")]
+    assert bool(first["significant"].item())
+    assert (results / "stats.json").exists()
+
+    assert _run([*argv[:-2], "--primary-numerical", "sex"]) == 2

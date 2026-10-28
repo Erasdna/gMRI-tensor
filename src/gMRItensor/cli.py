@@ -5,6 +5,7 @@
     gmri replicability run | plan | collect
     gmri plot          statistics | overview | decomposition | group-maps |
                        reproducibility
+    gmri stats         --model DIR --subject-info info.csv --primary-categorical ...
 
 Each command calls one `gMRItensor.pipeline` stage with its
 `gMRItensor.options` dataclass, so scripts can do the same.
@@ -31,6 +32,7 @@ from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import STATISTICS
 from gMRItensor.options import StatisticsPlotOptions
+from gMRItensor.options import SubjectStatisticsOptions
 from gMRItensor.options import TensorOptions
 
 _DISTRIBUTED_EPILOG = """\
@@ -803,6 +805,80 @@ def _add_plot(commands: Any) -> None:
     _add_reproducibility_plot(kinds)
 
 
+def _add_stats(commands: Any) -> None:
+    parser = commands.add_parser(
+        "stats",
+        help="covariate-adjusted tests of a model's subject coefficients",
+        description=(
+            "Test each component's subject coefficients against subject-info "
+            "columns. Each primary column is adjusted for the other primary "
+            "columns, each clinical column for all primary columns; p-values are "
+            "Freedman-Lane permutation p-values, FDR-corrected per table. See "
+            "docs/subject-statistics.md for every output column."
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        type=Path,
+        required=True,
+        help="model directory <method>_rank_<r>/ from gmri decompose (or its "
+        "model.h5)",
+    )
+    parser.add_argument(
+        "--subject-info",
+        type=Path,
+        required=True,
+        help="CSV with a subjects column",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="results directory",
+    )
+    columns = parser.add_argument_group(
+        "variables (each column once; categorical ones are compared against "
+        "their first sorted level)",
+    )
+    for role, about in (
+        ("primary", "tested adjusted for the other primary columns"),
+        ("clinical", "tested adjusted for all primary columns"),
+    ):
+        for kind in ("categorical", "numerical"):
+            columns.add_argument(
+                f"--{role}-{kind}",
+                nargs="+",
+                default=[],
+                metavar="COLUMN",
+                help=f"{kind} {role} columns, {about}",
+            )
+    parser.add_argument(
+        "--n-permutations",
+        type=int,
+        default=10000,
+        help="permutations per test (default: %(default)d)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="seed of the permutations (default: %(default)d)",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.05,
+        help="FDR level for the significant column (default: %(default)g)",
+    )
+    parser.add_argument(
+        "--subject-prefix",
+        default="",
+        metavar="PREFIX",
+        help="prepended as PREFIX_ to the table names, to keep tables for "
+        "different variable sets apart",
+    )
+
+
 def _slices(values: list[int] | None) -> tuple[int, int, int] | None:
     return (values[0], values[1], values[2]) if values else None
 
@@ -830,6 +906,7 @@ def _parser() -> argparse.ArgumentParser:
         True,
     )
     _add_plot(commands)
+    _add_stats(commands)
     return parser
 
 
@@ -1086,6 +1163,38 @@ def _plot_decomposition(args: argparse.Namespace) -> None:
     )
 
 
+def _run_stats(args: argparse.Namespace) -> None:
+    options = SubjectStatisticsOptions(
+        model=args.model,
+        subject_info=args.subject_info,
+        output_dir=args.output_dir,
+        primary_categorical=tuple(args.primary_categorical),
+        primary_numerical=tuple(args.primary_numerical),
+        clinical_categorical=tuple(args.clinical_categorical),
+        clinical_numerical=tuple(args.clinical_numerical),
+        n_permutations=args.n_permutations,
+        seed=args.seed,
+        alpha=args.alpha,
+        subject_prefix=args.subject_prefix,
+    )
+    result = pipeline.run_subject_statistics(options)
+    print(
+        pipeline.format_subject_statistics(result.primary, "Primary", options.alpha),
+    )
+    if result.clinical is not None:
+        print(
+            pipeline.format_subject_statistics(
+                result.clinical,
+                "Clinical (adjusted for the primary columns)",
+                options.alpha,
+            ),
+        )
+    print(
+        f"Tables: {', '.join(str(path) for path in result.files)}. Column "
+        "meanings: docs/subject-statistics.md.",
+    )
+
+
 _PLOTS: dict[str, Callable[[argparse.Namespace], None]] = {
     "statistics": _plot_statistics,
     "overview": _plot_overview,
@@ -1109,6 +1218,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "decompose": _run_fit_command,
         "replicability": _run_fit_command,
         "plot": _run_plot,
+        "stats": _run_stats,
     }
     try:
         handlers[args.command](args)

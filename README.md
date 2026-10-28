@@ -49,6 +49,8 @@ gmri replicability run --input results/data/roi_signal.parquet --output-dir resu
     --method parafac2 --ranks 2 3 4 --engine halfhalf --repeats 20
 gmri plot decomposition --model results/parafac2/parafac2_rank_3 --subject-info subjects.csv \
     --group-variable diagnosis --output-dir results --segmentation template_seg.nii.gz
+gmri stats --model results/parafac2/parafac2_rank_3 --subject-info subjects.csv --output-dir results \
+    --primary-categorical diagnosis sex --primary-numerical age --clinical-numerical egfr
 gmri plot group-maps --input results/data/voxels.parquet --subject-info subjects.csv \
     --group-variable diagnosis --output-dir results
 gmri plot reproducibility results/parafac2/restarts/parafac2_rank_3/reproducibility.csv
@@ -62,6 +64,7 @@ gmri plot reproducibility results/parafac2/restarts/parafac2_rank_3/reproducibil
 - **`plot overview`:** draws every label for every subject and session and flags outlying values (modified z-score, Iglewicz & Hoaglin 1993), to find problematic subjects and ROIs.
 - **`decompose` / `replicability`:** fit per-ROI (`roi_signal.parquet`) or per-voxel (`voxels.parquet`) data. Each model gets its own directory, `<method>_rank_<r>/` (`model.h5` and the `decompose.json` it was fitted with). `--exclude-subjects ID ...` leaves subjects out; every left-out subject (also those short of valid time points) is listed with the reason in `excluded_subjects.csv`, and every dropped column (a label or voxel with missing values) with the scans behind it in `excluded_columns.csv`. They can also spread their restarts over a SLURM array with `plan`, then `run --job $SLURM_ARRAY_TASK_ID`, then `collect`.
 - **`plot decomposition`:** draws the mode grid, subject mode, time or evolving mode, spatial maps and outlier diagnostics (`--mode-grid --subject-mode --time --spatial --outliers`; all by default).
+- **`stats`:** covariate-adjusted tests of each component's subject coefficients: primary variables adjusted for each other, clinical variables for all primary ones, with Freedman–Lane permutation p-values and FDR correction. [docs/subject-statistics.md](docs/subject-statistics.md) explains every output column.
 - **`plot group-maps`:** each group's average map per time point. **`plot reproducibility`:** redraws a restart-vs-restart FMS matrix.
 
 The sections below show the same steps through the Python API.

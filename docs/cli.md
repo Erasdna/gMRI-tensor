@@ -9,10 +9,11 @@
 | `gmri decompose run\|plan\|collect` | `roi_signal.parquet` or `voxels.parquet` | one directory per model, `<method>_rank_<r>/` (`model.h5`, `decompose.json`, `excluded_subjects.csv`, `excluded_columns.csv`), `fits.csv`, the restarts and their reproducibility in `<store>/<method>_rank_<r>/` |
 | `gmri replicability run\|plan\|collect` | the same, plus the subject info CSV with `--stratify-by` | `replicability.csv`, `excluded_subjects.csv`, `excluded_columns.csv` |
 | `gmri plot decomposition` | a model directory, subject info CSV, optionally a segmentation; for `--outliers`, the data the model was fitted to | `<output-dir>/figures/decomposition/` |
+| `gmri stats` | a model directory, subject info CSV | `<output-dir>/statistics/` |
 | `gmri plot group-maps` | `roi_signal.parquet` (plus a segmentation) or `voxels.parquet`, subject info CSV | `<output-dir>/figures/group_maps/` |
 | `gmri plot reproducibility` | a `reproducibility.csv` | the figure, next to the CSV or at `--output` |
 
-- **Provenance:** every command records its settings and the package version as JSON, with absolute paths: `preprocess.json`, `plot_statistics.json`, `replicability.json`, `plot_decomposition.json` and `plot_group_maps.json` in `<output-dir>`, and each model's `decompose.json` in its own directory. `plan` saves `plan.json` instead; `run --job` and `plot reproducibility` write none.
+- **Provenance:** every command records its settings and the package version as JSON, with absolute paths: `preprocess.json`, `plot_statistics.json`, `replicability.json`, `plot_decomposition.json`, `stats.json` and `plot_group_maps.json` in `<output-dir>`, and each model's `decompose.json` in its own directory. `plan` saves `plan.json` instead; `run --job` and `plot reproducibility` write none.
 - **Errors:** an invalid argument or a missing input stops the command before it writes anything. The command prints a one-line message and exits with code 2.
 - **Arguments:** flags must be written out in full; abbreviations such as `--tol` are refused. An argument that would have no effect in its combination (e.g. `--splits` with `--engine halfhalf`) is an error rather than being ignored.
 
@@ -372,6 +373,37 @@ gmri plot decomposition --model results/parafac2/parafac2_rank_3 --subject-info 
   ```
 - **Missing segmentation:** if a per-ROI model is plotted without `--segmentation`, the spatial parts are skipped with a note. Asking for one explicitly without a segmentation is an error.
 - **Outliers without the data:** if no part flag is given and the outlier part cannot reload the fitted data (no `decompose.json`, a moved input, or data that no longer matches the model), it is skipped with a note and the other parts are drawn. With `--outliers` given explicitly, this is an error.
+
+## `gmri stats`
+
+```bash
+gmri stats --model results/cmf/cmf_rank_3 --subject-info subjects.csv --output-dir results \
+    --primary-categorical diagnosis sex --primary-numerical age \
+    [--clinical-categorical apoe] [--clinical-numerical egfr psqi] [--subject-prefix clinical]
+```
+
+Covariate-adjusted tests of the subject coefficients: does a component differ
+between groups, or go along with a clinical measurement, once the primary
+variables are accounted for? **[subject-statistics.md](subject-statistics.md)
+explains every output column and how to read the tables.**
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `--model` | required | A model directory `<method>_rank_<r>/` from `gmri decompose` (or its `model.h5`). The coefficients are those of `<model>__subject_coefficients.csv`. |
+| `--subject-info`, `--output-dir` | required | Subjects, and the results directory. Writes `statistics/<model>__subject_stats_primary.csv` and, with clinical columns, `statistics/<model>__subject_stats_clinical.csv`. |
+| `--primary-categorical`, `--primary-numerical` | at least one column | Primary variables (e.g. diagnosis, sex, age). Each is tested adjusted for the other primary variables. |
+| `--clinical-categorical`, `--clinical-numerical` | none | Clinical variables (e.g. eGFR, sleep scores). Each is tested in its own model, adjusted for all primary variables. |
+| `--n-permutations` | `10000` | Freedman–Lane permutations per test. The smallest possible p is 1 / (n + 1). |
+| `--seed` | `0` | Seed of the permutations; the same seed gives the same tables. |
+| `--alpha` | `0.05` | FDR level of the `significant` column. |
+| `--subject-prefix` | none | Prepended as `<prefix>_` to the table names, e.g. `clinical_cmf_rank_3__subject_stats_clinical.csv`. |
+
+- **Models:** per component, primary rows come from `coefficient ~ primary variables` and clinical rows from `coefficient ~ X + primary variables`, one model per clinical variable X. Interactions are not modelled.
+- **Variables:** every column is named once, as categorical or numerical; nothing is inferred from the values. A categorical column is compared against its first sorted level (e.g. `Control`, `F`, APOE `2`); one with three or more levels gets one row per level and one overall test. A non-numeric value in a numerical column is an error. A missing column stops the command before the model is loaded.
+- **Subjects:** model subjects without a subject-info row are left out, and the command names them. Each model uses the subjects with every value it needs, so `n` can differ between rows. A covariate with one value in those subjects (e.g. diagnosis for a score recorded only in PD) is left out of that model, and the `note` column says so.
+- **Tests:** p-values come from Freedman–Lane permutations of the partial F statistic (Freedman & Lane 1983; Winkler et al. 2014). Benjamini–Hochberg correction is applied over all components and variables of each table, with the primary and clinical tables corrected separately. The permutations assume comparable residuals between subjects; strongly unequal group variances combined with very unequal group sizes make p-values somewhat liberal.
+- **Reading the tables:** primary rows are total effects given the other primary variables. Clinical rows are the association *beyond* the primary variables. Adjusting for diagnosis can absorb a clinical variable that is itself a consequence of the disease, and a high `vif` flags this.
+- **Terminal output:** the significant rows of each table, and every `note`.
 
 ## `gmri plot group-maps`
 

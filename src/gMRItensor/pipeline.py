@@ -77,6 +77,7 @@ from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import RUNNER_METHODS
 from gMRItensor.options import StatisticsPlotOptions
+from gMRItensor.options import SubjectStatisticsOptions
 from gMRItensor.options import TensorOptions
 from gMRItensor.outliers import data_slices
 from gMRItensor.outliers import FLAG_COLUMNS
@@ -120,6 +121,9 @@ from gMRItensor.roi_groups import aggregate_roi_signal
 from gMRItensor.roi_groups import is_csf
 from gMRItensor.roi_groups import overview_blocks
 from gMRItensor.roi_groups import overview_regions
+from gMRItensor.subject_statistics import add_fdr
+from gMRItensor.subject_statistics import clinical_effects
+from gMRItensor.subject_statistics import primary_effects
 from gMRItensor.volumes import expand_roi_mode_to_voxels
 from nibabel.nifti1 import Nifti1Image
 
@@ -2220,6 +2224,111 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
         )
     write_provenance(Path(options.output_dir), "plot_decomposition", options)
     return written
+
+
+# --------------------------------------------------------------------------
+# Subject-coefficient statistics
+
+
+class SubjectStatisticsResult(NamedTuple):
+    """`run_subject_statistics` output: the `primary` table, the `clinical`
+    one (None without clinical columns) and the CSV files written."""
+
+    primary: pd.DataFrame
+    clinical: pd.DataFrame | None
+    files: list[Path]
+
+
+def run_subject_statistics(
+    options: SubjectStatisticsOptions,
+) -> SubjectStatisticsResult:
+    """`gmri stats`: one saved model's subject coefficients -> tables.
+
+    The coefficients are those of `<model>__subject_coefficients.csv`
+    (`subject_coefficients`, scaled to unit norm per component), for the
+    model's subjects with a `subject_info` row; the others are left out
+    with a note. Writes to `<output_dir>/statistics/`
+    `<model>__subject_stats_primary.csv` (`primary_effects`) and, with
+    clinical columns, `<model>__subject_stats_clinical.csv`
+    (`clinical_effects`), both with `add_fdr`; `<subject_prefix>_` goes in
+    front when one is set. Raises `ValueError` if `subject_info` has no
+    `subjects` column or repeats a subject.
+    """
+    model_file, stem = resolve_model(options.model)
+    saved = load_decomposition(model_file)
+    subject_info = _read_subject_info(options.subject_info)
+    if "subjects" not in subject_info.columns:
+        raise ValueError(f"{options.subject_info} has no 'subjects' column")
+    repeated = subject_info["subjects"][subject_info["subjects"].duplicated()]
+    if len(repeated):
+        raise ValueError(
+            f"{options.subject_info} repeats subject(s) {', '.join(repeated.unique())}",
+        )
+    subject_info = subject_info.set_index("subjects")
+    subjects = [str(s) for s in saved.subjects]
+    keep = [i for i, s in enumerate(subjects) if s in subject_info.index]
+    dropped = [s for s in subjects if s not in subject_info.index]
+    if dropped:
+        print(
+            f"Leaving out {len(dropped)} subject(s) without a row in "
+            f"{options.subject_info}: {', '.join(dropped)}",
+        )
+    coefficients = scale_mode(subject_coefficients(saved)[keep])
+    info = subject_info.loc[[subjects[i] for i in keep]]
+
+    arguments: dict[str, Any] = {
+        "categorical": options.categorical,
+        "n_permutations": options.n_permutations,
+        "seed": options.seed,
+    }
+    primary = add_fdr(
+        primary_effects(coefficients, info, options.primary, **arguments),
+        options.alpha,
+    )
+    clinical = None
+    if options.clinical:
+        clinical = add_fdr(
+            clinical_effects(
+                coefficients,
+                info,
+                options.clinical,
+                options.primary,
+                **arguments,
+            ),
+            options.alpha,
+        )
+
+    out_dir = Path(options.output_dir) / "statistics"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = f"{options.subject_prefix}_" if options.subject_prefix else ""
+    files = []
+    for name, table in (("primary", primary), ("clinical", clinical)):
+        if table is not None:
+            path = out_dir / f"{prefix}{stem}__subject_stats_{name}.csv"
+            table.to_csv(path, index=False)
+            files.append(path)
+    write_provenance(Path(options.output_dir), "stats", options)
+    return SubjectStatisticsResult(primary, clinical, files)
+
+
+def format_subject_statistics(table: pd.DataFrame, title: str, alpha: float) -> str:
+    """The terminal lines of `table`'s significant rows, and its notes."""
+    columns = ["component", "term", "level", "n", "standardised", "std_kind", "p_fdr"]
+    significant = table.loc[table["significant"], columns]
+    if significant.empty:
+        lines = [f"{title}: no significant effects (FDR p < {alpha})."]
+    else:
+        shown = significant.assign(
+            standardised=significant["standardised"].map("{:.2f}".format),
+            p_fdr=significant["p_fdr"].map("{:.3g}".format),
+        )
+        lines = [
+            f"{title}: significant effects (FDR p < {alpha}):",
+            shown.to_string(index=False),
+        ]
+    notes = table.loc[table["note"] != "", ["term", "note"]].drop_duplicates()
+    lines += [f"  note, {term}: {note}" for term, note in notes.itertuples(index=False)]
+    return "\n".join(lines)
 
 
 # --------------------------------------------------------------------------
