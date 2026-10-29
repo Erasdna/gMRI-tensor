@@ -269,6 +269,7 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 - `fits.csv`: `method, rank, error, model`, one row per model in `--output-dir`. A later run replaces the rows of the methods and ranks it fits and keeps the others.
 - **A rank that does not converge:** the ranks that did are still written; the command then exits with code 2 and names the failed ranks.
 - `<store>/<method>_rank_<r>/full/seed_<NNNN>.pt`: every restart, failures included. Both `run` and `collect` keep them. A `run` without `--job` refits every restart and overwrites what the store held.
+- `<store>/<method>_rank_<r>/restarts.csv`: `seed, status, error, n_iter, fit_seconds, seconds_per_iter, backend, threads, peak_rss_gb, host`, one row per restart. `status` is `ok` or why the restart was rejected. `peak_rss_gb` is the peak memory of the process that fitted the restart, up to then (in a pool, a worker's earlier restarts count too). Written by `run` and `collect`, also when no restart converged; restarts stored by an older version have empty timing columns.
 - `<store>/<method>_rank_<r>/reproducibility.csv` and `reproducibility.{pdf,png}`: how consistently the restarts reach the same minimum.
   - **Contents:** the factor match score between every pair of converged restarts. Rows are sorted by reconstruction error, and the columns are `seed, error`, then one column per seed in the same order.
   - **What to look for:** if the low-error restarts found the same minimum, they form a block of FMS close to 1 in the top-left corner.
@@ -292,11 +293,22 @@ The output is `replicability.csv`. It has columns `method, rank, split, fms` for
 
 ## CPU and GPU
 
-- **CPU (default):** every fit runs on TensorLy's numpy backend in float64, using `CPUS_PER_TASK` threads (1 if unset) for both torch and numpy's BLAS. The solvers' inner loops make many small calls, which numpy runs several times faster than torch. `GMRITENSOR_FIT_BACKEND=torch` runs CPU fits on torch instead (in the input's precision, float32), as before 0.2.0.
+Where and how fast the fits run is set by environment variables, read when a fit runs. They change no result beyond round-off, so they are not part of the settings that `plan` saves or that mark stored restarts stale: each `run --job` can use its own.
+
+| Variable | Values (default) | Effect |
+|---|---|---|
+| `GMRITENSOR_USE_GPU` | `TRUE` (unset) | Fit on the GPU, if CUDA is available (below). |
+| `GMRITENSOR_FIT_BACKEND` | `numpy`, `torch`, `auto` (`numpy`) | Where CPU fits run: TensorLy's numpy backend, its pytorch backend, or `auto`, which picks by size. numpy is several times faster on small data (ROI input), whose many small calls are cheaper there; torch is faster on large data (voxel input), and only torch fits use more than one thread. GPU fits always run on pytorch. |
+| `GMRITENSOR_AUTO_BACKEND_ENTRIES` | number (`5e7`) | With `auto`: fits of at least this many data entries (subjects × time points × columns) run on torch, smaller ones on numpy. |
+| `CPUS_PER_TASK` | number (1) | Threads per job (for torch and numpy's BLAS), shared out over `--restart-procs` / `--n-procs` workers. numpy fits gain little from more than one, and a job warns when it gives them more. |
+| `GMRITENSOR_MEMORY_EFFICIENT_MTTKRP` | `0`, `1` (unset) | Overrides the `use_memory_efficient_khatri_rao` fit option (on by default): TensorLy's memory-efficient MTTKRP, used by CP and TensorLy's PARAFAC2. Both compute the same product; the memory-efficient one needs 2–3× less temporary memory at about the same speed. |
+
+- **Precision:** every fit runs in float64, on either backend and on the GPU, so fits are comparable wherever they ran (TF32 no longer matters). The data and the saved models stay float32.
 - **GPU:** set `GMRITENSOR_USE_GPU=TRUE`. It applies to `decompose run` and `replicability run`, with or without `--job`, and to every method. If CUDA is available, the input tensor is moved to the GPU once it has been built, and every restart fits there, always on TensorLy's pytorch backend (`GMRITENSOR_FIT_BACKEND` has no effect). Without CUDA the fits stay on the CPU.
-- **Memory:** on the GPU, the whole input tensor must fit in GPU memory.
+- **Memory:** on the GPU, the whole input tensor, in float64, must fit in GPU memory. On the CPU, a job casts its input to float64 once, and its `--restart-procs` / `--n-procs` workers share that copy through `/dev/shm`, which must be at least that large (2 × the float32 input).
 - **Parallelism:** fits run one after another on the GPU, so keep `--restart-procs` / `--n-procs` at 1; larger values are refused.
-- **Precision:** TF32 matrix products are enabled on the GPU, so float32 fits (CP, tensorly PARAFAC2) differ slightly from CPU fits. matcouply fits run in float64 everywhere.
+- **Timings:** every restart records its fit time, iterations, backend, threads, peak memory and host, listed in `restarts.csv` (see the outputs of `decompose`).
+- **Large inputs on CPU clusters** (voxel input): which backend, how many threads and how many restarts per node, and how to measure that on your cluster, see [cpu-scaling.md](cpu-scaling.md).
 
 ## Distributed restarts (SLURM)
 
@@ -317,7 +329,7 @@ gmri decompose run --output-dir results/parafac2 --job $SLURM_ARRAY_TASK_ID
 
 - **Settings:** `plan` saves all arguments to `<output-dir>/plan.json`, so `run --job` and `collect` need only `--output-dir`. All jobs therefore use the same settings: `run --job` refuses any other argument, and `--fit-option` cannot override a setting that has its own flag (such as `max_iter`). Run `plan` again to change the settings.
 - **Changed settings:** every stored restart records a fingerprint of the settings that change a fit (input, statistic, tensor and fit options, including `--exclude-subjects`). Restarts stored with the same settings are reused; more `--restarts` or another `--tasks-per-job` keep them. A restart stored with other settings (or by another plan, or unreadable) is stale: the job that owns it fits it again and overwrites it. `plan` says on stderr how many stored restarts will be reused and how many refitted, and which subjects are left out; its stdout stays the job count. Do not run `plan` again while an array of the previous plan is still running: jobs that start afterwards use the new plan.
-- **Tasks:** each restart of each fit is one task, and a job runs `--tasks-per-job` of them, one after another or in parallel with `--restart-procs` (decompose) / `--n-procs` (replicability). Request `--cpus-per-task` to match.
+- **Tasks:** each restart of each fit is one task, and a job runs `--tasks-per-job` of them, one after another or in parallel with `--restart-procs` (decompose) / `--n-procs` (replicability). Request `--cpus-per-task` to match. For voxel input, see [cpu-scaling.md](cpu-scaling.md) for job sizes and a template.
 
 | Command | Tasks | Example, `--tasks-per-job 4` |
 |---|---|---|

@@ -341,6 +341,7 @@ def _accept_aoadmm_fit(
             f"aoadmm_options if this gap is acceptable for your use.",
             reason="feasibility",
             level_reached=max_gap,
+            n_iter=n_iter,
         )
 
     delta = abs(rec_errors[-2] - rec_errors[-1]) if len(rec_errors) >= 2 else math.inf
@@ -366,6 +367,7 @@ def _accept_aoadmm_fit(
             reason="reconstruction",
             level_reached=delta,
             suggested_max_iter=suggested,
+            n_iter=n_iter,
         )
 
     parafac2_diagnostics = PARAFAC2Diagnostics(

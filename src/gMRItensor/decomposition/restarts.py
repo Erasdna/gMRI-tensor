@@ -11,12 +11,14 @@ from dataclasses import replace
 from multiprocessing import get_context
 from typing import Any
 from typing import Literal
+from typing import NamedTuple
 from typing import overload
 
 import torch
 from tqdm import tqdm
 
 from ._backend import _fit_device
+from ._backend import _float64_on_cpu
 from ._backend import _format_tolerance
 from ._backend import _in_worker_process
 from ._backend import _init_restart_worker_backend
@@ -104,20 +106,33 @@ def _compute_kwargs(
     }
 
 
-def _fit_one(
-    args: tuple[Method, int, Any, dict[str, Any]],
-) -> tuple[Any, float | None, PARAFAC2Diagnostics | None, ConvergenceError | None]:
+class FitOutcome(NamedTuple):
+    """One restart's result, as `_fit_one` returns it.
+
+    `model` is None, and `failure` set, when the fit was rejected. `n_iter`
+    is how many iterations it ran (None when unknown), for the restart's
+    timing.
+    """
+
+    model: Any
+    error: float | None
+    diagnostics: PARAFAC2Diagnostics | None
+    failure: ConvergenceError | None
+    n_iter: int | None
+
+
+def _fit_one(args: tuple[Method, int, Any, dict[str, Any]]) -> FitOutcome:
     """Run a single random-restart attempt, returning failure as a value.
 
     The one place a seed is fitted: both paths of `_repeat_with_restarts`
     and `jobs.fit_task` go through it, so they cannot drift apart.
 
-    Returns `(decomp, error, diagnostics, None)` on success, `decomp` already
-    CPU float32 and `error` the final relative reconstruction error, and
-    `(None, None, None, exc)` on `ConvergenceError` rather than raising, so
-    one failed restart does not kill a whole `Pool.imap_unordered`. For
-    PARAFAC2 `diagnostics.max_nn_violation` is measured on the returned CPU
-    factors -- what the caller will plot -- and `diagnostics` is None for CP.
+    On success `model` is already CPU float32 and `error` is the final
+    relative reconstruction error. A `ConvergenceError` is returned as
+    `failure` rather than raised, so one failed restart does not kill a
+    whole `Pool.imap_unordered`. For PARAFAC2 `diagnostics.max_nn_violation`
+    is measured on the returned CPU factors -- what the caller will plot --
+    and `diagnostics` is None for CP.
     """
     method, random_state, payload, kwargs = args
     try:
@@ -128,11 +143,12 @@ def _fit_one(
                 **kwargs,
             )
             weights, factors = decomp
-            return (
+            return FitOutcome(
                 (_to_cpu(weights), _to_cpu(list(factors))),
                 float(errors[-1]),
                 None,
                 None,
+                len(errors),
             )
         model: PARAFAC2Model | CMFModel
         if method == "CMF":
@@ -150,13 +166,13 @@ def _fit_one(
             )
             model = _to_cpu(result)
     except ConvergenceError as error:
-        return None, None, None, error
+        return FitOutcome(None, None, None, error, error.n_iter)
 
     diagnostics = replace(
         diagnostics,
         max_nn_violation=_nn_violations(model, diagnostics.nn_modes),
     )
-    return model, float(errors[-1]), diagnostics, None
+    return FitOutcome(model, float(errors[-1]), diagnostics, None, diagnostics.n_iter)
 
 
 class _BestOfRestarts:
@@ -363,15 +379,18 @@ def _repeat_with_restarts(
         restart_procs = 1
 
     reducer = _BestOfRestarts(attempted=init_repeats)
+    # Once, so pool workers share one float64 copy (see `_float64_on_cpu`).
+    payload = _float64_on_cpu(payload, device)
     task_args = [(method, i, payload, kwargs) for i in range(init_repeats)]
 
-    def record(outcome: tuple[Any, Any, Any, Any]) -> None:
-        decomp, error, extra, failure = outcome
+    def record(outcome: FitOutcome) -> None:
+        decomp, error, extra, failure, _ = outcome
         if decomp is None:
             reducer.fail(failure)
             if verbose_level > 0:
                 print(failure)
             return
+        assert error is not None  # set whenever a model is
         reducer.offer(error, decomp, extra)
 
     if restart_procs < 2:

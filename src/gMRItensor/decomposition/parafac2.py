@@ -19,6 +19,7 @@ from ._aoadmm import _resolve_nn_modes
 from ._aoadmm import _zero_negligible_modes
 from ._aoadmm import AOADMM_DEFAULT_LOSS_TOL
 from ._backend import _check_tolerances
+from ._backend import _entries
 from ._backend import _fit_device
 from ._backend import _FitBackend
 from ._backend import _matcouply_numeric_context
@@ -124,7 +125,7 @@ def _compute_PARAFAC2_matcouply(
     )
     device = _fit_device(compute_device, slices[0].device)
 
-    backend = _FitBackend(device)
+    backend = _FitBackend(device, _entries(slices))
     with _matcouply_numeric_context(device):
         cmf, admm_vars, diagnostics = backend.output(
             backend.call(
@@ -188,7 +189,8 @@ def _compute_PARAFAC2_tensorly(
     nn_modes: tuple[int, ...] | None,
     return_projections: bool,
 ) -> tuple[PARAFAC2Model, list[torch.Tensor], PARAFAC2Diagnostics]:
-    """Fit PARAFAC2 with TensorLy's ALS, converted to coupled-matrix form.
+    """Fit PARAFAC2 with TensorLy's ALS, converted to coupled-matrix form,
+    in float64 on every backend and device.
 
     `apply_parafac2_projections` is TensorLy's own public converter and
     already returns exactly matcouply's native `(weights, (A, B_is, C))`
@@ -196,8 +198,14 @@ def _compute_PARAFAC2_tensorly(
     """
     if tolerance is None:
         tolerance = _solver_default(tl.decomposition.parafac2)
+    # float64 on every backend and device, as the matcouply solver runs.
+    tensor_slices = (
+        [s.double() for s in tensor_slices]
+        if isinstance(tensor_slices, list)
+        else tensor_slices.double()
+    )
     first = tensor_slices[0]
-    backend = _FitBackend(first.device)
+    backend = _FitBackend(first.device, _entries(tensor_slices))
     result, errors = backend.output(
         backend.call(
             tl.decomposition.parafac2,
@@ -223,6 +231,7 @@ def _compute_PARAFAC2_tensorly(
         raise ConvergenceError(
             "Decomposition did not converge within the maximum iteration count",
             reason="max_iter",
+            n_iter=len(errors),
         )
     diagnostics = PARAFAC2Diagnostics(
         solver="tensorly",
@@ -416,6 +425,7 @@ def compute_PARAFAC2_decomposition(
         raise ConvergenceError(
             "Decomposition is degenerate",
             reason="degenerate",
+            n_iter=diagnostics.n_iter,
         )
 
     return result, errors, diagnostics

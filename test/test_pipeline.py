@@ -17,9 +17,11 @@ from gMRItensor import pipeline
 from gMRItensor import preprocessing
 from gMRItensor import replicability
 from gMRItensor.decomposition import ConvergenceError
+from gMRItensor.decomposition import FIT_BACKEND_VARIABLE
 from gMRItensor.decomposition import restarts
 from gMRItensor.jobs import FitTask
 from gMRItensor.jobs import pending_tasks
+from gMRItensor.jobs import RESTART_TABLE_COLUMNS
 from gMRItensor.jobs import RestartResult
 from gMRItensor.jobs import TaskCounts
 from gMRItensor.model_io import _read_decomposition
@@ -48,6 +50,7 @@ from gMRItensor.pipeline import load_plan
 from gMRItensor.pipeline import plan_decomposition
 from gMRItensor.pipeline import plan_replicability_jobs
 from gMRItensor.pipeline import read_manifest
+from gMRItensor.pipeline import RESTARTS_FILE
 from gMRItensor.pipeline import run_decomposition
 from gMRItensor.pipeline import run_decomposition_job
 from gMRItensor.pipeline import run_decomposition_plots
@@ -945,6 +948,43 @@ def test_run_decomposition_saves_restarts_and_reproducibility(
     ]
     assert (rank_dir / "reproducibility.png").exists()
     assert (rank_dir / "reproducibility.pdf").exists()
+
+
+def test_run_decomposition_writes_each_restarts_timing(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Real fits: `restarts.csv` lists every restart's outcome and cost."""
+    monkeypatch.delenv(FIT_BACKEND_VARIABLE, raising=False)
+    preprocess(synthetic_study)
+    options = decomposition_options(synthetic_study, ranks=(1,))
+
+    run_decomposition(options)
+
+    table = pd.read_csv(options.store_dir / "parafac2_rank_1" / RESTARTS_FILE)
+    assert tuple(table.columns) == RESTART_TABLE_COLUMNS
+    assert list(table.seed) == [0, 1]
+    assert (table.fit_seconds > 0).all() and (table.n_iter >= 1).all()
+    assert (table.peak_rss_gb > 0).all() and set(table.backend) == {"numpy"}
+
+
+def test_restarts_csv_is_written_when_no_restart_converged(
+    synthetic_study: Any,
+) -> None:
+    """Short benchmark runs that reject every restart keep their timings."""
+    preprocess(synthetic_study)
+    options = decomposition_options(
+        synthetic_study,
+        ranks=(1,),
+        fit=FitOptions(restarts=2, max_iter=1, tolerance=1e-12),
+    )
+
+    with pytest.raises(ConvergenceError):
+        run_decomposition(options)
+
+    table = pd.read_csv(options.store_dir / "parafac2_rank_1" / RESTARTS_FILE)
+    assert len(table) == 2 and not (table.status == "ok").any()
+    assert (table.n_iter == 1).all() and (table.fit_seconds > 0).all()
 
 
 def test_reproducibility_plot_redraws_a_saved_csv(tmp_path: Path) -> None:

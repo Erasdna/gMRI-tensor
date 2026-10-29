@@ -9,8 +9,15 @@
 - **Negative cutoff:** `preprocess --negative-cutoff K` (off by default) estimates the study's ΔR1 noise level from the data (outside the brain mask, or per compartment inside it; `gMRItensor.noise`), makes values below −K noise SDs invalid, and makes an ROI NaN when more than `--max-invalid-voxel-fraction` (0.5) of its voxels are invalid, in the ROI and the voxel data alike. Each setting writes to its own folder, `data/k<K>[...]/`, with `noise.csv` (per-scan noise estimates, z-scores, cutoff, rejected voxels) and `invalid_rois.csv`. `roi_signal.parquet` gains an `n_rejected` column (0 without a cutoff).
 - **`roi_signal.csv`:** `preprocess` also writes the ROI table as CSV next to `roi_signal.parquet`, for viewing (the voxel files get none).
 - **Dropped columns listed:** `decompose` and `replicability` write `excluded_columns.csv` next to `excluded_subjects.csv`: per label, the columns left out of the fit (PARAFAC2/CMF drop any column non-finite in a kept scan) and the scans that caused it.
+- **Restart timings:** every restart records its fit time, iterations, backend, threads, peak memory and host in the store, and `decompose run` / `collect` list them per rank in `<store>/<method>_rank_<r>/restarts.csv`, also when no restart converged. Restarts stored earlier load as before, with empty timing columns.
+- **Performance settings as environment variables**, read at run time and not part of the settings fingerprint: `GMRITENSOR_FIT_BACKEND=auto` (numpy below `GMRITENSOR_AUTO_BACKEND_ENTRIES` data entries, default 5e7, torch above; the default stays `numpy`) and `GMRITENSOR_MEMORY_EFFICIENT_MTTKRP=0|1`. The `use_memory_efficient_khatri_rao` fit option no longer marks stored restarts stale.
+- **Guide for large inputs on CPU clusters:** `docs/cpu-scaling.md` covers backend, threads, restarts per node and job size, plus a scaling-test protocol.
 
 ### Changed
+- **CP and TensorLy's PARAFAC2 run in float64 on every backend and on the GPU**, as matcouply's fits already did, so fits are comparable wherever they ran. Before, they ran in the input's float32 on torch and on the GPU, where TF32 also applied; such stored restarts are reused as they are. `compute_CP_decomposition` returns float64.
+- **CPU pools share one float64 copy of the input:** a job casts it once, and its `--restart-procs` / `--n-procs` workers no longer each make their own (10.6 GB per worker at 30 × 4 × 11 M voxels). `/dev/shm` must hold the float64 input.
+- CP on the CPU no longer goes through `torch.compile` (GPU fits still do).
+- A job warns when its numpy-backend fits get more than one thread each.
 - The loader's notes on dropped sessions and subjects go to stderr, so the stdout of `plan` stays the job count.
 - **`total_amount`** is mean concentration × the full ROI volume (it was × the valid volume), so invalid voxels count at the ROI's mean concentration instead of lowering the total.
 - For data preprocessed with `--negative-cutoff`, `plot statistics` makes a region NaN when its share of invalid voxels exceeds the `--max-invalid-voxel-fraction` used then.

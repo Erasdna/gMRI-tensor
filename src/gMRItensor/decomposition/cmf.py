@@ -18,6 +18,7 @@ from ._aoadmm import _zero_negligible_modes
 from ._aoadmm import AOADMM_DEFAULT_LOSS_TOL
 from ._backend import _as_slices
 from ._backend import _check_tolerances
+from ._backend import _entries
 from ._backend import _fit_device
 from ._backend import _FitBackend
 from ._backend import _matcouply_numeric_context
@@ -102,7 +103,7 @@ def compute_CMF_decomposition(
         aoadmm_loss_tolerance = AOADMM_DEFAULT_LOSS_TOL
     device = _fit_device(compute_device, slices[0].device)
 
-    backend = _FitBackend(device)
+    backend = _FitBackend(device, _entries(slices))
     non_negative = _nn_modes_to_non_negative(nn_modes, "CMF")
 
     def fit(matrices: list[Any]) -> Any:

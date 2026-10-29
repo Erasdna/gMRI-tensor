@@ -30,7 +30,9 @@ from .jobs import job_slice
 from .jobs import n_jobs
 from .jobs import plan_replicability
 from .jobs import plan_restarts
+from .jobs import restart_table
 from .jobs import RestartResult
+from .jobs import RestartTiming
 from .jobs import ResultStore
 from .jobs import run_tasks
 
@@ -61,7 +63,9 @@ __all__ = [
     "n_jobs",
     "plan_replicability",
     "plan_restarts",
+    "restart_table",
     "RestartResult",
+    "RestartTiming",
     "ResultStore",
     "run_tasks",
 ]

@@ -49,6 +49,7 @@ from gMRItensor.jobs import job_slice
 from gMRItensor.jobs import n_jobs
 from gMRItensor.jobs import plan_replicability
 from gMRItensor.jobs import plan_restarts
+from gMRItensor.jobs import restart_table
 from gMRItensor.jobs import RestartResult
 from gMRItensor.jobs import run_tasks
 from gMRItensor.jobs import StoreStatus
@@ -975,7 +976,12 @@ def _job_tasks(
 #: store, and the restart count only adds or drops restarts).
 _RUNTIME_SETTINGS = ("output_dir", "ranks", "distributed", "n_procs")
 _RUNTIME_FIT_SETTINGS = ("restarts", "restart_procs")
-_RUNTIME_FIT_EXTRAS = ("progress_bar", "verbose_level")
+_RUNTIME_FIT_EXTRAS = (
+    "progress_bar",
+    "verbose_level",
+    # Performance only: both MTTKRPs compute the same product.
+    "use_memory_efficient_khatri_rao",
+)
 
 
 def settings_fingerprint(options: DecompositionOptions | ReplicabilityOptions) -> str:
@@ -1462,6 +1468,8 @@ def collect_decomposition(output_dir: Path) -> list[Path]:
 
 
 REPRODUCIBILITY_STEM = "reproducibility"
+#: Each rank's per-restart outcomes and timings, next to its restarts.
+RESTARTS_FILE = "restarts.csv"
 #: How `decompose run` and `collect` save each rank's reproducibility figure.
 REPRODUCIBILITY_FIGURE: dict[str, Any] = {"formats": ("pdf", "png"), "dpi": 300}
 
@@ -1473,11 +1481,14 @@ def _finish_rank(
     fit_kwargs: dict[str, Any],
     data: DecompositionInput,
 ) -> SavedDecomposition:
-    """One rank's best restart, after writing its reproducibility files.
+    """One rank's best restart, after writing its restart and
+    reproducibility files.
 
     Next to the restarts, in `<store_dir>/<method>_rank_<r>/`:
-    `reproducibility.csv` (pairwise FMS between the successful restarts,
-    sorted by error) and its figure, `reproducibility.{pdf,png}`.
+    `restarts.csv` (each restart's outcome and timing, `restart_table`;
+    written even if none converged), `reproducibility.csv` (pairwise FMS
+    between the successful restarts, sorted by error) and its figure,
+    `reproducibility.{pdf,png}`.
 
     Raises
     ------
@@ -1488,6 +1499,10 @@ def _finish_rank(
         # Raised as a ConvergenceError below instead, on one line.
         warnings.filterwarnings("ignore", message=r"Group .* restarts converged")
         summary = _collect_rank(plan, options, rank, fit_kwargs)["full"]
+    # _collect_rank refuses missing restarts, so every task has a result.
+    store = _store(options, rank)
+    results = [cast(RestartResult, store.load(task)) for task in plan]
+    restart_table(results).to_csv(store.root / RESTARTS_FILE, index=False)
     best = summary.best
     if best is None or best.model is None or best.error is None:
         raise ConvergenceError(
@@ -1495,9 +1510,6 @@ def _finish_rank(
             f"{rank}{summary.tally.failure_summary()}",
         ) from summary.tally.last_failure
 
-    # _collect_rank refuses missing restarts, so every task has a result.
-    store = _store(options, rank)
-    results = [cast(RestartResult, store.load(task)) for task in plan]
     csv = write_reproducibility(results, store.root)
     fig, _ = plot_reproducibility(*read_reproducibility(csv))
     save_figure(fig, store.root / REPRODUCIBILITY_STEM, **REPRODUCIBILITY_FIGURE)

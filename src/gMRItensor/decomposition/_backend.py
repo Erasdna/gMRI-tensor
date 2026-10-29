@@ -76,9 +76,25 @@ def _to_solver_slices(
     return [s.to(device).double() for s in slices]
 
 
-#: Environment variable choosing where CPU fits run: "numpy" (default) or
-#: "torch". GPU fits always run on pytorch.
+#: Environment variable choosing where CPU fits run: "numpy" (default),
+#: "torch" or "auto" (by size, see `AUTO_BACKEND_VARIABLE`). GPU fits always
+#: run on pytorch.
 FIT_BACKEND_VARIABLE = "GMRITENSOR_FIT_BACKEND"
+
+
+#: Environment variable: with `GMRITENSOR_FIT_BACKEND=auto`, CPU fits of at
+#: least this many data entries run on torch, smaller ones on numpy.
+AUTO_BACKEND_VARIABLE = "GMRITENSOR_AUTO_BACKEND_ENTRIES"
+
+
+#: `AUTO_BACKEND_VARIABLE`'s default: between the sizes where numpy was
+#: still faster (30 x 4 x 1e5 entries) and torch already was (30 x 4 x 1e6).
+AUTO_BACKEND_DEFAULT_ENTRIES = 50_000_000
+
+
+#: Environment variable overriding `use_memory_efficient_khatri_rao`: "1"
+#: registers TensorLy's memory-efficient MTTKRP, "0" keeps its default one.
+MEMORY_EFFICIENT_MTTKRP_VARIABLE = "GMRITENSOR_MEMORY_EFFICIENT_MTTKRP"
 
 
 #: Containers the solvers return, rebuilt part by part by `_solver_output`.
@@ -94,18 +110,38 @@ def _fit_device(
     return compute_device if compute_device is not None else default
 
 
-def _fits_on_numpy(device: torch.device) -> bool:
-    """Whether a fit on `device` runs on TensorLy's numpy backend.
+def _auto_backend_entries() -> int:
+    """`AUTO_BACKEND_VARIABLE`, or its default; raises unless an int > 0."""
+    value = os.environ.get(AUTO_BACKEND_VARIABLE)
+    if value is None:
+        return AUTO_BACKEND_DEFAULT_ENTRIES
+    try:
+        entries = int(float(value))
+    except ValueError:
+        entries = 0
+    if entries <= 0:
+        raise ValueError(
+            f"{AUTO_BACKEND_VARIABLE} must be a number of entries > 0, got {value!r}",
+        )
+    return entries
 
-    Every CPU fit does, in float64, unless `GMRITENSOR_FIT_BACKEND=torch`:
-    the solvers' inner loops make many small calls, each several times
-    cheaper in numpy than in torch. A GPU fit always runs on pytorch; asking
-    for numpy there is ignored with a warning.
+
+def _fits_on_numpy(device: torch.device, entries: int) -> bool:
+    """Whether a fit of `entries` data entries on `device` runs on
+    TensorLy's numpy backend.
+
+    Every CPU fit does, in float64, unless `GMRITENSOR_FIT_BACKEND` says
+    otherwise: `torch`, or `auto` for a fit of at least
+    `GMRITENSOR_AUTO_BACKEND_ENTRIES` entries. The solvers' inner loops make
+    many small calls, each several times cheaper in numpy than in torch, but
+    on large data torch's multithreaded elementwise operations win. A GPU
+    fit always runs on pytorch; asking for numpy there is ignored with a
+    warning.
     """
     choice = os.environ.get(FIT_BACKEND_VARIABLE, "numpy")
-    if choice not in ("numpy", "torch"):
+    if choice not in ("numpy", "torch", "auto"):
         raise ValueError(
-            f"{FIT_BACKEND_VARIABLE} must be numpy or torch, got {choice!r}",
+            f"{FIT_BACKEND_VARIABLE} must be numpy, torch or auto, got {choice!r}",
         )
     if device.type != "cpu":
         if FIT_BACKEND_VARIABLE in os.environ and choice == "numpy":
@@ -115,7 +151,42 @@ def _fits_on_numpy(device: torch.device) -> bool:
                 stacklevel=3,
             )
         return False
+    if choice == "auto":
+        return entries < _auto_backend_entries()
     return choice == "numpy"
+
+
+def _fit_backend_name(device: torch.device, entries: int) -> str:
+    """Where a fit of `entries` entries on `device` runs, as recorded with
+    each restart: "numpy", "torch", or the GPU device type."""
+    if device.type != "cpu":
+        return device.type
+    return "numpy" if _fits_on_numpy(device, entries) else "torch"
+
+
+def _entries(data: list[torch.Tensor] | torch.Tensor) -> int:
+    """How many entries a fit's data has: a tensor's, or all its slices'."""
+    if isinstance(data, torch.Tensor):
+        return data.numel()
+    return sum(s.numel() for s in data)
+
+
+def _float64_on_cpu(
+    data: list[torch.Tensor] | torch.Tensor,
+    device: torch.device,
+) -> list[torch.Tensor] | torch.Tensor:
+    """`data` (a tensor or slices) in float64 when the fit runs on the CPU.
+
+    Every CPU fit runs in float64, so casting once here, before the restarts
+    are spread over a pool, lets the workers share this one copy: their own
+    casts are then no-ops. Otherwise each worker made a private float64 copy
+    of the whole input. GPU data is left as it is.
+    """
+    if device.type != "cpu":
+        return data
+    if isinstance(data, torch.Tensor):
+        return data.double()
+    return [s.double() for s in data]
 
 
 def _to_cpu(value: Any) -> Any:
@@ -174,8 +245,8 @@ class _FitBackend:
     pytorch.
     """
 
-    def __init__(self, device: torch.device) -> None:
-        self.numpy = _fits_on_numpy(device)
+    def __init__(self, device: torch.device, entries: int) -> None:
+        self.numpy = _fits_on_numpy(device, entries)
 
     def input(self, value: Any) -> Any:
         """`value` as the solver takes it."""
@@ -249,8 +320,17 @@ def _maybe_register_memory_efficient_khatri_rao(enabled: bool) -> None:
     """Register TensorLy's memory-efficient MTTKRP backend method, if enabled.
 
     A global TensorLy registration shared by both decompositions, since both
-    rely on the same underlying MTTKRP operation.
+    rely on the same underlying MTTKRP operation. `GMRITENSOR_MEMORY_EFFICIENT_MTTKRP`
+    ("0" or "1"), when set, overrides `enabled`. Only a performance setting:
+    both MTTKRPs compute the same product.
     """
+    override = os.environ.get(MEMORY_EFFICIENT_MTTKRP_VARIABLE)
+    if override is not None:
+        if override not in ("0", "1"):
+            raise ValueError(
+                f"{MEMORY_EFFICIENT_MTTKRP_VARIABLE} must be 0 or 1, got {override!r}",
+            )
+        enabled = override == "1"
     if enabled:
         tl.tenalg.register_backend_method(
             "unfolding_dot_khatri_rao",
@@ -279,5 +359,8 @@ def setup_backend() -> torch.device:
         slurm_cpus = os.environ.get("CPUS_PER_TASK")
         # Sequential unless the CPU count is made explicit.
         _limit_threads(int(slurm_cpus) if slurm_cpus else 1)
-        print(f"Running on: Multi-CPU ({torch.get_num_threads()} threads)")
+        print(
+            f"Running on: Multi-CPU ({torch.get_num_threads()} threads, "
+            f"{FIT_BACKEND_VARIABLE}={os.environ.get(FIT_BACKEND_VARIABLE, 'numpy')})",
+        )
     return device

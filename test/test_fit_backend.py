@@ -1,4 +1,5 @@
-"""CPU fits run on TensorLy's numpy backend in float64 (`_fits_on_numpy`).
+"""CPU fits run on TensorLy's numpy backend in float64 (`_fits_on_numpy`),
+or on torch by `GMRITENSOR_FIT_BACKEND`; every fit runs in float64.
 
 These tests hold that path to the pytorch one: the same fits, returned as
 the same torch types, stored and reloaded the same way, and never chosen
@@ -23,9 +24,18 @@ from gMRItensor import run_PARAFAC2_decomposition_repeated
 from gMRItensor import setup_backend
 from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.decomposition import FIT_BACKEND_VARIABLE
+from gMRItensor.decomposition._backend import _entries
+from gMRItensor.decomposition._backend import _fit_backend_name
 from gMRItensor.decomposition._backend import _FitBackend
 from gMRItensor.decomposition._backend import _fits_on_numpy
+from gMRItensor.decomposition._backend import _float64_on_cpu
 from gMRItensor.decomposition._backend import _init_restart_worker_backend
+from gMRItensor.decomposition._backend import (
+    _maybe_register_memory_efficient_khatri_rao,
+)
+from gMRItensor.decomposition._backend import AUTO_BACKEND_DEFAULT_ENTRIES
+from gMRItensor.decomposition._backend import AUTO_BACKEND_VARIABLE
+from gMRItensor.decomposition._backend import MEMORY_EFFICIENT_MTTKRP_VARIABLE
 from threadpoolctl import threadpool_info
 
 CUDA = torch.device("cuda")
@@ -120,9 +130,8 @@ FITS: dict[str, Callable[[], tuple[float, list[np.ndarray]]]] = {
 }
 
 
-# The torch side of these two is slow: TensorLy's HALS loop on torch, and
-# compiling CP.
-_SLOW_ON_TORCH = ("cp-non-negative", "parafac2-tensorly")
+# The torch side of this one is slow: TensorLy's ALS loop on torch.
+_SLOW_ON_TORCH = ("parafac2-tensorly",)
 
 
 @pytest.mark.parametrize(
@@ -207,19 +216,165 @@ def test_numpy_fits_round_trip_through_the_store(tmp_path: Any, method: str) -> 
 
 def test_gpu_fits_always_run_on_pytorch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv(FIT_BACKEND_VARIABLE, raising=False)
-    assert _fits_on_numpy(CPU)
-    assert not _fits_on_numpy(CUDA)
+    assert _fits_on_numpy(CPU, 10)
+    assert not _fits_on_numpy(CUDA, 10)
 
     monkeypatch.setenv(FIT_BACKEND_VARIABLE, "torch")
-    assert not _fits_on_numpy(CPU)
+    assert not _fits_on_numpy(CPU, 10)
 
     monkeypatch.setenv(FIT_BACKEND_VARIABLE, "numpy")
     with pytest.warns(UserWarning, match="GPU fits always run on pytorch"):
-        assert not _fits_on_numpy(CUDA)
+        assert not _fits_on_numpy(CUDA, 10)
 
     monkeypatch.setenv(FIT_BACKEND_VARIABLE, "jax")
-    with pytest.raises(ValueError, match="numpy or torch"):
-        _fits_on_numpy(CPU)
+    with pytest.raises(ValueError, match="numpy, torch or auto"):
+        _fits_on_numpy(CPU, 10)
+
+
+def test_auto_picks_the_backend_by_size(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`auto`: numpy below the threshold, torch at or above it; the GPU is
+    always torch."""
+    monkeypatch.setenv(FIT_BACKEND_VARIABLE, "auto")
+    monkeypatch.delenv(AUTO_BACKEND_VARIABLE, raising=False)
+    threshold = AUTO_BACKEND_DEFAULT_ENTRIES
+    assert _fits_on_numpy(CPU, threshold - 1)
+    assert not _fits_on_numpy(CPU, threshold)
+    assert not _fits_on_numpy(CUDA, 1)
+    assert _fit_backend_name(CPU, 1) == "numpy"
+    assert _fit_backend_name(CPU, threshold) == "torch"
+    assert _fit_backend_name(CUDA, 1) == "cuda"
+
+    monkeypatch.setenv(AUTO_BACKEND_VARIABLE, "1e3")
+    assert _fits_on_numpy(CPU, 999)
+    assert not _fits_on_numpy(CPU, 1000)
+
+    for invalid in ("0", "-5", "many"):
+        monkeypatch.setenv(AUTO_BACKEND_VARIABLE, invalid)
+        with pytest.raises(ValueError, match=AUTO_BACKEND_VARIABLE):
+            _fits_on_numpy(CPU, 1)
+
+
+def test_the_entry_count_covers_tensors_and_slices() -> None:
+    assert _entries(torch.ones(2, 3, 4)) == 24
+    assert _entries([torch.ones(2, 3), torch.ones(4, 3)]) == 18
+
+
+def test_float64_on_cpu_leaves_gpu_data_alone() -> None:
+    meta = torch.device("meta")
+    tensor = torch.ones(2, 3)
+    assert cast(torch.Tensor, _float64_on_cpu(tensor, CPU)).dtype == torch.float64
+    assert all(s.dtype == torch.float64 for s in _float64_on_cpu([tensor], CPU))
+    assert _float64_on_cpu(tensor, meta) is tensor
+    already = tensor.double()
+    assert _float64_on_cpu(already, CPU) is already  # no second copy
+
+
+@pytest.mark.parametrize(
+    ("variable", "enabled", "registered"),
+    [(None, True, True), (None, False, False), ("0", True, False), ("1", False, True)],
+)
+def test_the_mttkrp_variable_overrides_the_option(
+    monkeypatch: pytest.MonkeyPatch,
+    variable: str | None,
+    enabled: bool,
+    registered: bool,
+) -> None:
+    calls: list[str] = []
+    monkeypatch.setattr(
+        tl.tenalg,
+        "register_backend_method",
+        lambda name, fn: calls.append(name),
+    )
+    monkeypatch.setattr(tl.tenalg, "use_dynamic_dispatch", lambda: None)
+    if variable is None:
+        monkeypatch.delenv(MEMORY_EFFICIENT_MTTKRP_VARIABLE, raising=False)
+    else:
+        monkeypatch.setenv(MEMORY_EFFICIENT_MTTKRP_VARIABLE, variable)
+
+    _maybe_register_memory_efficient_khatri_rao(enabled)
+
+    assert calls == (["unfolding_dot_khatri_rao"] if registered else [])
+
+
+def test_an_invalid_mttkrp_variable_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(MEMORY_EFFICIENT_MTTKRP_VARIABLE, "yes")
+    with pytest.raises(ValueError, match="0 or 1"):
+        _maybe_register_memory_efficient_khatri_rao(True)
+
+
+@pytest.mark.parametrize("backend", ["numpy", "torch"])
+@pytest.mark.parametrize(
+    ("solver", "fit"),
+    [
+        (
+            "non_negative_parafac",
+            lambda: compute_CP_decomposition(
+                _cube().float(),
+                2,
+                CP_max_iter=20,
+                CP_tolerance=1e-6,  # the spy hides TensorLy's default
+            ),
+        ),
+        (
+            "parafac2",
+            lambda: compute_PARAFAC2_decomposition(
+                [s.float() for s in _slices()],
+                2,
+                solver="tensorly",
+                PARAFAC2_max_iter=20,
+                PARAFAC2_tolerance=1e-3,
+            ),
+        ),
+    ],
+)
+def test_tensorly_fits_run_in_float64_on_every_backend(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    solver: str,
+    fit: Callable[[], Any],
+) -> None:
+    """CP and TensorLy's PARAFAC2 get float64 data from float32 input, as
+    the matcouply fits always do, so fits are comparable across backends."""
+    setup_backend()
+    monkeypatch.setenv(FIT_BACKEND_VARIABLE, backend)
+    library = getattr(tl.decomposition, solver)
+    dtypes: list[str] = []
+
+    def spy(data: Any, *args: Any, **kwargs: Any) -> Any:
+        first = data if solver == "non_negative_parafac" else data[0]
+        dtypes.append(str(first.dtype))
+        return library(data, *args, **kwargs)
+
+    monkeypatch.setattr(tl.decomposition, solver, spy)
+    try:
+        fit()
+    except ConvergenceError:
+        pass  # only the dtype the solver saw matters here
+
+    assert dtypes and all("float64" in dtype for dtype in dtypes)
+
+
+def test_cp_on_the_cpu_is_not_compiled(monkeypatch: pytest.MonkeyPatch) -> None:
+    """torch.compile is for the GPU; a CPU fit on torch calls TensorLy as it
+    is."""
+    from gMRItensor.decomposition import cp
+
+    def compiled(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("compiled on the CPU")
+
+    monkeypatch.setattr(cp, "non_negative_parafac_compiled", compiled)
+    monkeypatch.setenv(FIT_BACKEND_VARIABLE, "torch")
+    setup_backend()
+
+    (_, factors), _ = compute_CP_decomposition(
+        _cube(),
+        2,
+        CP_max_iter=500,
+        CP_tolerance=1e-6,
+        random_state=1,
+    )
+
+    assert factors[0].dtype == torch.float64
 
 
 def test_a_gpu_fit_backend_converts_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -232,11 +387,11 @@ def test_a_gpu_fit_backend_converts_nothing(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr(_backend, "_solver_input", no_conversion)
     monkeypatch.setattr(_backend, "_solver_output", no_conversion)
-    backend = _FitBackend(CUDA)
+    backend = _FitBackend(CUDA, 2)
     value = torch.ones(2)
     # The patch is live: a CPU backend does convert, and so trips it.
     with pytest.raises(AssertionError, match="converted"):
-        _FitBackend(CPU).input(value)
+        _FitBackend(CPU, 2).input(value)
 
     assert backend.input(value) is value
     assert backend.call(lambda: tl.get_backend()) == tl.get_backend()

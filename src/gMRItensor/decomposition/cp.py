@@ -17,14 +17,15 @@ from .models import DEGENERACY_THRESHOLD
 @torch.no_grad()
 @torch.compile(dynamic=True)
 def non_negative_parafac_compiled(tensor: torch.Tensor, **kwargs: Any) -> Any:
-    """TensorLy's `non_negative_parafac`, compiled; used for GPU fits."""
+    """TensorLy's `non_negative_parafac`, compiled; used for GPU fits only
+    (on the CPU, compiling costs start-up and recompiles without gain)."""
     return tl.decomposition.non_negative_parafac(tensor, **kwargs)
 
 
 @torch.no_grad()
 @torch.compile(dynamic=True)
 def parafac_compiled(tensor: torch.Tensor, **kwargs: Any) -> Any:
-    """TensorLy's `parafac`, compiled; used for GPU fits."""
+    """TensorLy's `parafac`, compiled; used for GPU fits only."""
     return tl.decomposition.parafac(tensor, **kwargs)
 
 
@@ -53,8 +54,12 @@ def compute_CP_decomposition(
     physically non-negative. `CP_tolerance=None` uses TensorLy's own default
     `tol` for the chosen solver. The factors are not normalised, so the
     weights are ones (see `PARAFAC2Model`).
+
+    The fit runs in float64 on every backend and device, as PARAFAC2 and CMF
+    do, so fits are comparable wherever they ran; the result is float64.
     """
     _check_tolerances(CP_tolerance=CP_tolerance)
+    tensor = tensor.double()
     mask = None
     has_nan = bool(torch.isnan(tensor).any())
     if allow_nan_imputation and has_nan:
@@ -74,12 +79,12 @@ def compute_CP_decomposition(
     )
     if CP_tolerance is None:
         CP_tolerance = _solver_default(library_fn)
-    backend = _FitBackend(tensor.device)
-    # Compiled for the GPU; numpy fits call TensorLy directly.
+    backend = _FitBackend(tensor.device, tensor.numel())
+    # Compiled for the GPU; CPU fits (numpy or torch) call TensorLy directly.
     compiled_fn = non_negative_parafac_compiled if non_negative else parafac_compiled
     decomp, errors = backend.output(
         backend.call(
-            library_fn if backend.numpy else compiled_fn,
+            compiled_fn if tensor.device.type == "cuda" else library_fn,
             backend.input(tensor),
             rank=rank,
             n_iter_max=CP_max_iter,
@@ -96,13 +101,18 @@ def compute_CP_decomposition(
         raise ConvergenceError(
             "Decomposition did not converge within the maximum iteration count",
             reason="max_iter",
+            n_iter=len(errors),
         )
 
     w, f = decomp
     w = w.float()
     f = [ff.float() for ff in f]
     if degeneracy_score((w, f)) < DEGENERACY_THRESHOLD:
-        raise ConvergenceError("Decomposition is degenerate", reason="degenerate")
+        raise ConvergenceError(
+            "Decomposition is degenerate",
+            reason="degenerate",
+            n_iter=len(errors),
+        )
 
     if mask is not None:
         errors = [*errors[:-1], _observed_error(tensor, decomp, mask)]

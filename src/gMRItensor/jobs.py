@@ -18,7 +18,10 @@ import dataclasses
 import math
 import os
 import re
+import resource
 import socket
+import sys
+import time
 import uuid
 import warnings
 from collections.abc import Callable
@@ -36,6 +39,7 @@ from typing import TYPE_CHECKING
 from typing import TypeVar
 from typing import Union
 
+import pandas as pd
 import torch
 from numpy.typing import ArrayLike
 from tqdm import tqdm
@@ -47,6 +51,10 @@ from .decomposition import Method
 from .decomposition import PARAFAC2Diagnostics
 from .decomposition import PARAFAC2Model
 from .decomposition import RestartTally
+from .decomposition._backend import _entries
+from .decomposition._backend import _fit_backend_name
+from .decomposition._backend import _fits_on_numpy
+from .decomposition._backend import _float64_on_cpu
 from .decomposition._backend import _init_restart_worker_backend
 from .decomposition._backend import _maybe_register_memory_efficient_khatri_rao
 from .decomposition._backend import _release_cuda_cache
@@ -56,6 +64,7 @@ from .decomposition.restarts import _compute_kwargs
 from .decomposition.restarts import _fit_one
 from .decomposition.restarts import _resolve_options
 from .decomposition.restarts import _warn_parafac2_outcome
+from .decomposition.restarts import FitOutcome
 
 if TYPE_CHECKING:
     from .replicability import ReplicabilityEngine
@@ -132,12 +141,42 @@ def job_slice(
 
 
 @dataclass(frozen=True)
+class RestartTiming:
+    """What one restart cost and where it ran, recorded by `_run_task`.
+
+    `n_iter` is None when the solver did not report it. `peak_rss_gb` is the
+    peak resident memory of the process that fitted it, up to the end of
+    this fit: in a pool, a worker's earlier restarts count too. `backend` is
+    "numpy", "torch" or the GPU device type (see `_fit_backend_name`).
+    """
+
+    fit_seconds: float
+    n_iter: int | None
+    backend: str
+    threads: int
+    peak_rss_gb: float
+    host: str
+
+    @property
+    def seconds_per_iter(self) -> float | None:
+        return self.fit_seconds / self.n_iter if self.n_iter else None
+
+
+def _peak_rss_gb() -> float:
+    """This process's peak resident memory so far, in GB."""
+    peak = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    # Linux reports kilobytes, macOS bytes.
+    return peak / 1e9 if sys.platform == "darwin" else peak / 1e6
+
+
+@dataclass(frozen=True)
 class RestartResult:
     """What one `FitTask` produced: a model, or why it was rejected.
 
     Failures are stored as plain values rather than an exception, so any
     `ResultStore` can serialise them; `failure()` rebuilds the
-    `ConvergenceError` for tallying.
+    `ConvergenceError` for tallying. `timing` is None for results stored
+    before timings were recorded.
     """
 
     task: FitTask
@@ -148,6 +187,7 @@ class RestartResult:
     failure_message: str | None = None
     failure_level: float | None = None
     failure_suggested_max_iter: int | None = None
+    timing: RestartTiming | None = None
 
     @property
     def ok(self) -> bool:
@@ -166,17 +206,20 @@ class RestartResult:
 
 def _result_from_outcome(
     task: FitTask,
-    outcome: tuple[Any, float | None, PARAFAC2Diagnostics | None, Any],
+    outcome: FitOutcome,
+    timing: RestartTiming | None = None,
 ) -> RestartResult:
-    model, error, diagnostics, failure = outcome
+    model, error, diagnostics, failure, _ = outcome
     if model is not None:
-        return RestartResult(task, model, error, diagnostics)
+        return RestartResult(task, model, error, diagnostics, timing=timing)
+    assert failure is not None
     return RestartResult(
         task,
         failure_reason=failure.reason,
         failure_message=str(failure),
         failure_level=failure.level_reached,
         failure_suggested_max_iter=failure.suggested_max_iter,
+        timing=timing,
     )
 
 
@@ -197,11 +240,23 @@ def _data_device(data: Data) -> torch.device:
 def _run_task(
     args: tuple[FitTask, Data, Method, dict[str, Any], bool],
 ) -> RestartResult:
-    """Fit one task on its already-built subset. Picklable pool worker."""
+    """Fit one task on its already-built subset, timing it. Picklable pool
+    worker."""
     task, subset, method, compute_kwargs, memory_efficient = args
     _maybe_register_memory_efficient_khatri_rao(memory_efficient)
+    start = time.perf_counter()
     outcome = _fit_one((method, task.seed, subset, compute_kwargs))
-    return _result_from_outcome(task, outcome)
+    compute_device = compute_kwargs.get("compute_device")
+    device = compute_device if compute_device is not None else _data_device(subset)
+    timing = RestartTiming(
+        fit_seconds=time.perf_counter() - start,
+        n_iter=outcome.n_iter,
+        backend=_fit_backend_name(device, _entries(subset)),
+        threads=torch.get_num_threads(),
+        peak_rss_gb=_peak_rss_gb(),
+        host=socket.gethostname(),
+    )
+    return _result_from_outcome(task, outcome, timing)
 
 
 def fit_task(
@@ -369,6 +424,9 @@ class DirectoryStore:
             "failure_message": result.failure_message,
             "failure_level": result.failure_level,
             "failure_suggested_max_iter": result.failure_suggested_max_iter,
+            "timing": (
+                None if result.timing is None else dataclasses.asdict(result.timing)
+            ),
         }
         writer = f"{socket.gethostname()}.{os.getpid()}.{uuid.uuid4().hex}"
         tmp = path.with_name(f".{path.name}.{writer}.tmp")
@@ -438,6 +496,12 @@ class DirectoryStore:
             failure_message=record["failure_message"],
             failure_level=record["failure_level"],
             failure_suggested_max_iter=record["failure_suggested_max_iter"],
+            # Absent from results stored before timings were recorded.
+            timing=(
+                None
+                if record.get("timing") is None
+                else RestartTiming(**record["timing"])
+            ),
         )
 
 
@@ -446,8 +510,13 @@ def _with_subsets(
     data: Data,
     method: Method,
     transform: Transform | None,
+    fit_device: torch.device,
 ) -> Iterator[tuple[FitTask, Data]]:
-    """Pair each task with its subset, built once per run of equal groups."""
+    """Pair each task with its subset, built once per run of equal groups.
+
+    On the CPU the subset is cast to float64 here, once, so the restarts of
+    a pool share it (see `_float64_on_cpu`).
+    """
     current: tuple[Hashable, tuple[int, ...]] | None = None
     subset: Data | None = None
     for task in tasks:
@@ -456,6 +525,7 @@ def _with_subsets(
             subset = _subset(data, task.indices, method)
             if transform is not None:
                 subset = transform(subset)
+            subset = _float64_on_cpu(subset, fit_device)
             current = key
         assert subset is not None
         yield task, subset
@@ -487,6 +557,70 @@ def pending_tasks(
         reused=statuses.count("current"),
         refitted=statuses.count("stale"),
     )
+
+
+def _warn_if_threads_are_wasted(
+    data: Data,
+    fit_device: torch.device,
+    n_procs: int,
+) -> None:
+    """Warn when numpy fits get more than one thread each: only its BLAS
+    calls use them, which gained at most 1.3x in benchmarks, while the
+    same cores fit other restarts in parallel."""
+    total = torch.get_num_threads()
+    threads = total if n_procs < 2 else max(1, total // n_procs)
+    if threads < 2 or fit_device.type != "cpu":
+        return
+    if not _fits_on_numpy(fit_device, _entries(data)):
+        return
+    warnings.warn(
+        f"Each restart gets {threads} threads, but fits on the numpy backend "
+        "use about one core: its threads only speed up the BLAS calls. Spread "
+        "the cores over restarts instead (--restart-procs / --n-procs), or "
+        "fit large data on torch (GMRITENSOR_FIT_BACKEND=torch or auto), "
+        "whose fits do use several threads. See docs/cpu-scaling.md.",
+        stacklevel=3,
+    )
+
+
+#: The columns of `restart_table` (and of `restarts.csv`).
+RESTART_TABLE_COLUMNS = (
+    "seed",
+    "status",
+    "error",
+    "n_iter",
+    "fit_seconds",
+    "seconds_per_iter",
+    "backend",
+    "threads",
+    "peak_rss_gb",
+    "host",
+)
+
+
+def restart_table(results: Sequence[RestartResult]) -> pd.DataFrame:
+    """One row per restart: its outcome, and what it cost (`RestartTiming`;
+    empty for results stored before timings were recorded)."""
+    rows = []
+    for result in results:
+        timing = result.timing
+        rows.append(
+            {
+                "seed": result.task.seed,
+                "status": "ok" if result.ok else (result.failure_reason or "unknown"),
+                "error": result.error,
+                "n_iter": None if timing is None else timing.n_iter,
+                "fit_seconds": None if timing is None else timing.fit_seconds,
+                "seconds_per_iter": (
+                    None if timing is None else timing.seconds_per_iter
+                ),
+                "backend": None if timing is None else timing.backend,
+                "threads": None if timing is None else timing.threads,
+                "peak_rss_gb": None if timing is None else timing.peak_rss_gb,
+                "host": None if timing is None else timing.host,
+            },
+        )
+    return pd.DataFrame(rows, columns=RESTART_TABLE_COLUMNS)
 
 
 def run_tasks(
@@ -538,12 +672,20 @@ def run_tasks(
             "compute_device) to use multiple processes.",
         )
 
+    _warn_if_threads_are_wasted(data, fit_device, n_procs)
+
     pending, counts = pending_tasks(tasks, store, resume)
     compute_kwargs = _compute_kwargs(method, rank, resolved)
     memory_efficient = resolved["use_memory_efficient_khatri_rao"]
     task_args = (
         (task, subset, method, compute_kwargs, memory_efficient)
-        for task, subset in _with_subsets(pending, data, method, transform)
+        for task, subset in _with_subsets(
+            pending,
+            data,
+            method,
+            transform,
+            fit_device,
+        )
     )
 
     if n_procs < 2:

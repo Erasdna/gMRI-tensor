@@ -1,4 +1,6 @@
 import math
+import socket
+import warnings
 from typing import Any
 
 import numpy as np
@@ -18,12 +20,15 @@ from gMRItensor import PARAFAC2Diagnostics
 from gMRItensor import PARAFAC2Model
 from gMRItensor import plan_replicability
 from gMRItensor import plan_restarts
+from gMRItensor import restart_table
 from gMRItensor import RestartResult
+from gMRItensor import RestartTiming
 from gMRItensor import run_CMF_decomposition_repeated
 from gMRItensor import run_CP_decomposition_repeated
 from gMRItensor import run_PARAFAC2_decomposition_repeated
 from gMRItensor import run_tasks
 from gMRItensor import setup_backend
+from gMRItensor.decomposition import FIT_BACKEND_VARIABLE
 from gMRItensor.replicability import CrossValidationEngine
 from gMRItensor.replicability import evaluate_replicability_multiproc
 from gMRItensor.replicability import HalfHalfEngine
@@ -519,3 +524,153 @@ def test_scattered_restarts_are_never_normalized(method: str) -> None:
     model: Any = best.model
     weights = model[0] if method == "CP" else model.weights
     torch.testing.assert_close(weights.float(), torch.ones(2), rtol=0, atol=0)
+
+
+# --- Timings --------------------------------------------------------------
+
+
+def fake_timing(n_iter: int | None = 20) -> RestartTiming:
+    return RestartTiming(
+        fit_seconds=4.0,
+        n_iter=n_iter,
+        backend="numpy",
+        threads=1,
+        peak_rss_gb=1.5,
+        host="node01",
+    )
+
+
+@pytest.mark.parametrize("method", ["CP", "PARAFAC2", "CMF"])
+def test_fit_task_records_its_timing(
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(FIT_BACKEND_VARIABLE, raising=False)
+    data: Any = make_tensor() if method == "CP" else make_slices(8)
+    task = plan_restarts(len(data), 1)[0]
+
+    result = fit_task(task, data, 2, method, **FIT_OPTIONS)  # type: ignore[arg-type]
+
+    timing = result.timing
+    assert timing is not None
+    assert timing.fit_seconds > 0
+    assert isinstance(timing.n_iter, int) and timing.n_iter >= 1
+    assert timing.seconds_per_iter == pytest.approx(timing.fit_seconds / timing.n_iter)
+    assert timing.backend == "numpy"
+    assert timing.threads == torch.get_num_threads()
+    assert timing.peak_rss_gb > 0
+    assert timing.host == socket.gethostname()
+
+
+@pytest.mark.parametrize("method", ["CP", "PARAFAC2"])
+def test_a_rejected_restart_records_its_iterations(method: str) -> None:
+    data: Any = make_tensor() if method == "CP" else make_slices()
+    task = plan_restarts(len(data), 1)[0]
+
+    result = fit_task(task, data, 2, method, max_iter=2, tolerance=1e-12)  # type: ignore[arg-type]
+
+    assert not result.ok
+    assert result.timing is not None
+    assert result.timing.n_iter is not None and 1 <= result.timing.n_iter <= 2
+
+
+def test_directory_store_round_trips_the_timing(tmp_path: Any) -> None:
+    store = DirectoryStore(tmp_path)
+    task = FitTask("full", (0, 1, 2), 0)
+    result = RestartResult(task, fake_model(1.0), 0.2, timing=fake_timing())
+
+    store.save(result)
+
+    loaded = store.load(task)
+    assert loaded is not None and loaded.timing == result.timing
+
+
+def test_directory_store_loads_results_stored_without_timing(tmp_path: Any) -> None:
+    """Restarts stored before timings were recorded still load."""
+    store = DirectoryStore(tmp_path)
+    task = FitTask("full", (0, 1, 2), 0)
+    store.save(RestartResult(task, fake_model(1.0), 0.2, timing=fake_timing()))
+    record = torch.load(store.path(task), weights_only=True)
+    del record["timing"]
+    torch.save(record, store.path(task))
+
+    loaded = store.load(task)
+
+    assert loaded is not None and loaded.ok and loaded.timing is None
+    assert store.status(task) == "current"
+
+
+def test_restart_table_lists_outcomes_and_timings() -> None:
+    plan = plan_restarts(3, 3)
+    results = [
+        RestartResult(plan[0], fake_model(1.0), 0.2, timing=fake_timing()),
+        RestartResult(
+            plan[1],
+            failure_reason="max_iter",
+            failure_message="no",
+            timing=fake_timing(n_iter=None),
+        ),
+        RestartResult(plan[2], fake_model(1.0), 0.3),  # stored before timings
+    ]
+
+    table = restart_table(results)
+
+    assert tuple(table.columns) == jobs.RESTART_TABLE_COLUMNS
+    assert list(table.seed) == [0, 1, 2]
+    assert list(table.status) == ["ok", "max_iter", "ok"]
+    assert table.seconds_per_iter[0] == pytest.approx(0.2)
+    assert math.isnan(table.seconds_per_iter[1])
+    assert table.host[0] == "node01" and table.isna().iloc[2, 3:].all()
+
+
+@pytest.mark.parametrize("method", ["CP", "PARAFAC2"])
+def test_run_tasks_hands_the_fits_float64_on_the_cpu(
+    method: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cast once per subset, so a pool's workers share one float64 copy."""
+    dtypes: list[torch.dtype] = []
+
+    def fake_run_task(args: Any) -> RestartResult:
+        subset = args[1]
+        dtypes.extend(
+            [subset.dtype]
+            if isinstance(subset, torch.Tensor)
+            else [s.dtype for s in subset],
+        )
+        return RestartResult(args[0], fake_model(1.0), 0.1)
+
+    monkeypatch.setattr(jobs, "_run_task", fake_run_task)
+    data: Any = make_tensor() if method == "CP" else make_slices()
+    plan = plan_restarts(len(data), 2)
+
+    run_tasks(plan, data, 2, method, InMemoryStore(), progress_bar=False)  # type: ignore[arg-type]
+
+    assert dtypes and set(dtypes) == {torch.float64}
+
+
+@pytest.mark.parametrize(
+    ("backend", "threads", "n_procs", "warns"),
+    [
+        ("numpy", 2, 1, True),
+        ("numpy", 4, 2, True),
+        ("numpy", 2, 2, False),
+        ("numpy", 1, 1, False),
+        ("torch", 4, 1, False),
+    ],
+)
+def test_threads_on_numpy_fits_are_warned_about(
+    monkeypatch: pytest.MonkeyPatch,
+    backend: str,
+    threads: int,
+    n_procs: int,
+    warns: bool,
+) -> None:
+    monkeypatch.setenv(FIT_BACKEND_VARIABLE, backend)
+    monkeypatch.setattr(torch, "get_num_threads", lambda: threads)
+
+    with warnings.catch_warnings(record=True) as caught:
+        warnings.simplefilter("always")
+        jobs._warn_if_threads_are_wasted(make_slices(), torch.device("cpu"), n_procs)
+
+    assert any("numpy backend" in str(w.message) for w in caught) is warns

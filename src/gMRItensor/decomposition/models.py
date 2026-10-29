@@ -36,7 +36,9 @@ class ConvergenceError(Exception):
 
     `reason` is tallied across restarts to produce advice on what to change
     (`_build_restart_advisory`). `suggested_max_iter` is set only for
-    `reason="reconstruction"`.
+    `reason="reconstruction"`. `n_iter` is how many iterations the rejected
+    fit ran, where the raiser knows it; it is recorded with the restart's
+    timing.
     """
 
     def __init__(
@@ -45,11 +47,13 @@ class ConvergenceError(Exception):
         reason: ConvergenceFailureReason | None = None,
         level_reached: float | None = None,
         suggested_max_iter: int | None = None,
+        n_iter: int | None = None,
     ) -> None:
         super().__init__(message)
         self.reason = reason
         self.level_reached = level_reached
         self.suggested_max_iter = suggested_max_iter
+        self.n_iter = n_iter
 
 
 @dataclass(frozen=True)
