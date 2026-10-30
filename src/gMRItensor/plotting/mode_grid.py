@@ -29,6 +29,13 @@ from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 matplotlib.use("Agg")
 plt.style.use(["science", "no-latex"])
 
+TIME_COEFFICIENT_LABEL = "Time coef. (a.u.)"
+SUBJECT_COEFFICIENT_LABEL = "Subject coef. (a.u.)"
+# The time and subject y-labels take width from the image columns: a
+# figure this much wider per height keeps the images height-limited, so
+# their colorbars (insets, outside the layout) keep their room.
+_LABEL_ROOM = 1.1
+
 
 def plot_time_column_cp(
     ax: matplotlib.axes.Axes,
@@ -101,6 +108,10 @@ def plot_mode_grid(
       times its scaled `subject_mode` coefficient (`scaled_evolving_curves`),
       drawn as a per-group mean +/- SEM ribbon, as in the left column of
       `plot_evolving_mode`, with group colors matching the subject boxplot.
+
+    Each row is titled "Component k"; the time and subject columns are
+    labelled `TIME_COEFFICIENT_LABEL` and `SUBJECT_COEFFICIENT_LABEL`, and
+    only the CSF colorbar `SPATIAL_COLORBAR_LABEL`.
 
     The Parenchyma/CSF columns use the same masking and percentile scaling
     as `plot_spatial_mode`. `share_colorbar_scaling` likewise mirrors that
@@ -191,7 +202,8 @@ def plot_mode_grid(
         n_components=n_components,
         n_columns=4,
         page_width=page_width,
-        width_to_height_ratio=image_with_colorbar_ratio
+        width_to_height_ratio=_LABEL_ROOM
+        * image_with_colorbar_ratio
         / (sum(width_ratios) / len(width_ratios)),
     )
     fig, axs = plt.subplots(
@@ -228,7 +240,20 @@ def plot_mode_grid(
             )
         else:
             plot_time_column_cp(time_ax, scaled_time_mode, time_points, component)
-        time_ax.set_ylabel(f"Component {component+1}")
+        time_ax.set_ylabel(TIME_COEFFICIENT_LABEL)
+        # The row title, anchored to the y-label so it follows it however
+        # wide the tick labels are.
+        time_ax.annotate(
+            f"Component {component+1}",
+            xy=(0, 0.5),
+            xycoords=time_ax.yaxis.label,
+            xytext=(-4, 0),
+            textcoords="offset points",
+            rotation=90,
+            ha="right",
+            va="center",
+            fontweight="bold",
+        )
         if component == n_components - 1:
             time_ax.set_xlabel(TIME_LABEL)
 
@@ -242,7 +267,7 @@ def plot_mode_grid(
             legend=False,
         )
 
-        subject_ax.set_ylabel("")
+        subject_ax.set_ylabel(SUBJECT_COEFFICIENT_LABEL)
         if component == n_components - 1:
             subject_ax.set_xlabel(group_variable)
         else:
@@ -307,7 +332,8 @@ def plot_mode_grid(
                 ax,
                 im,
                 cax_divider,
-                SPATIAL_COLORBAR_LABEL,
+                # Only the rightmost colorbar is labelled.
+                SPATIAL_COLORBAR_LABEL if ax is csf_ax else None,
             )
             ax.set_xticks([])
             ax.set_yticks([])

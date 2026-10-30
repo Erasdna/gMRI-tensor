@@ -23,6 +23,7 @@
 - For data preprocessed with `--negative-cutoff`, `plot statistics` makes a region NaN when its share of invalid voxels exceeds the `--max-invalid-voxel-fraction` used then.
 - **Evolving-mode curves** (PARAFAC2, CMF; `--time` and `--mode-grid`): each subject's curve is its unit-norm shape times its scaled subject coefficient, so a subject that barely expresses a component is a near-flat line instead of a full-height curve. Every subject counts in the ribbons and group tests. A negative PARAFAC2 coefficient flips the curve.
 - **CMF subject coefficient:** the figures use the L2 norm of each subject's time course, not the RMS the fit saves (they differ when subjects have different numbers of time points).
+- **Mode-grid labels:** the time and subject columns are labelled "Time coef. (a.u.)" and "Subject coef. (a.u.)", each row is titled "Component k" in bold, and only the rightmost (CSF) colorbar is labelled. The spatial colorbars, here and in the spatial-mode figure, say "Spatial coef. (a.u.)" instead of "Loading (a.u.)".
 
 ### Removed
 - `plot decomposition --min-subject-coefficient`: with curves scaled by the subject coefficient, no cutoff is needed.

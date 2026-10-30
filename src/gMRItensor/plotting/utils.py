@@ -12,7 +12,7 @@ plt.style.use(["science", "no-latex"])
 
 # Spatial modes are unit-norm scaled by `scale_mode`, so they have no
 # physical unit.
-SPATIAL_COLORBAR_LABEL = "Loading (a.u.)"
+SPATIAL_COLORBAR_LABEL = "Spatial coef. (a.u.)"
 
 # Journal figure widths in inches, for `page_width` arguments.
 JOURNAL_WIDTHS = {"single": 3.5, "onehalf": 5.5, "double": 7.0}

@@ -1671,10 +1671,61 @@ def test_plot_mode_grid_subject_xlabel_uses_group_variable():
     plt.close(fig)
 
 
-def test_plot_mode_grid_colorbars_are_labeled():
+def test_plot_mode_grid_labels_only_the_rightmost_colorbar():
     fig, axs = plot_mode_grid(**make_mode_grid_fixture())
-    for ax in axs[:, 2:].ravel():
-        assert ax.collections[-1].colorbar.ax.get_ylabel() == "Loading (a.u.)"
+    for row in axs:
+        parenchyma, csf = (ax.collections[-1].colorbar.ax for ax in row[2:])
+        assert parenchyma.get_ylabel() == ""
+        assert csf.get_ylabel() == "Spatial coef. (a.u.)"
+    plt.close(fig)
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [make_mode_grid_fixture, make_mode_grid_parafac2_fixture],
+    ids=["cp", "parafac2"],
+)
+def test_plot_mode_grid_axis_labels_and_row_titles(fixture):
+    fig, axs = plot_mode_grid(**fixture(n_components=3))
+    for component, row in enumerate(axs):
+        time_ax, subject_ax = row[0], row[1]
+        assert time_ax.get_ylabel() == "Time coef. (a.u.)"
+        assert subject_ax.get_ylabel() == "Subject coef. (a.u.)"
+        (title,) = [t for t in time_ax.texts if t.get_text().startswith("Component")]
+        assert title.get_text() == f"Component {component + 1}"
+        assert title.get_fontweight() == "bold"
+    plt.close(fig)
+
+
+@pytest.mark.parametrize(
+    "fixture",
+    [make_mode_grid_fixture, make_mode_grid_parafac2_fixture],
+    ids=["cp", "parafac2"],
+)
+def test_plot_mode_grid_parenchyma_colorbar_stays_clear_of_the_csf_image(fixture):
+    """Regression: the y-labels narrow the image columns, and the colorbar
+    insets (outside the layout) then ran into the next column."""
+    fig, axs = plot_mode_grid(**fixture(n_components=3))
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    for row in axs:
+        colorbar = row[2].collections[-1].colorbar.ax
+        assert (
+            colorbar.get_tightbbox(renderer).x1 <= row[3].get_window_extent(renderer).x0
+        )
+    plt.close(fig)
+
+
+def test_plot_mode_grid_row_title_sits_left_of_the_time_label():
+    fig, axs = plot_mode_grid(**make_mode_grid_fixture())
+    fig.canvas.draw()
+    renderer = fig.canvas.get_renderer()
+    time_ax = axs[0, 0]
+    (title,) = [t for t in time_ax.texts if t.get_text().startswith("Component")]
+    title_box = title.get_window_extent(renderer)
+    label_box = time_ax.yaxis.label.get_window_extent(renderer)
+    assert title_box.x1 <= label_box.x0
+    assert title_box.x0 >= 0  # inside the figure
     plt.close(fig)
 
 
@@ -1689,7 +1740,7 @@ def test_plot_spatial_mode_colorbars_are_labeled():
     ):
         for row in axs:
             colorbar = row[2].collections[-1].colorbar
-            assert colorbar.ax.get_ylabel() == "Loading (a.u.)"
+            assert colorbar.ax.get_ylabel() == "Spatial coef. (a.u.)"
         plt.close(fig)
 
 
