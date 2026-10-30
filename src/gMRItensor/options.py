@@ -18,6 +18,7 @@ from gMRItensor.decomposition.restarts import _resolve_options
 from gMRItensor.group_statistics import Aggregate
 from gMRItensor.group_statistics import AGGREGATES
 from gMRItensor.group_statistics import require_columns
+from gMRItensor.model_io import model_method
 from gMRItensor.model_io import resolve_model
 from gMRItensor.noise import COMPARTMENTS
 from gMRItensor.noise import NOISE_SOURCES
@@ -725,6 +726,94 @@ class SubjectStatisticsOptions:
         _check(0 < self.alpha < 1, f"alpha must be in (0, 1), got {self.alpha}")
         _check_subject_prefix(self.subject_prefix)
         _require_file(resolve_model(self.model)[0], "model")
+        _check_subject_columns(
+            self.subject_info,
+            {column: flag for flag, columns in flags.items() for column in columns},
+        )
+
+
+@dataclass(frozen=True)
+class CurvePredictionOptions:
+    """`gmri predict`: how well each component's time profile predicts
+    numerical clinical `outcomes` (`gMRItensor.curve_prediction`).
+
+    For PARAFAC2 and CMF models only: CP's time mode is shared, so its
+    curves add nothing to the subject coefficients. The models account for
+    no, each single and all primary columns. Subjects are split once into a
+    training part and a `test_fraction` test part, stratified by
+    `stratify_by` (default: the first primary categorical column); models
+    are cross-validated on the training part (`cv_folds`-fold,
+    `cv_repeats` times) and scored once on the test part. p-values come
+    from `n_permutations` permutations drawn from `seed`; `significant` is
+    the Benjamini-Hochberg p of the curve's gain below `alpha`.
+    """
+
+    model: Path
+    subject_info: Path
+    output_dir: Path
+    outcomes: tuple[str, ...] = ()
+    primary_categorical: tuple[str, ...] = ()
+    primary_numerical: tuple[str, ...] = ()
+    stratify_by: str | None = None
+    test_fraction: float = 0.2
+    cv_folds: int = 5
+    cv_repeats: int = 10
+    n_permutations: int = 1000
+    seed: int = 0
+    alpha: float = 0.05
+    subject_prefix: str = ""
+
+    @property
+    def primary(self) -> tuple[str, ...]:
+        return self.primary_categorical + self.primary_numerical
+
+    @property
+    def strata(self) -> str | None:
+        """The column the split and folds are stratified by, if any."""
+        if self.stratify_by is not None:
+            return self.stratify_by
+        return self.primary_categorical[0] if self.primary_categorical else None
+
+    def __post_init__(self) -> None:
+        flags = {
+            "--outcomes": self.outcomes,
+            "--primary-categorical": self.primary_categorical,
+            "--primary-numerical": self.primary_numerical,
+        }
+        named = [column for columns in flags.values() for column in columns]
+        repeated = sorted({column for column in named if named.count(column) > 1})
+        _check(bool(self.outcomes), "at least one outcome column is needed")
+        _check(not repeated, f"columns named more than once: {repeated}")
+        _check(
+            "subjects" not in named,
+            "'subjects' is the subject id column, not a variable",
+        )
+        _check(
+            self.stratify_by is None or self.stratify_by in self.primary_categorical,
+            f"stratify_by must be a --primary-categorical column, got "
+            f"{self.stratify_by!r}",
+        )
+        _check(
+            0 < self.test_fraction < 0.5,
+            f"test_fraction must be in (0, 0.5), got {self.test_fraction}",
+        )
+        _check(self.cv_folds >= 2, f"cv_folds must be >= 2, got {self.cv_folds}")
+        _check(self.cv_repeats >= 1, f"cv_repeats must be >= 1, got {self.cv_repeats}")
+        _check(
+            self.n_permutations >= 100,
+            f"n_permutations must be >= 100, got {self.n_permutations}",
+        )
+        _check(0 < self.alpha < 1, f"alpha must be in (0, 1), got {self.alpha}")
+        _check_subject_prefix(self.subject_prefix)
+        model_file = resolve_model(self.model)[0]
+        _require_file(model_file, "model")
+        method = model_method(model_file)
+        _check(
+            method in ("parafac2", "cmf"),
+            f"gmri predict needs a PARAFAC2 or CMF model, got {method}: CP's time "
+            "mode is shared by all subjects, so its curves add nothing to the "
+            "subject coefficients (test those with gmri stats)",
+        )
         _check_subject_columns(
             self.subject_info,
             {column: flag for flag, columns in flags.items() for column in columns},

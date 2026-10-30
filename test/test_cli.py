@@ -824,3 +824,124 @@ def test_cli_stats(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     assert (results / "stats.json").exists()
 
     assert _run([*argv[:-2], "--primary-numerical", "sex"]) == 2
+
+
+def _evolving_model(directory: Path, method: str, n: int, rng: Any) -> Path:
+    """A saved PARAFAC2/CMF model of `n` subjects, rank 2, 4 time points;
+    subject k's component-2 curve scales with k."""
+    directory.mkdir()
+    timepoints = [np.array([0, 6, 24, 48])] * n
+    shape = np.array([[0.2, 1.0], [1.0, 0.6], [0.6, 0.3], [0.2, 0.1]])
+    states = [
+        shape * [rng.uniform(0.8, 1.2), 0.5 + k / n] + rng.normal(0, 0.01, (4, 2))
+        for k in range(n)
+    ]
+    save_decomposition(
+        directory / "model.h5",
+        SavedDecomposition(
+            method=method,  # type: ignore[arg-type]
+            rank=2,
+            error=0.1,
+            weights=np.ones(2),
+            subject_mode=np.ones((n, 2)),
+            label_mode=rng.uniform(size=(4, 2)),
+            subjects=np.array([f"sub-{i:02d}" for i in range(n)]),
+            timepoints=timepoints,
+            labels=np.arange(4),
+            label_index=np.zeros(4, dtype=int),
+            evolving_states=states,
+        ),
+    )
+    return directory
+
+
+@pytest.mark.parametrize("method", ["cmf", "parafac2"])
+def test_cli_predict(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    method: str,
+) -> None:
+    rng = np.random.default_rng(0)
+    n = 30
+    model_dir = _evolving_model(tmp_path / f"{method}_rank_2", method, n, rng)
+    info = pd.DataFrame(
+        {
+            "subjects": [f"sub-{i:02d}" for i in range(n)],
+            "diagnosis": np.resize(["Control", "PD"], n),
+            "age": rng.normal(65, 8, n).round(1),
+            "egfr": 60 + 40 * np.arange(n) / n + rng.normal(0, 2, n),
+        },
+    )
+    subject_info = tmp_path / "subjects.csv"
+    info.to_csv(subject_info, index=False)
+    results = tmp_path / "results"
+    argv = [
+        "predict",
+        "--model",
+        model_dir,
+        "--subject-info",
+        subject_info,
+        "--output-dir",
+        results,
+        "--outcomes",
+        "egfr",
+        "--primary-categorical",
+        "diagnosis",
+        "--primary-numerical",
+        "age",
+        "--n-permutations",
+        200,
+        "--cv-repeats",
+        3,
+    ]
+
+    assert _run(argv) == 0
+
+    out = capsys.readouterr().out
+    assert "egfr: best by CV R²" in out
+    table = pd.read_csv(
+        results / "statistics" / f"{method}_rank_2__curve_prediction.csv",
+    )
+    assert len(table) == 4 * 3  # 4 covariate sets x (baseline + 2 components)
+    assert table["significant"].any()  # component 2's curve carries egfr
+    assert (results / "predict.json").exists()
+
+
+def test_cli_predict_refuses_a_cp_model(tmp_path: Path) -> None:
+    rng = np.random.default_rng(0)
+    model_dir = tmp_path / "cp_rank_2"
+    model_dir.mkdir()
+    save_decomposition(
+        model_dir / "model.h5",
+        SavedDecomposition(
+            method="cp",
+            rank=2,
+            error=0.1,
+            weights=np.ones(2),
+            subject_mode=np.ones((4, 2)),
+            label_mode=rng.uniform(size=(3, 2)),
+            subjects=np.array(["a", "b", "c", "d"]),
+            timepoints=np.arange(3),
+            labels=np.arange(3),
+            label_index=np.zeros(3, dtype=int),
+            time_mode=rng.uniform(size=(3, 2)),
+        ),
+    )
+    subject_info = tmp_path / "subjects.csv"
+    pd.DataFrame({"subjects": ["a", "b", "c", "d"], "egfr": [1, 2, 3, 4]}).to_csv(
+        subject_info,
+        index=False,
+    )
+    argv = [
+        "predict",
+        "--model",
+        model_dir,
+        "--subject-info",
+        subject_info,
+        "--output-dir",
+        tmp_path / "results",
+        "--outcomes",
+        "egfr",
+    ]
+
+    assert _run(argv) == 2

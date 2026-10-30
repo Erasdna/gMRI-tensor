@@ -10,6 +10,10 @@ writes two tables to `<output-dir>/statistics/`:
   kidney clearance or a sleep score), adjusted for all primary variables.
   It is only written when clinical columns are given.
 
+Whether a component's *time profile* predicts a clinical variable is a
+different question, answered by `gmri predict`
+([curve-prediction.md](curve-prediction.md)).
+
 This page explains what is tested, every column of the two tables, which
 p-value to use, and what to watch out for. The command line itself is
 described in [cli.md](cli.md#gmri-stats).

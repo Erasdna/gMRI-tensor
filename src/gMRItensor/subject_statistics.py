@@ -385,18 +385,27 @@ def clinical_effects(
     return _effects(coefficients, info, tests, categorical, n_permutations, seed)
 
 
-def add_fdr(table: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
-    """`table` with `p_fdr`, Benjamini-Hochberg over its tested terms (a
-    factor's contrast rows share one `p_perm` and count once; untested rows
-    are left out), and `significant` = `p_fdr < alpha`."""
+def add_fdr(
+    table: pd.DataFrame,
+    alpha: float = 0.05,
+    keys: Sequence[str] = ("component", "term"),
+    p_column: str = "p_perm",
+) -> pd.DataFrame:
+    """`table` with `p_fdr`, Benjamini-Hochberg over its tested rows, and
+    `significant` = `p_fdr < alpha`.
+
+    Rows sharing `keys` are one test (a factor's contrast rows share one
+    `p_perm`) and count once; rows without `p_column` are left out.
+    """
     table = table.copy()
-    terms = table.dropna(subset=["p_perm"]).drop_duplicates(["component", "term"])
-    adjusted: dict[tuple[Any, Any], float] = {}
-    if len(terms):
-        p_fdr = multipletests(terms["p_perm"], method="fdr_bh")[1]
-        adjusted = dict(zip(zip(terms["component"], terms["term"]), p_fdr))
+    keys = list(keys)
+    tests = table.dropna(subset=[p_column]).drop_duplicates(keys)
+    adjusted: dict[tuple[Any, ...], float] = {}
+    if len(tests):
+        p_fdr = multipletests(tests[p_column], method="fdr_bh")[1]
+        adjusted = dict(zip(map(tuple, tests[keys].to_numpy()), p_fdr))
     table["p_fdr"] = [
-        adjusted.get(key, np.nan) for key in zip(table["component"], table["term"])
+        adjusted.get(tuple(key), np.nan) for key in table[keys].to_numpy()
     ]
     table["significant"] = table["p_fdr"] < alpha
     return table

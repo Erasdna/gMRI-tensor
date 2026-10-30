@@ -21,6 +21,7 @@ from typing import Any
 from gMRItensor import pipeline
 from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.group_statistics import AGGREGATES
+from gMRItensor.options import CurvePredictionOptions
 from gMRItensor.options import DECOMPOSITION_PARTS
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
@@ -879,6 +880,103 @@ def _add_stats(commands: Any) -> None:
     )
 
 
+def _add_predict(commands: Any) -> None:
+    parser = commands.add_parser(
+        "predict",
+        help="how well each component's time profile predicts clinical columns "
+        "(PARAFAC2/CMF)",
+        description=(
+            "For a PARAFAC2 or CMF model: predict each numerical outcome column "
+            "from one component's time profile (its curve times its subject "
+            "coefficient), with no, each single and all primary columns as "
+            "covariates, each against the same model without the curve. Models "
+            "are cross-validated on a training part and scored once on a held-out "
+            "test part. See docs/curve-prediction-columns.md for every output column."
+        ),
+    )
+    parser.add_argument(
+        "--model",
+        type=Path,
+        required=True,
+        help="PARAFAC2 or CMF model directory <method>_rank_<r>/ (or its model.h5)",
+    )
+    parser.add_argument(
+        "--subject-info",
+        type=Path,
+        required=True,
+        help="CSV with a subjects column",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        help="results directory",
+    )
+    parser.add_argument(
+        "--outcomes",
+        nargs="+",
+        required=True,
+        metavar="COLUMN",
+        help="numerical clinical columns to predict",
+    )
+    for kind in ("categorical", "numerical"):
+        parser.add_argument(
+            f"--primary-{kind}",
+            nargs="+",
+            default=[],
+            metavar="COLUMN",
+            help=f"{kind} primary columns, used as covariates",
+        )
+    parser.add_argument(
+        "--stratify-by",
+        metavar="COLUMN",
+        help="primary categorical column the split and folds keep balanced "
+        "(default: the first --primary-categorical column)",
+    )
+    parser.add_argument(
+        "--test-fraction",
+        type=float,
+        default=0.2,
+        help="share of subjects held out as the test part (default: %(default)g)",
+    )
+    parser.add_argument(
+        "--cv-folds",
+        type=int,
+        default=5,
+        help="folds of the cross-validation (default: %(default)d)",
+    )
+    parser.add_argument(
+        "--cv-repeats",
+        type=int,
+        default=10,
+        help="repeats of the cross-validation (default: %(default)d)",
+    )
+    parser.add_argument(
+        "--n-permutations",
+        type=int,
+        default=1000,
+        help="permutations per test (default: %(default)d)",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="seed of the split, the folds and the permutations (default: %(default)d)",
+    )
+    parser.add_argument(
+        "--alpha",
+        type=float,
+        default=0.05,
+        help="FDR level for the significant column (default: %(default)g)",
+    )
+    parser.add_argument(
+        "--subject-prefix",
+        default="",
+        metavar="PREFIX",
+        help="prepended as PREFIX_ to the table name",
+    )
+
+
 def _slices(values: list[int] | None) -> tuple[int, int, int] | None:
     return (values[0], values[1], values[2]) if values else None
 
@@ -907,6 +1005,7 @@ def _parser() -> argparse.ArgumentParser:
     )
     _add_plot(commands)
     _add_stats(commands)
+    _add_predict(commands)
     return parser
 
 
@@ -1195,6 +1294,30 @@ def _run_stats(args: argparse.Namespace) -> None:
     )
 
 
+def _run_predict(args: argparse.Namespace) -> None:
+    options = CurvePredictionOptions(
+        model=args.model,
+        subject_info=args.subject_info,
+        output_dir=args.output_dir,
+        outcomes=tuple(args.outcomes),
+        primary_categorical=tuple(args.primary_categorical),
+        primary_numerical=tuple(args.primary_numerical),
+        stratify_by=args.stratify_by,
+        test_fraction=args.test_fraction,
+        cv_folds=args.cv_folds,
+        cv_repeats=args.cv_repeats,
+        n_permutations=args.n_permutations,
+        seed=args.seed,
+        alpha=args.alpha,
+        subject_prefix=args.subject_prefix,
+    )
+    result = pipeline.run_curve_prediction(options)
+    print(pipeline.format_curve_prediction(result.table, options.alpha))
+    print(
+        f"Table: {result.file}. Column meanings: docs/curve-prediction-columns.md.",
+    )
+
+
 _PLOTS: dict[str, Callable[[argparse.Namespace], None]] = {
     "statistics": _plot_statistics,
     "overview": _plot_overview,
@@ -1219,6 +1342,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "replicability": _run_fit_command,
         "plot": _run_plot,
         "stats": _run_stats,
+        "predict": _run_predict,
     }
     try:
         handlers[args.command](args)

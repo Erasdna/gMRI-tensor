@@ -221,6 +221,13 @@ def load_decomposition(path: Path) -> SavedDecomposition:
     return sort_components(_read_decomposition(path))
 
 
+def model_method(path: Path) -> str:
+    """The `method` of a `save_decomposition` file ("cp", "parafac2" or
+    "cmf"), read without loading its factors."""
+    with h5py.File(path, "r") as file:
+        return str(file.attrs["method"])
+
+
 def _read_decomposition(path: Path) -> SavedDecomposition:
     """A `save_decomposition` file exactly as stored."""
     with h5py.File(path, "r") as file:

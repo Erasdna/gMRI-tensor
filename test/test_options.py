@@ -2,7 +2,9 @@ import dataclasses
 from pathlib import Path
 from typing import Any
 
+import h5py
 import pytest
+from gMRItensor.options import CurvePredictionOptions
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
 from gMRItensor.options import FitOptions
@@ -514,3 +516,43 @@ def test_subject_statistics_options(tmp_path: Path) -> None:
             **dict(common, model=tmp_path / "missing.h5"),
             primary_numerical=("age",),
         )
+
+
+def _h5_model(path: Path, method: str) -> Path:
+    with h5py.File(path, "w") as file:
+        file.attrs["method"] = method
+    return path
+
+
+def test_curve_prediction_options(tmp_path: Path) -> None:
+    common: dict[str, Any] = {
+        "model": _h5_model(tmp_path / "cmf_rank_2.h5", "cmf"),
+        "subject_info": _subject_info(tmp_path),
+        "output_dir": tmp_path,
+        "outcomes": ("age",),
+        "primary_categorical": ("diagnosis", "sex"),
+    }
+
+    options = CurvePredictionOptions(**common)
+    assert options.primary == ("diagnosis", "sex")
+    assert options.strata == "diagnosis"
+    assert CurvePredictionOptions(**common, stratify_by="sex").strata == "sex"
+    assert CurvePredictionOptions(**dict(common, primary_categorical=())).strata is None
+
+    cp = _h5_model(tmp_path / "cp_rank_2.h5", "cp")
+    with pytest.raises(ValueError, match="needs a PARAFAC2 or CMF model, got cp"):
+        CurvePredictionOptions(**dict(common, model=cp))
+    with pytest.raises(ValueError, match="at least one outcome"):
+        CurvePredictionOptions(**dict(common, outcomes=()))
+    with pytest.raises(ValueError, match=r"more than once: \['sex'\]"):
+        CurvePredictionOptions(**dict(common, outcomes=("sex",)))
+    with pytest.raises(ValueError, match="test_fraction"):
+        CurvePredictionOptions(**common, test_fraction=0.6)
+    with pytest.raises(ValueError, match="stratify_by"):
+        CurvePredictionOptions(**common, stratify_by="age")
+    with pytest.raises(ValueError, match="cv_folds"):
+        CurvePredictionOptions(**common, cv_folds=1)
+    with pytest.raises(ValueError, match="n_permutations"):
+        CurvePredictionOptions(**common, n_permutations=10)
+    with pytest.raises(ValueError, match="'egfr' \\(--outcomes\\)"):
+        CurvePredictionOptions(**dict(common, outcomes=("egfr",)))

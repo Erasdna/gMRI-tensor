@@ -10,10 +10,11 @@
 | `gmri replicability run\|plan\|collect` | the same, plus the subject info CSV with `--stratify-by` | `replicability.csv`, `excluded_subjects.csv`, `excluded_columns.csv` |
 | `gmri plot decomposition` | a model directory, subject info CSV, optionally a segmentation; for `--outliers`, the data the model was fitted to | `<output-dir>/figures/decomposition/` |
 | `gmri stats` | a model directory, subject info CSV | `<output-dir>/statistics/` |
+| `gmri predict` | a PARAFAC2 or CMF model directory, subject info CSV | `<output-dir>/statistics/` |
 | `gmri plot group-maps` | `roi_signal.parquet` (plus a segmentation) or `voxels.parquet`, subject info CSV | `<output-dir>/figures/group_maps/` |
 | `gmri plot reproducibility` | a `reproducibility.csv` | the figure, next to the CSV or at `--output` |
 
-- **Provenance:** every command records its settings and the package version as JSON, with absolute paths: `preprocess.json`, `plot_statistics.json`, `replicability.json`, `plot_decomposition.json`, `stats.json` and `plot_group_maps.json` in `<output-dir>`, and each model's `decompose.json` in its own directory. `plan` saves `plan.json` instead; `run --job` and `plot reproducibility` write none.
+- **Provenance:** every command records its settings and the package version as JSON, with absolute paths: `preprocess.json`, `plot_statistics.json`, `replicability.json`, `plot_decomposition.json`, `stats.json`, `predict.json` and `plot_group_maps.json` in `<output-dir>`, and each model's `decompose.json` in its own directory. `plan` saves `plan.json` instead; `run --job` and `plot reproducibility` write none.
 - **Errors:** an invalid argument or a missing input stops the command before it writes anything. The command prints a one-line message and exits with code 2.
 - **Arguments:** flags must be written out in full; abbreviations such as `--tol` are refused. An argument that would have no effect in its combination (e.g. `--splits` with `--engine halfhalf`) is an error rather than being ignored.
 
@@ -416,6 +417,37 @@ explains every output column and how to read the tables.**
 - **Tests:** p-values come from Freedman–Lane permutations of the partial F statistic (Freedman & Lane 1983; Winkler et al. 2014). Benjamini–Hochberg correction is applied over all components and variables of each table, with the primary and clinical tables corrected separately. The permutations assume comparable residuals between subjects; strongly unequal group variances combined with very unequal group sizes make p-values somewhat liberal.
 - **Reading the tables:** primary rows are total effects given the other primary variables. Clinical rows are the association *beyond* the primary variables. Adjusting for diagnosis can absorb a clinical variable that is itself a consequence of the disease, and a high `vif` flags this.
 - **Terminal output:** the significant rows of each table, and every `note`.
+
+## `gmri predict`
+
+```bash
+gmri predict --model results/cmf/cmf_rank_3 --subject-info subjects.csv --output-dir results \
+    --outcomes egfr psqi --primary-categorical diagnosis sex --primary-numerical age \
+    [--test-fraction 0.2] [--cv-folds 5] [--cv-repeats 10] [--stratify-by diagnosis] \
+    [--n-permutations 1000] [--seed 0] [--subject-prefix clinical]
+```
+
+How well each component's time profile (its curve times the subject coefficient, as in `<model>__time_coefficients.csv`) predicts each outcome, with no, each single and all primary variables as covariates, each against the same model without the profile. PARAFAC2 and CMF models only: a CP model is refused, since its time mode is shared by all subjects (use `gmri stats`). **[curve-prediction.md](curve-prediction.md) explains the workflow and how to compare the models; [curve-prediction-columns.md](curve-prediction-columns.md) every output column and how it is computed.**
+
+| Argument | Default | Meaning |
+|---|---|---|
+| `--model` | required | A PARAFAC2 or CMF model directory `<method>_rank_<r>/` (or its `model.h5`). |
+| `--subject-info`, `--output-dir` | required | Subjects, and the results directory. Writes `statistics/<model>__curve_prediction.csv`. |
+| `--outcomes` | required | Numerical clinical columns to predict. |
+| `--primary-categorical`, `--primary-numerical` | none | Covariates (e.g. diagnosis, sex, age). |
+| `--stratify-by` | the first `--primary-categorical` column | A primary categorical column kept balanced between the training and test parts and across the folds. |
+| `--test-fraction` | `0.2` | Share of subjects held out as the test part, scored once. |
+| `--cv-folds`, `--cv-repeats` | `5`, `10` | Repeated k-fold cross-validation on the training part. |
+| `--n-permutations` | `1000` | Permutations for `p_perm` (the model against chance) and `p_gain` (the profile against its baseline). |
+| `--seed` | `0` | Seed of the split, the folds and the permutations; the same seed gives the same table. |
+| `--alpha` | `0.05` | FDR level of the `significant` column. |
+| `--subject-prefix` | none | Prepended as `<prefix>_` to the table name. |
+
+- **Models:** ordinary least squares, per outcome, covariate set S and component: `outcome ~ S` (the baseline) and `outcome ~ S + profile`, the profile's value at every time point.
+- **Subjects:** as for `gmri stats`. Per outcome, the subjects with the outcome, every covariate and every scan are used, and all models of that outcome share them, their split and their folds.
+- **Scores:** cross-validated R², RMSE and MAE (mean and SD over repeats), the same on the test part, and AIC, BIC and adjusted R² of the fit on the training part.
+- **Tests:** `p_gain` comes from Freedman–Lane permutations of the baseline's residuals, and is Benjamini–Hochberg corrected over all profile models in the table (`p_fdr`, `significant`).
+- **Terminal output:** per outcome its best model by cross-validated R², the profile models that add significantly to their baseline, and every `note`.
 
 ## `gmri plot group-maps`
 

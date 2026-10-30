@@ -25,6 +25,8 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
+from gMRItensor.curve_prediction import evaluate_curves
+from gMRItensor.curve_prediction import PREDICTION_COLUMNS
 from gMRItensor.decomposition import CMFModel
 from gMRItensor.decomposition import ConvergenceError
 from gMRItensor.decomposition import Method
@@ -67,6 +69,7 @@ from gMRItensor.noise import COMPARTMENTS
 from gMRItensor.noise import cutoffs_from_sigma
 from gMRItensor.noise import summarize_noise
 from gMRItensor.options import CONCENTRATION_STATISTICS
+from gMRItensor.options import CurvePredictionOptions
 from gMRItensor.options import DecompositionOptions
 from gMRItensor.options import DecompositionPlotOptions
 from gMRItensor.options import FitOptions
@@ -2242,6 +2245,48 @@ def run_decomposition_plots(options: DecompositionPlotOptions) -> list[Path]:
 # Subject-coefficient statistics
 
 
+class _StatsInputs(NamedTuple):
+    """A saved model, its stem, the indices of its subjects with a
+    subject-info row (`keep`) and those rows, in the model's order,
+    indexed by subject."""
+
+    saved: SavedDecomposition
+    stem: str
+    keep: list[int]
+    info: pd.DataFrame
+
+
+def _stats_inputs(model: Path, subject_info_path: Path) -> _StatsInputs:
+    """Load `model` and match its subjects to `subject_info_path`; subjects
+    without a row are left out with a note. Raises `ValueError` if the CSV
+    has no `subjects` column or repeats a subject."""
+    model_file, stem = resolve_model(model)
+    saved = load_decomposition(model_file)
+    subject_info = _read_subject_info(subject_info_path)
+    if "subjects" not in subject_info.columns:
+        raise ValueError(f"{subject_info_path} has no 'subjects' column")
+    repeated = subject_info["subjects"][subject_info["subjects"].duplicated()]
+    if len(repeated):
+        raise ValueError(
+            f"{subject_info_path} repeats subject(s) {', '.join(repeated.unique())}",
+        )
+    subject_info = subject_info.set_index("subjects")
+    subjects = [str(s) for s in saved.subjects]
+    keep = [i for i, s in enumerate(subjects) if s in subject_info.index]
+    dropped = [s for s in subjects if s not in subject_info.index]
+    if dropped:
+        print(
+            f"Leaving out {len(dropped)} subject(s) without a row in "
+            f"{subject_info_path}: {', '.join(dropped)}",
+        )
+    return _StatsInputs(
+        saved,
+        stem,
+        keep,
+        subject_info.loc[[subjects[i] for i in keep]],
+    )
+
+
 class SubjectStatisticsResult(NamedTuple):
     """`run_subject_statistics` output: the `primary` table, the `clinical`
     one (None without clinical columns) and the CSV files written."""
@@ -2266,27 +2311,9 @@ def run_subject_statistics(
     front when one is set. Raises `ValueError` if `subject_info` has no
     `subjects` column or repeats a subject.
     """
-    model_file, stem = resolve_model(options.model)
-    saved = load_decomposition(model_file)
-    subject_info = _read_subject_info(options.subject_info)
-    if "subjects" not in subject_info.columns:
-        raise ValueError(f"{options.subject_info} has no 'subjects' column")
-    repeated = subject_info["subjects"][subject_info["subjects"].duplicated()]
-    if len(repeated):
-        raise ValueError(
-            f"{options.subject_info} repeats subject(s) {', '.join(repeated.unique())}",
-        )
-    subject_info = subject_info.set_index("subjects")
-    subjects = [str(s) for s in saved.subjects]
-    keep = [i for i, s in enumerate(subjects) if s in subject_info.index]
-    dropped = [s for s in subjects if s not in subject_info.index]
-    if dropped:
-        print(
-            f"Leaving out {len(dropped)} subject(s) without a row in "
-            f"{options.subject_info}: {', '.join(dropped)}",
-        )
+    inputs = _stats_inputs(options.model, options.subject_info)
+    saved, stem, keep, info = inputs.saved, inputs.stem, inputs.keep, inputs.info
     coefficients = scale_mode(subject_coefficients(saved)[keep])
-    info = subject_info.loc[[subjects[i] for i in keep]]
 
     arguments: dict[str, Any] = {
         "categorical": options.categorical,
@@ -2309,7 +2336,6 @@ def run_subject_statistics(
             ),
             options.alpha,
         )
-
     out_dir = Path(options.output_dir) / "statistics"
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = f"{options.subject_prefix}_" if options.subject_prefix else ""
@@ -2340,6 +2366,114 @@ def format_subject_statistics(table: pd.DataFrame, title: str, alpha: float) -> 
         ]
     notes = table.loc[table["note"] != "", ["term", "note"]].drop_duplicates()
     lines += [f"  note, {term}: {note}" for term, note in notes.itertuples(index=False)]
+    return "\n".join(lines)
+
+
+# --------------------------------------------------------------------------
+# Predicting clinical variables from the time profiles
+
+
+class CurvePredictionResult(NamedTuple):
+    """`run_curve_prediction` output: the table and the CSV written."""
+
+    table: pd.DataFrame
+    file: Path
+
+
+def model_curves(saved: SavedDecomposition) -> dict[int, pd.DataFrame]:
+    """Per component (1-based), each subject's curve as drawn and saved in
+    `<model>__time_coefficients.csv`: subjects x time points, NaN where a
+    subject has no scan. PARAFAC2 and CMF only."""
+    if saved.evolving_states is None:
+        raise ValueError(
+            f"a {saved.method} model has no per-subject time profiles; "
+            "use a PARAFAC2 or CMF model",
+        )
+    subjects = [str(s) for s in saved.subjects]
+    table = _time_coefficients_table(saved, subjects, subject_coefficients(saved))
+    return {
+        r
+        + 1: table.pivot(
+            index="subject",
+            columns="timepoint",
+            values=f"component_{r + 1}",
+        ).reindex(subjects)
+        for r in range(saved.rank)
+    }
+
+
+def run_curve_prediction(options: CurvePredictionOptions) -> CurvePredictionResult:
+    """`gmri predict`: how well each component's time profile predicts each
+    outcome, beyond no, each single and all primary columns
+    (`curve_prediction.evaluate_curves`, with `add_fdr` on `p_gain`).
+
+    Subjects are matched to `subject_info` as by `gmri stats`. Writes
+    `<output_dir>/statistics/<model>__curve_prediction.csv`, with
+    `<subject_prefix>_` in front when one is set.
+    """
+    inputs = _stats_inputs(options.model, options.subject_info)
+    subjects = [str(inputs.saved.subjects[i]) for i in inputs.keep]
+    curves = {
+        component: frame.loc[subjects]
+        for component, frame in model_curves(inputs.saved).items()
+    }
+    table = add_fdr(
+        evaluate_curves(
+            curves,
+            options.outcomes,
+            inputs.info,
+            options.primary,
+            options.primary_categorical,
+            stratify_by=options.strata,
+            test_fraction=options.test_fraction,
+            folds=options.cv_folds,
+            repeats=options.cv_repeats,
+            n_permutations=options.n_permutations,
+            seed=options.seed,
+        ),
+        options.alpha,
+        keys=("outcome", "component", "covariates"),
+        p_column="p_gain",
+    ).reindex(columns=PREDICTION_COLUMNS)
+    out_dir = Path(options.output_dir) / "statistics"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    prefix = f"{options.subject_prefix}_" if options.subject_prefix else ""
+    path = out_dir / f"{prefix}{inputs.stem}__curve_prediction.csv"
+    table.to_csv(path, index=False)
+    write_provenance(Path(options.output_dir), "predict", options)
+    return CurvePredictionResult(table, path)
+
+
+def format_curve_prediction(table: pd.DataFrame, alpha: float) -> str:
+    """The terminal lines: per outcome its best model by CV R², and every
+    curve model whose gain over its baseline is significant."""
+    lines = []
+    for outcome, rows in table.groupby("outcome", sort=False):
+        scored = rows.dropna(subset=["cv_r2"])
+        if scored.empty:
+            lines.append(f"{outcome}: no model could be scored.")
+            continue
+        best = scored.loc[scored["cv_r2"].idxmax()]
+        which = "" if pd.isna(best["component"]) else f", component {best['component']}"
+        lines.append(
+            f"{outcome}: best by CV R² is '{best['model']}'{which}: CV R² "
+            f"{best['cv_r2']:.2f} ± {best['cv_r2_sd']:.2f}, test R² {best['test_r2']:.2f}.",
+        )
+    significant = table.loc[
+        table["significant"],
+        ["outcome", "component", "model", "cv_r2", "cv_r2_gain", "p_fdr"],
+    ]
+    if significant.empty:
+        lines.append(f"No curve adds significantly to its baseline (FDR p < {alpha}).")
+    else:
+        lines += [
+            f"Curves that add to their baseline (FDR p < {alpha}):",
+            significant.round(3).to_string(index=False),
+        ]
+    notes = table.loc[table["note"] != "", ["outcome", "note"]].drop_duplicates()
+    lines += [
+        f"  note, {outcome}: {note}" for outcome, note in notes.itertuples(index=False)
+    ]
     return "\n".join(lines)
 
 
