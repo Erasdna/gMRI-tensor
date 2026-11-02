@@ -3,9 +3,12 @@
 Per component, a linear model of the coefficient tests each primary
 variable (e.g. diagnosis, sex, age) with the other primary variables as
 nuisance, and each clinical variable with all primary variables as
-nuisance. p-values are Freedman-Lane permutation p-values of the term's
-partial F (Freedman & Lane 1983; Winkler et al. 2014), BH-corrected per
-table (`add_fdr`). `docs/subject-statistics.md` explains every column.
+nuisance; on request, a clinical variable's slope within each group of a
+categorical primary variable and the slopes' differences
+(`interaction_effects`). p-values are Freedman-Lane permutation p-values of
+the term's partial F (Freedman & Lane 1983; Winkler et al. 2014),
+BH-corrected per table (`add_fdr`). `docs/subject-statistics.md` explains
+every column.
 """
 from collections.abc import Collection
 from collections.abc import Sequence
@@ -39,6 +42,8 @@ COLUMNS = (
     "significant",
     "note",
 )
+#: The columns of an `interaction_effects` table: `COLUMNS` with `test`.
+INTERACTION_COLUMNS = (*COLUMNS[:2], "test", *COLUMNS[2:])
 #: Permuted residuals are scored this many permutations at a time.
 _CHUNK = 1000
 
@@ -224,6 +229,52 @@ def _empty_rows(
     ]
 
 
+def _block_rows(
+    y: np.ndarray,
+    design: pd.DataFrame,
+    tested: Sequence[str],
+    orders: np.ndarray,
+) -> list[dict[str, Any]]:
+    """The `tested` columns of `design` (no intercept) against all its
+    other columns: per component (column of `y`) and tested column, the OLS
+    `estimate`, CI and `p_parametric`, and the block's `partial_r2`, `vif`
+    and Freedman-Lane `p_perm`. Each row also holds its `column` and the
+    residual SD `sigma`, for the caller to pop."""
+    n, k = y.shape
+    intercept = np.ones((n, 1))
+    full = np.column_stack([intercept, design.to_numpy()])
+    reduced = np.column_stack(
+        [intercept, design.drop(columns=list(tested)).to_numpy()],
+    )
+    _, p_perm = freedman_lane(y, reduced, design[list(tested)].to_numpy(), orders)
+    rss_full = ((_residual_maker(full) @ y) ** 2).sum(0)
+    rss_reduced = ((_residual_maker(reduced) @ y) ** 2).sum(0)
+    partial_r2 = (rss_reduced - rss_full) / rss_reduced
+    vif = generalised_vif(design, tested)
+    exog = pd.DataFrame(full, columns=["intercept", *design.columns])
+
+    rows = []
+    for c in range(k):
+        fit = sm.OLS(y[:, c], exog).fit()
+        for column in tested:
+            ci_low, ci_high = fit.conf_int().loc[column]
+            rows.append(
+                {
+                    "component": c + 1,
+                    "column": column,
+                    "sigma": np.sqrt(fit.mse_resid),
+                    "estimate": float(fit.params[column]),
+                    "ci_low": ci_low,
+                    "ci_high": ci_high,
+                    "partial_r2": partial_r2[c],
+                    "vif": vif,
+                    "p_parametric": float(fit.pvalues[column]),
+                    "p_perm": p_perm[c],
+                },
+            )
+    return rows
+
+
 def _term_rows(
     y: np.ndarray,
     data: pd.DataFrame,
@@ -255,50 +306,29 @@ def _term_rows(
             "; ".join(filter(None, [note, reason])),
         )
 
-    intercept = np.ones((n, 1))
-    reduced = np.column_stack([intercept, design.drop(columns=tested).to_numpy()])
     effect = design[tested].to_numpy()
-    f_value, p_perm = freedman_lane(y, reduced, effect, orders)
-    _, p_unadjusted = freedman_lane(y, intercept, effect, orders)
-    rss_full = ((_residual_maker(full) @ y) ** 2).sum(0)
-    rss_reduced = ((_residual_maker(reduced) @ y) ** 2).sum(0)
-    partial_r2 = (rss_reduced - rss_full) / rss_reduced
-    vif = generalised_vif(design, tested)
-    exog = pd.DataFrame(full, columns=["intercept", *design.columns])
-
-    rows = []
-    for c in range(k):
-        fit = sm.OLS(y[:, c], exog).fit()
-        sigma = np.sqrt(fit.mse_resid)
-        for column in tested:
-            estimate = float(fit.params[column])
-            ci_low, ci_high = fit.conf_int().loc[column]
-            row: dict[str, Any] = {
-                "component": c + 1,
-                "term": term,
-                "level": labels[term][column],
-                "n": n,
-                "covariates": covariates,
-                "estimate": estimate,
-                "ci_low": ci_low,
-                "ci_high": ci_high,
-                "partial_r2": partial_r2[c],
-                "vif": vif,
-                "p_unadjusted": p_unadjusted[c],
-                "p_parametric": float(fit.pvalues[column]),
-                "p_perm": p_perm[c],
-                "note": note,
-            }
-            if term in categorical:
-                row["standardised"] = estimate / sigma
-                row["std_kind"] = "d"
-            else:
-                x = data[term].to_numpy(dtype=float)
-                row["standardised"] = estimate * x.std(ddof=1) / y[:, c].std(ddof=1)
-                row["std_kind"] = "beta"
-                row["partial_r"] = np.sign(estimate) * np.sqrt(partial_r2[c])
-                row["r_unadjusted"] = np.corrcoef(x, y[:, c])[0, 1]
-            rows.append(row)
+    _, p_unadjusted = freedman_lane(y, np.ones((n, 1)), effect, orders)
+    rows = _block_rows(y, design, tested, orders)
+    for row in rows:
+        c = row["component"] - 1
+        sigma = row.pop("sigma")
+        row |= {
+            "term": term,
+            "level": labels[term][row.pop("column")],
+            "n": n,
+            "covariates": covariates,
+            "p_unadjusted": p_unadjusted[c],
+            "note": note,
+        }
+        if term in categorical:
+            row["standardised"] = row["estimate"] / sigma
+            row["std_kind"] = "d"
+        else:
+            x = data[term].to_numpy(dtype=float)
+            row["standardised"] = row["estimate"] * x.std(ddof=1) / y[:, c].std(ddof=1)
+            row["std_kind"] = "beta"
+            row["partial_r"] = np.sign(row["estimate"]) * np.sqrt(row["partial_r2"])
+            row["r_unadjusted"] = np.corrcoef(x, y[:, c])[0, 1]
     return rows
 
 
@@ -383,6 +413,209 @@ def clinical_effects(
     Arguments and rows as in `primary_effects`."""
     tests = [(term, list(primary)) for term in clinical]
     return _effects(coefficients, info, tests, categorical, n_permutations, seed)
+
+
+def _interaction_rows(
+    y: np.ndarray,
+    data: pd.DataFrame,
+    clinical: str,
+    group: str,
+    primary: Sequence[str],
+    categorical: Collection[str],
+    n_permutations: int,
+    seed: int,
+    note: str,
+) -> list[dict[str, Any]]:
+    """`interaction_effects` rows of one pair in its complete cases `data`:
+    the slope rows per level of `group`, then, when every level has a
+    slope, the difference rows."""
+    n, k = y.shape
+    term = f"{clinical} × {group}"
+    covariates = " + ".join(primary)
+    levels = _levels(data[group])
+    x = data[clinical].to_numpy(dtype=float)
+    members = {level: (data[group] == level).to_numpy() for level in levels}
+    reasons = {}
+    for level, inside in members.items():
+        count = int(inside.sum())
+        if count < 3:
+            reasons[level] = f"{level} has fewer than 3 subjects ({count}): no slope"
+        elif np.unique(x[inside]).size < 2:
+            reasons[level] = f"{clinical} is constant in {level}: no slope"
+    sloped = [level for level in levels if level not in reasons]
+    base, _ = design_columns(data, primary, categorical)
+    design = pd.concat(
+        [
+            base,
+            pd.DataFrame(
+                {f"slope in {level}": x * members[level] for level in sloped},
+                index=data.index,
+            ),
+        ],
+        axis=1,
+    )
+    reason = _skip_reason(data, group, categorical, design.shape[1] + 1)
+    full = np.column_stack([np.ones(n), design.to_numpy()])
+    if not reason and np.linalg.matrix_rank(full) < full.shape[1]:
+        reason = f"'{clinical}' slopes are collinear with {covariates}"
+    if reason or not sloped:
+        reason = reason or "; ".join(reasons.values())
+        return [
+            {**row, "test": "slope"}
+            for row in _empty_rows(
+                k,
+                term,
+                [f"slope in {level}" for level in levels],
+                n,
+                covariates,
+                "; ".join(filter(None, [note, reason])),
+            )
+        ]
+
+    orders = permutations(n, n_permutations, seed)
+    rows = []
+    for level in levels:
+        inside = members[level]
+        if level in reasons:
+            rows += [
+                {
+                    "component": c + 1,
+                    "level": f"slope in {level}",
+                    "n": int(inside.sum()),
+                    "note": "; ".join(filter(None, [note, reasons[level]])),
+                }
+                for c in range(k)
+            ]
+            continue
+        within = y[inside]
+        _, p_unadjusted = freedman_lane(
+            within,
+            np.ones((len(within), 1)),
+            x[inside, None],
+            permutations(len(within), n_permutations, seed),
+        )
+        for row in _block_rows(y, design, [f"slope in {level}"], orders):
+            c = row["component"] - 1
+            row |= {
+                "level": row.pop("column"),
+                "n": int(inside.sum()),
+                "standardised": row["estimate"]
+                * x[inside].std(ddof=1)
+                / within[:, c].std(ddof=1),
+                "std_kind": "beta",
+                "partial_r": np.sign(row["estimate"]) * np.sqrt(row["partial_r2"]),
+                "r_unadjusted": np.corrcoef(x[inside], within[:, c])[0, 1],
+                "p_unadjusted": p_unadjusted[c],
+                "note": note,
+            }
+            del row["sigma"]
+            rows.append(row)
+    rows = [
+        {**row, "term": term, "test": "slope", "covariates": covariates} for row in rows
+    ]
+    if len(sloped) < len(levels):
+        return rows
+
+    reference = levels[0]
+    differences = pd.DataFrame(
+        {f"{level} vs {reference}": x * members[level] for level in levels[1:]},
+        index=data.index,
+    )
+    design = pd.concat(
+        [base, pd.DataFrame({clinical: x}, index=data.index), differences],
+        axis=1,
+    )
+    for row in _block_rows(y, design, list(differences.columns), orders):
+        del row["sigma"]
+        row |= {
+            "term": term,
+            "test": "difference",
+            "level": row.pop("column"),
+            "n": n,
+            "covariates": " + ".join([clinical, *primary]),
+            "note": note,
+        }
+        rows.append(row)
+    return rows
+
+
+def interaction_effects(
+    coefficients: np.ndarray,
+    info: pd.DataFrame,
+    interactions: Sequence[tuple[str, str]],
+    primary: Sequence[str],
+    categorical: Collection[str],
+    n_permutations: int = 10000,
+    seed: int = 0,
+) -> pd.DataFrame:
+    """Per `(clinical, group)` pair and component: the slope of the
+    numerical `clinical` column within each level of the categorical
+    primary column `group`, adjusted for all `primary` terms, and the
+    slope differences against `group`'s first sorted level.
+
+    The slopes come from one model with a slope column per level
+    (`clinical` times the level's indicator), each tested against all
+    other columns (`test` = "slope"). A level with fewer than 3 subjects,
+    or in which `clinical` is constant (e.g. 0 in every Control), gets no
+    slope: an empty row with a note. When every level has a slope, the
+    differences (`test` = "difference") are the same model with a common
+    `clinical` slope plus a difference column per non-reference level,
+    tested together. Subjects as in `clinical_effects`; rows with the
+    `INTERACTION_COLUMNS` but `p_fdr` and `significant`
+    (`add_interaction_fdr`).
+    """
+    coefficients = np.asarray(coefficients, dtype=float)
+    if len(coefficients) != len(info):
+        raise ValueError(
+            f"{len(coefficients)} coefficient rows but {len(info)} subject-info rows",
+        )
+    terms = list(dict.fromkeys([*primary, *(x for x, _ in interactions)]))
+    data = _clean(info, terms, categorical)
+    rows = []
+    for clinical, group in interactions:
+        complete = data[[clinical, *primary]].notna().all(axis=1).to_numpy()
+        sample = data[complete]
+        constant = [t for t in primary if t != group and sample[t].nunique() < 2]
+        note = (
+            f"not adjusted for {', '.join(constant)} (constant in these subjects)"
+            if constant
+            else ""
+        )
+        rows += _interaction_rows(
+            coefficients[complete],
+            sample,
+            clinical,
+            group,
+            [t for t in primary if t not in constant],
+            categorical,
+            n_permutations,
+            seed,
+            note,
+        )
+    table = pd.DataFrame(rows).reindex(columns=INTERACTION_COLUMNS)
+    table = table.sort_values("component", kind="stable", ignore_index=True)
+    table["note"] = table["note"].fillna("")
+    table["std_kind"] = table["std_kind"].fillna("")
+    return table
+
+
+def add_interaction_fdr(table: pd.DataFrame, alpha: float = 0.05) -> pd.DataFrame:
+    """`add_fdr` per family of an `interaction_effects` table: the slope
+    rows, each its own test, and the difference rows, one test per
+    component and pair (a factor's rows share it)."""
+    slopes = add_fdr(
+        table[table["test"] == "slope"],
+        alpha,
+        keys=("component", "term", "level"),
+    )
+    differences = add_fdr(
+        table[table["test"] == "difference"],
+        alpha,
+        keys=("component", "term"),
+    )
+    table = pd.concat([slopes, differences]).loc[table.index]
+    table["significant"] = table["significant"].astype(bool)
+    return table
 
 
 def add_fdr(

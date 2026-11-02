@@ -2,20 +2,23 @@
 
 `gmri stats` tests whether the **subject coefficients** of a decomposition
 differ between groups of subjects or go along with clinical measurements. It
-writes two tables to `<output-dir>/statistics/`:
+writes these tables to `<output-dir>/statistics/`:
 
 - `<model>__subject_stats_primary.csv`: the primary variables (for example
   diagnosis, sex and age), each adjusted for the others.
 - `<model>__subject_stats_clinical.csv`: each clinical variable (for example
   kidney clearance or a sleep score), adjusted for all primary variables.
   It is only written when clinical columns are given.
+- `<model>__subject_stats_interactions.csv`: on request
+  (`--interaction egfr:diagnosis`), a clinical variable's slope within each
+  group, and whether the slopes differ (section 5).
 
 Whether a component's *time profile* predicts a clinical variable is a
 different question, answered by `gmri predict`
 ([curve-prediction.md](curve-prediction.md)).
 
-This page explains what is tested, every column of the two tables, which
-p-value to use, and what to watch out for. The command line itself is
+This page explains what is tested, every column of the tables, which
+p-value to use, when to ask for interactions, and what to watch out for. The command line itself is
 described in [cli.md](cli.md#gmri-stats).
 
 ## 1. What is tested
@@ -44,7 +47,9 @@ coefficient ~ X + diagnosis + sex + age
 ```
 
 The row tests X only. It answers: "beyond what diagnosis, sex and age already
-explain, does the coefficient go along with X?".
+explain, does the coefficient go along with X?". It assumes one slope for X,
+the same in PD and Control; section 5 covers the case where there is a reason
+to expect otherwise.
 
 **What "adjusted" means.** Suppose kidney clearance (eGFR) falls with age and
 the coefficient rises with age. Then eGFR and the coefficient are correlated
@@ -78,25 +83,37 @@ is the largest.
 
 ### `term`
 
-The variable tested in this row.
+The variable tested in this row. In the interactions table, the pair, such as
+`egfr × diagnosis`.
+
+### `test`
+
+Interactions table only:
+
+- `slope`: the clinical variable's slope within the group in `level`;
+- `difference`: how much a group's slope differs from the reference group's.
 
 ### `level`
 
 For a categorical variable, the comparison in this row, such as
 `PD vs Control`: the first group compared with the reference. Empty for a
-numerical variable.
+numerical variable. In the interactions table, `slope in PD` for a slope row
+and `PD vs Control` for a difference row.
 
 ### `n`
 
 The number of subjects in this model: those with a value for the tested
-variable and for every covariate.
+variable and for every covariate. For a slope row of the interactions table,
+the subjects in that group.
 
 ### `covariates`
 
 The variables this row is adjusted for, such as `diagnosis + sex + age`. A
 covariate that has only one value in this row's subjects cannot be adjusted
 for and is left out (see `note`). Example: a motor score recorded only for PD
-subjects leaves diagnosis out.
+subjects leaves diagnosis out. In the interactions table, the difference rows
+also list the clinical variable itself: its common slope is the baseline the
+difference is measured from.
 
 ### `estimate`
 
@@ -132,6 +149,9 @@ variables. `std_kind` says which scale is used.
 - `d` (categorical variables): the adjusted group difference divided by the
   residual standard deviation, a covariate-adjusted Cohen's d. As a rough
   guide, 0.2 is small, 0.5 medium and 0.8 large.
+
+For a slope row of the interactions table, `beta` uses the standard
+deviations within that group. It is empty for a difference row.
 
 ### `std_kind`
 
@@ -170,14 +190,16 @@ same rule of thumb applies.
 For a numerical variable, the plain (Pearson) correlation with the
 coefficient, without any adjustment, in the same subjects. Compare it with
 `partial_r` to see what the adjustment changed. Empty for a categorical
-variable.
+variable. For a slope row of the interactions table, the correlation within
+that group; empty for a difference row.
 
 ### `p_unadjusted`
 
 The permutation p-value of the tested variable *without* any adjustment, in
 the same subjects. It is only there for comparison with `p_perm`: a small
 `p_unadjusted` with a large `p_perm` means the association is explained by
-the covariates. Do not report it as a finding.
+the covariates. Do not report it as a finding. For a slope row of the
+interactions table, the test of `r_unadjusted` within that group.
 
 ### `p_parametric`
 
@@ -201,7 +223,9 @@ before correcting for the number of tests.
 `p_perm` corrected for the number of tests in this table (Benjamini–Hochberg
 false discovery rate). The correction counts every component and variable in
 the table, and a categorical variable once, however many levels it has. The
-primary and clinical tables are corrected separately.
+primary and clinical tables are corrected separately. In the interactions
+table, the slope rows and the difference rows are corrected separately, and
+a factor's difference rows count once.
 
 ### `significant`
 
@@ -216,7 +240,11 @@ Empty, or why a row is incomplete:
 - a variable that could not be tested (only one value, a level with fewer
   than 2 subjects, too few subjects for the model, or completely determined
   by the covariates). These rows have no p-values and are not counted in the
-  correction.
+  correction;
+- in the interactions table, a group with no slope: fewer than 3 subjects,
+  or a clinical variable that is constant in it (such as a disease duration
+  that is 0 in every Control). Without a slope in every group, there are no
+  difference rows.
 
 ## 3. Which p-value to use
 
@@ -463,7 +491,115 @@ How to read the whole example:
   (`p_perm` 0.107) is the one to rely on: it does not pick the most extreme
   of several comparisons.
 
-## 5. Pitfalls
+## 5. Interactions: a slope per group (`--interaction`)
+
+The clinical table fits one slope per clinical variable, shared by PD and
+Control. If there is a reason to expect the relation to differ between the
+groups, for example a variable that should matter only in PD,
+`--interaction egfr:diagnosis` also writes
+`<model>__subject_stats_interactions.csv`. The pairs are a numerical
+clinical variable and a categorical primary variable.
+
+### When it is worth it, and when it is not
+
+| the clinical variable | what the clinical row gives | interaction needed? |
+|---|---|---|
+| measured in both groups, same relation | the common slope, with the most power | no |
+| measured in both groups, relation expected to differ | an average of the two slopes, which can hide a slope present in one group only | **yes** |
+| 0 (or constant) in every Control, e.g. disease duration or a medication dose | already the slope within PD, because `diagnosis` absorbs the Controls | no |
+| recorded only for PD (empty for Controls) | the slope within PD, with diagnosis left out (see `note`) | no; the pair is skipped |
+
+Choose the pairs from prior knowledge, before looking at the results. Trying
+every variable and keeping those that come out adds tests to the correction
+and turns the table into a search.
+
+### The models
+
+For each component and pair, in the subjects of the clinical row:
+
+```
+slopes:      coefficient ~ diagnosis + sex + age + X·[Control] + X·[PD]
+difference:  coefficient ~ diagnosis + sex + age + X + X·[PD]
+```
+
+`X·[PD]` is X for PD subjects and 0 for the others. The two lines are the
+same fit, written two ways:
+
+- **Slope rows** come from the first line. Each tests one group's slope
+  against 0, adjusted for the covariates; the sex and age effects are shared
+  by the groups.
+- **The difference row** comes from the second. `X·[PD]` is the PD slope
+  minus the Control slope; its test asks whether the slopes differ.
+
+With three or more groups there is one slope row per group, and one
+difference row per group against the reference, sharing one overall test.
+
+### How to read it
+
+- **"Only in PD" needs the difference row.** A significant PD slope with a
+  non-significant Control slope does not show that the slopes differ. Only a
+  significant difference does.
+- **Each group has about half the subjects.** Slopes per group have wider
+  intervals than the clinical row, and the difference test has little power
+  with ~15 subjects per group. A non-significant difference is weak evidence
+  that the slopes are equal.
+- **For a variable that is 0 in Controls,** the PD slope row has the same
+  `estimate` and `p_perm` as the clinical row. Its `standardised` and
+  `r_unadjusted` are within PD, whereas the clinical row's include the
+  difference between the groups.
+
+### Example
+
+Made-up data for 30 subjects (15 Control, 15 PD) and 4 components, each with
+one built-in scenario:
+
+- eGFR raises component 1 in PD only;
+- BMI raises component 2 equally in both groups;
+- disease duration, 0 in every Control, raises component 3 in PD;
+- MoCA does nothing (component 4).
+
+```
+gmri stats --model out/cp_rank_4 --subject-info info.csv \
+    --primary-categorical diagnosis sex --primary-numerical age \
+    --clinical-numerical egfr bmi duration moca \
+    --interaction egfr:diagnosis bmi:diagnosis duration:diagnosis moca:diagnosis
+```
+
+Each variable on the component of its scenario: the clinical row (`shared`),
+then the rows of the interactions table.
+
+| variable | row | n | estimate [95% CI] | r_unadjusted | p_perm | significant |
+|---|---|---|---|---|---|---|
+| egfr (comp. 1) | shared (clinical table) | 30 | 0.0018 [0.0008, 0.0028] | 0.61 | 0.0012 | True |
+| | slope in Control | 15 | −0.0001 [−0.0008, 0.0006] | −0.04 | 0.79 | False |
+| | slope in PD | 15 | 0.0039 [0.0031, 0.0047] | 0.97 | 0.0001 | True |
+| | PD vs Control | 30 | 0.0040 [0.0029, 0.0051] | | 0.0001 | True |
+| bmi (comp. 2) | shared (clinical table) | 30 | 0.0100 [0.0076, 0.0124] | 0.83 | 0.0001 | True |
+| | slope in Control | 15 | 0.0107 [0.0073, 0.0141] | 0.84 | 0.0001 | True |
+| | slope in PD | 15 | 0.0094 [0.0062, 0.0126] | 0.82 | 0.0001 | True |
+| | PD vs Control | 30 | −0.0012 [−0.0058, 0.0033] | | 0.58 | False |
+| duration (comp. 3) | shared (clinical table) | 30 | 0.0032 [0.0017, 0.0047] | 0.90 | 0.0001 | True |
+| | slope in Control | 15 | | | | False |
+| | slope in PD | 15 | 0.0032 [0.0017, 0.0047] | 0.74 | 0.0001 | True |
+| moca (comp. 4) | shared (clinical table) | 30 | 0.0016 [−0.0022, 0.0053] | 0.19 | 0.39 | False |
+| | slope in Control | 15 | 0.0001 [−0.0071, 0.0073] | −0.04 | 0.98 | False |
+| | slope in PD | 15 | 0.0021 [−0.0023, 0.0064] | 0.33 | 0.33 | False |
+| | PD vs Control | 30 | 0.0020 [−0.0062, 0.0102] | | 0.62 | False |
+
+- **eGFR:** the shared slope (0.0018) is about half the PD slope (0.0039),
+  because it averages in the flat Controls. The interactions table shows
+  where the relation is, and the difference row confirms that it is specific
+  to PD.
+- **BMI:** both slopes are about the same and the difference is not
+  significant: the clinical row was already the right model.
+- **Duration:** the Control row is empty, with the note "duration is
+  constant in Control: no slope", and there is no difference row. The PD
+  slope equals the clinical row. Its `r_unadjusted` of 0.74 is the
+  correlation within PD; the clinical row's 0.90 is inflated by the Controls,
+  who all sit at duration 0 with lower coefficients.
+- **MoCA:** nothing is significant, as built.
+
+## 6. Pitfalls
 
 - **Direction of a component.** A higher coefficient means more of that
   component's pattern. Read the sign of `estimate` together with the
@@ -500,7 +636,12 @@ They were corrected for multiple comparisons with the Benjamini–Hochberg
 procedure across all components and variables of a table. Effect sizes are
 reported as standardised regression coefficients, covariate-adjusted Cohen's
 d and partial η²; collinearity is reported as the (generalised) variance
-inflation factor (Fox & Monette 1992).
+inflation factor (Fox & Monette 1992). For clinical variables with an a
+priori expected group-specific relation, the slope within each diagnostic
+group was estimated in a model with one slope per group, adjusted for the
+primary variables, and the difference between the slopes was tested in the
+equivalent model with a common slope and a slope-difference term; slope and
+difference tests were corrected separately.
 
 - Benjamini, Y. & Hochberg, Y. (1995). Controlling the false discovery rate.
   *J. R. Stat. Soc. B* 57, 289–300.

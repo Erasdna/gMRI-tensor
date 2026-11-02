@@ -677,7 +677,10 @@ class SubjectStatisticsOptions:
     against its first sorted level. p-values come from `n_permutations`
     Freedman-Lane permutations drawn from `seed`, and `significant` is the
     Benjamini-Hochberg p below `alpha`. A `subject_prefix` is prepended to
-    the table names as `<prefix>_`.
+    the table names as `<prefix>_`. Each `(clinical, primary)` pair in
+    `interactions` also gets the numerical clinical column's slope within
+    each level of the categorical primary column, and the slopes'
+    differences.
     """
 
     model: Path
@@ -687,6 +690,7 @@ class SubjectStatisticsOptions:
     primary_numerical: tuple[str, ...] = ()
     clinical_categorical: tuple[str, ...] = ()
     clinical_numerical: tuple[str, ...] = ()
+    interactions: tuple[tuple[str, str], ...] = ()
     n_permutations: int = 10000
     seed: int = 0
     alpha: float = 0.05
@@ -724,6 +728,21 @@ class SubjectStatisticsOptions:
             f"n_permutations must be >= 100, got {self.n_permutations}",
         )
         _check(0 < self.alpha < 1, f"alpha must be in (0, 1), got {self.alpha}")
+        for clinical, primary in self.interactions:
+            _check(
+                clinical in self.clinical_numerical,
+                f"--interaction {clinical}:{primary}: '{clinical}' is not a "
+                "--clinical-numerical column",
+            )
+            _check(
+                primary in self.primary_categorical,
+                f"--interaction {clinical}:{primary}: '{primary}' is not a "
+                "--primary-categorical column",
+            )
+        _check(
+            len(set(self.interactions)) == len(self.interactions),
+            "--interaction pairs named more than once",
+        )
         _check_subject_prefix(self.subject_prefix)
         _require_file(resolve_model(self.model)[0], "model")
         _check_subject_columns(

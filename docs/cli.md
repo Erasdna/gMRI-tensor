@@ -392,7 +392,8 @@ gmri plot decomposition --model results/parafac2/parafac2_rank_3 --subject-info 
 ```bash
 gmri stats --model results/cmf/cmf_rank_3 --subject-info subjects.csv --output-dir results \
     --primary-categorical diagnosis sex --primary-numerical age \
-    [--clinical-categorical apoe] [--clinical-numerical egfr psqi] [--subject-prefix clinical]
+    [--clinical-categorical apoe] [--clinical-numerical egfr psqi] [--interaction egfr:diagnosis] \
+    [--subject-prefix clinical]
 ```
 
 Covariate-adjusted tests of the subject coefficients: does a component differ
@@ -406,6 +407,7 @@ explains every output column and how to read the tables.**
 | `--subject-info`, `--output-dir` | required | Subjects, and the results directory. Writes `statistics/<model>__subject_stats_primary.csv` and, with clinical columns, `statistics/<model>__subject_stats_clinical.csv`. |
 | `--primary-categorical`, `--primary-numerical` | at least one column | Primary variables (e.g. diagnosis, sex, age). Each is tested adjusted for the other primary variables. |
 | `--clinical-categorical`, `--clinical-numerical` | none | Clinical variables (e.g. eGFR, sleep scores). Each is tested in its own model, adjusted for all primary variables. |
+| `--interaction` | none | `CLINICAL:PRIMARY` pairs, e.g. `egfr:diagnosis`: a numerical clinical variable's slope within each level of a categorical primary variable, and the slopes' differences. Writes `statistics/<model>__subject_stats_interactions.csv`. Only for variables with a prior reason to expect group-specific slopes; see [subject-statistics.md](subject-statistics.md#5-interactions-a-slope-per-group---interaction). |
 | `--n-permutations` | `10000` | Freedman–Lane permutations per test. The smallest possible p is 1 / (n + 1). |
 | `--seed` | `0` | Seed of the permutations; the same seed gives the same tables. |
 | `--alpha` | `0.05` | FDR level of the `significant` column. |

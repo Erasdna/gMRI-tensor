@@ -806,6 +806,16 @@ def _add_plot(commands: Any) -> None:
     _add_reproducibility_plot(kinds)
 
 
+def _interaction_pair(text: str) -> tuple[str, str]:
+    """`CLINICAL:PRIMARY` -> `(clinical, primary)`."""
+    clinical, separator, primary = text.partition(":")
+    if not (separator and clinical and primary):
+        raise argparse.ArgumentTypeError(
+            f"'{text}' is not CLINICAL:PRIMARY (e.g. egfr:diagnosis)",
+        )
+    return clinical, primary
+
+
 def _add_stats(commands: Any) -> None:
     parser = commands.add_parser(
         "stats",
@@ -853,6 +863,16 @@ def _add_stats(commands: Any) -> None:
                 metavar="COLUMN",
                 help=f"{kind} {role} columns, {about}",
             )
+    columns.add_argument(
+        "--interaction",
+        nargs="+",
+        default=[],
+        type=_interaction_pair,
+        metavar="CLINICAL:PRIMARY",
+        help="also the slope of a numerical clinical column within each level "
+        "of a categorical primary column, and the slopes' differences, e.g. "
+        "egfr:diagnosis (written to <model>__subject_stats_interactions.csv)",
+    )
     parser.add_argument(
         "--n-permutations",
         type=int,
@@ -1271,6 +1291,7 @@ def _run_stats(args: argparse.Namespace) -> None:
         primary_numerical=tuple(args.primary_numerical),
         clinical_categorical=tuple(args.clinical_categorical),
         clinical_numerical=tuple(args.clinical_numerical),
+        interactions=tuple(args.interaction),
         n_permutations=args.n_permutations,
         seed=args.seed,
         alpha=args.alpha,
@@ -1285,6 +1306,14 @@ def _run_stats(args: argparse.Namespace) -> None:
             pipeline.format_subject_statistics(
                 result.clinical,
                 "Clinical (adjusted for the primary columns)",
+                options.alpha,
+            ),
+        )
+    if result.interactions is not None:
+        print(
+            pipeline.format_subject_statistics(
+                result.interactions,
+                "Interactions (slopes per group and their differences)",
                 options.alpha,
             ),
         )

@@ -822,8 +822,24 @@ def test_cli_stats(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     first = primary[(primary["component"] == 1) & (primary["term"] == "diagnosis")]
     assert bool(first["significant"].item())
     assert (results / "stats.json").exists()
+    interactions = (
+        results / "statistics" / ("clinical_cp_rank_2__subject_stats_interactions.csv")
+    )
+    assert not interactions.exists()
+
+    assert _run([*argv, "--interaction", "egfr:diagnosis"]) == 0
+    assert "Interactions" in capsys.readouterr().out
+    table = pd.read_csv(interactions)
+    assert set(table["term"]) == {"egfr × diagnosis"}
+    assert list(table.loc[table["component"] == 1, "level"]) == [
+        "slope in Control",
+        "slope in PD",
+        "PD vs Control",
+    ]
 
     assert _run([*argv[:-2], "--primary-numerical", "sex"]) == 2
+    with pytest.raises(SystemExit):
+        _run([*argv, "--interaction", "egfr"])
 
 
 def _evolving_model(directory: Path, method: str, n: int, rng: Any) -> Path:

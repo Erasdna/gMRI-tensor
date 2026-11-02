@@ -126,7 +126,9 @@ from gMRItensor.roi_groups import is_csf
 from gMRItensor.roi_groups import overview_blocks
 from gMRItensor.roi_groups import overview_regions
 from gMRItensor.subject_statistics import add_fdr
+from gMRItensor.subject_statistics import add_interaction_fdr
 from gMRItensor.subject_statistics import clinical_effects
+from gMRItensor.subject_statistics import interaction_effects
 from gMRItensor.subject_statistics import primary_effects
 from gMRItensor.volumes import expand_roi_mode_to_voxels
 from nibabel.nifti1 import Nifti1Image
@@ -2289,11 +2291,13 @@ def _stats_inputs(model: Path, subject_info_path: Path) -> _StatsInputs:
 
 class SubjectStatisticsResult(NamedTuple):
     """`run_subject_statistics` output: the `primary` table, the `clinical`
-    one (None without clinical columns) and the CSV files written."""
+    one (None without clinical columns), the CSV files written and the
+    `interactions` table (None without interaction pairs)."""
 
     primary: pd.DataFrame
     clinical: pd.DataFrame | None
     files: list[Path]
+    interactions: pd.DataFrame | None = None
 
 
 def run_subject_statistics(
@@ -2307,8 +2311,10 @@ def run_subject_statistics(
     with a note. Writes to `<output_dir>/statistics/`
     `<model>__subject_stats_primary.csv` (`primary_effects`) and, with
     clinical columns, `<model>__subject_stats_clinical.csv`
-    (`clinical_effects`), both with `add_fdr`; `<subject_prefix>_` goes in
-    front when one is set. Raises `ValueError` if `subject_info` has no
+    (`clinical_effects`), both with `add_fdr`; with interaction pairs,
+    `<model>__subject_stats_interactions.csv` (`interaction_effects`, with
+    `add_interaction_fdr`). `<subject_prefix>_` goes in front when one is
+    set. Raises `ValueError` if `subject_info` has no
     `subjects` column or repeats a subject.
     """
     inputs = _stats_inputs(options.model, options.subject_info)
@@ -2336,17 +2342,34 @@ def run_subject_statistics(
             ),
             options.alpha,
         )
+    interactions = None
+    if options.interactions:
+        interactions = add_interaction_fdr(
+            interaction_effects(
+                coefficients,
+                info,
+                options.interactions,
+                options.primary,
+                **arguments,
+            ),
+            options.alpha,
+        )
     out_dir = Path(options.output_dir) / "statistics"
     out_dir.mkdir(parents=True, exist_ok=True)
     prefix = f"{options.subject_prefix}_" if options.subject_prefix else ""
     files = []
-    for name, table in (("primary", primary), ("clinical", clinical)):
+    tables = (
+        ("primary", primary),
+        ("clinical", clinical),
+        ("interactions", interactions),
+    )
+    for name, table in tables:
         if table is not None:
             path = out_dir / f"{prefix}{stem}__subject_stats_{name}.csv"
             table.to_csv(path, index=False)
             files.append(path)
     write_provenance(Path(options.output_dir), "stats", options)
-    return SubjectStatisticsResult(primary, clinical, files)
+    return SubjectStatisticsResult(primary, clinical, files, interactions)
 
 
 def format_subject_statistics(table: pd.DataFrame, title: str, alpha: float) -> str:
@@ -2357,7 +2380,9 @@ def format_subject_statistics(table: pd.DataFrame, title: str, alpha: float) -> 
         lines = [f"{title}: no significant effects (FDR p < {alpha})."]
     else:
         shown = significant.assign(
-            standardised=significant["standardised"].map("{:.2f}".format),
+            standardised=significant["standardised"].map(
+                lambda value: "" if np.isnan(value) else f"{value:.2f}",
+            ),
             p_fdr=significant["p_fdr"].map("{:.3g}".format),
         )
         lines = [

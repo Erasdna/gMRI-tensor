@@ -7,13 +7,17 @@ import pandas as pd
 import pytest
 import statsmodels.formula.api as smf
 from gMRItensor.subject_statistics import add_fdr
+from gMRItensor.subject_statistics import add_interaction_fdr
 from gMRItensor.subject_statistics import clinical_effects
 from gMRItensor.subject_statistics import COLUMNS
 from gMRItensor.subject_statistics import design_columns
 from gMRItensor.subject_statistics import freedman_lane
 from gMRItensor.subject_statistics import generalised_vif
+from gMRItensor.subject_statistics import INTERACTION_COLUMNS
+from gMRItensor.subject_statistics import interaction_effects
 from gMRItensor.subject_statistics import permutations
 from gMRItensor.subject_statistics import primary_effects
+from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 DOCS = Path(__file__).parents[1] / "docs" / "subject-statistics.md"
@@ -311,6 +315,202 @@ def test_null_rejection_rate_is_nominal() -> None:
     assert 0.025 <= rejected / repeats <= 0.075
 
 
+def _interaction_study(
+    n: int = 40,
+    seed: int = 0,
+) -> tuple[pd.DataFrame, np.ndarray]:
+    """Subject info and 3 components: 1 rises with `egfr` in PD only (case
+    A), 2 with `duration`, which is 0 in every Control (case B), 3 is noise.
+    `apoe` has 3 levels."""
+    rng = np.random.default_rng(seed)
+    info = pd.DataFrame(
+        {
+            "diagnosis": np.repeat(["Control", "PD"], n // 2),
+            "sex": rng.choice(["F", "M"], n),
+            "age": rng.normal(65, 8, n),
+            "apoe": np.resize([2, 3, 4], n),
+            "egfr": rng.normal(90, 15, n),
+        },
+    )
+    affected = (info["diagnosis"] == "PD").to_numpy(float)
+    info["duration"] = affected * rng.uniform(1, 15, n)
+    coefficients = np.column_stack(
+        [
+            2 + 0.03 * (info["egfr"] - 90) * affected + rng.normal(0, 0.1, n),
+            2 + 0.3 * affected + 0.05 * info["duration"] + rng.normal(0, 0.1, n),
+            2 + rng.normal(0, 0.5, n),
+        ],
+    )
+    return info, coefficients
+
+
+def _interactions(
+    pairs: list[tuple[str, str]],
+    primary: list[str] = PRIMARY,
+    n_permutations: int = 500,
+    **kwargs: object,
+) -> tuple[pd.DataFrame, pd.DataFrame, np.ndarray]:
+    info, coefficients = _interaction_study(**kwargs)  # type: ignore[arg-type]
+    table = interaction_effects(
+        coefficients,
+        info,
+        pairs,
+        primary,
+        CATEGORICAL,
+        n_permutations,
+    )
+    return table, info, coefficients
+
+
+def _rows(table: pd.DataFrame, component: int, test: str) -> pd.DataFrame:
+    rows = table[(table["component"] == component) & (table["test"] == test)]
+    return rows.set_index("level")
+
+
+def test_slopes_per_group_match_statsmodels() -> None:
+    table, info, coefficients = _interactions([("egfr", "diagnosis")])
+    frame = info.assign(y=coefficients[:, 0])
+    fit = smf.ols("y ~ C(diagnosis) + C(sex) + age + egfr:C(diagnosis)", frame).fit()
+    slopes = _rows(table, 1, "slope")
+
+    assert list(slopes.index) == ["slope in Control", "slope in PD"]
+    for group in ("Control", "PD"):
+        row, name = slopes.loc[f"slope in {group}"], f"egfr:C(diagnosis)[{group}]"
+        within = frame[frame["diagnosis"] == group]
+        assert row["estimate"] == pytest.approx(fit.params[name])
+        assert row["ci_low"] == pytest.approx(fit.conf_int().loc[name, 0])
+        assert row["ci_high"] == pytest.approx(fit.conf_int().loc[name, 1])
+        assert row["p_parametric"] == pytest.approx(fit.pvalues[name])
+        assert row["standardised"] == pytest.approx(
+            fit.params[name] * within["egfr"].std() / within["y"].std(),
+        )
+        assert row["r_unadjusted"] == pytest.approx(
+            np.corrcoef(within["egfr"], within["y"])[0, 1],
+        )
+        assert row["n"] == 20
+    assert set(slopes["term"]) == {"egfr × diagnosis"}
+    assert set(slopes["covariates"]) == {"diagnosis + sex + age"}
+    assert set(slopes["std_kind"]) == {"beta"}
+    assert (np.sign(slopes["partial_r"]) == np.sign(slopes["estimate"])).all()
+
+
+def test_slope_difference_matches_the_statsmodels_interaction_term() -> None:
+    table, info, coefficients = _interactions([("egfr", "diagnosis")])
+    frame = info.assign(y=coefficients[:, 0])
+    fit = smf.ols("y ~ egfr * C(diagnosis) + C(sex) + age", frame).fit()
+    name = "egfr:C(diagnosis)[T.PD]"
+    row = _rows(table, 1, "difference").loc["PD vs Control"]
+
+    assert row["estimate"] == pytest.approx(fit.params[name])
+    assert row["ci_low"] == pytest.approx(fit.conf_int().loc[name, 0])
+    assert row["p_parametric"] == pytest.approx(fit.pvalues[name])
+    assert row["covariates"] == "egfr + diagnosis + sex + age"
+    assert row["n"] == 40
+    assert np.isnan(row["standardised"]) and np.isnan(row["r_unadjusted"])
+
+
+def test_a_planted_group_specific_slope_is_found() -> None:
+    table, _, _ = _interactions([("egfr", "diagnosis")], n_permutations=2000)
+    table = add_interaction_fdr(table)
+    slopes, difference = _rows(table, 1, "slope"), _rows(table, 1, "difference")
+
+    assert slopes.loc["slope in PD", "significant"]
+    assert not slopes.loc["slope in Control", "significant"]
+    assert difference.loc["PD vs Control", "significant"]
+    assert not table.loc[table["component"] == 3, "significant"].any()
+
+
+def test_a_variable_constant_in_one_group_gives_only_the_other_slope() -> None:
+    table, info, coefficients = _interactions([("duration", "diagnosis")])
+    clinical = clinical_effects(
+        coefficients,
+        info,
+        ["duration"],
+        PRIMARY,
+        CATEGORICAL,
+        500,
+    )
+    slopes = _rows(table, 2, "slope")
+
+    control = slopes.loc["slope in Control"]
+    assert np.isnan(control["estimate"])
+    assert "duration is constant in Control" in control["note"]
+    assert _rows(table, 2, "difference").empty
+    expected = clinical[clinical["component"] == 2].iloc[0]
+    assert slopes.loc["slope in PD", "estimate"] == pytest.approx(expected["estimate"])
+    assert slopes.loc["slope in PD", "p_perm"] == pytest.approx(expected["p_perm"])
+
+
+def test_three_levels_give_a_slope_each_and_one_shared_difference_test() -> None:
+    primary = [*PRIMARY, "apoe"]
+    table, _, _ = _interactions([("egfr", "apoe")], primary)
+    table = add_interaction_fdr(table)
+    slopes, differences = _rows(table, 1, "slope"), _rows(table, 1, "difference")
+
+    assert list(slopes.index) == ["slope in 2", "slope in 3", "slope in 4"]
+    assert list(differences.index) == ["3 vs 2", "4 vs 2"]
+    for column in ("p_perm", "p_fdr", "partial_r2"):
+        assert differences[column].nunique() == 1
+    assert set(differences["covariates"]) == {"egfr + diagnosis + sex + age + apoe"}
+
+
+def test_a_level_with_too_few_subjects_has_no_slope() -> None:
+    info, coefficients = _interaction_study()
+    info["apoe"] = np.resize([3, 4], len(info))
+    info.loc[[0, 1], "apoe"] = 2
+    table = interaction_effects(
+        coefficients,
+        info,
+        [("egfr", "apoe")],
+        [*PRIMARY, "apoe"],
+        CATEGORICAL,
+        200,
+    )
+    slopes = _rows(table, 1, "slope")
+
+    assert np.isnan(slopes.loc["slope in 2", "estimate"])
+    assert "fewer than 3 subjects" in slopes.loc["slope in 2", "note"]
+    assert slopes.loc[["slope in 3", "slope in 4"], "estimate"].notna().all()
+    assert _rows(table, 1, "difference").empty
+
+
+def test_a_pair_whose_group_has_one_level_is_skipped() -> None:
+    info, coefficients = _interaction_study()
+    info.loc[info["diagnosis"] == "Control", "duration"] = np.nan
+    table = interaction_effects(
+        coefficients,
+        info,
+        [("duration", "diagnosis")],
+        PRIMARY,
+        CATEGORICAL,
+        200,
+    )
+
+    assert table["estimate"].isna().all()
+    assert table["note"].str.contains("'diagnosis' has one level").all()
+
+
+def test_interaction_fdr_is_per_family() -> None:
+    table, _, _ = _interactions([("egfr", "diagnosis"), ("duration", "diagnosis")])
+    table = add_interaction_fdr(table)
+
+    slopes = table[(table["test"] == "slope") & table["p_perm"].notna()]
+    assert slopes["p_fdr"].to_numpy() == pytest.approx(
+        multipletests(slopes["p_perm"], method="fdr_bh")[1],
+    )
+    differences = table[table["test"] == "difference"]
+    assert differences["p_fdr"].to_numpy() == pytest.approx(
+        multipletests(differences["p_perm"], method="fdr_bh")[1],
+    )
+
+
+def test_interactions_same_seed_same_output() -> None:
+    first, _, _ = _interactions([("egfr", "diagnosis")], n_permutations=200)
+    second, _, _ = _interactions([("egfr", "diagnosis")], n_permutations=200)
+    pd.testing.assert_frame_equal(first, second)
+    assert tuple(first.columns) == INTERACTION_COLUMNS
+
+
 def test_docs_explain_every_column() -> None:
     documented = set(re.findall(r"^### `([a-z_0-9]+)`", DOCS.read_text(), re.MULTILINE))
-    assert documented == set(COLUMNS)
+    assert documented == set(INTERACTION_COLUMNS) > set(COLUMNS)

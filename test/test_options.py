@@ -517,6 +517,32 @@ def test_subject_statistics_options(tmp_path: Path) -> None:
             primary_numerical=("age",),
         )
 
+    columns: dict[str, Any] = {
+        "primary_categorical": ("diagnosis",),
+        "clinical_categorical": ("sex",),
+        "clinical_numerical": ("age",),
+    }
+    pair = SubjectStatisticsOptions(
+        **common,
+        **columns,
+        interactions=(("age", "diagnosis"),),
+    )
+    assert pair.interactions == (("age", "diagnosis"),)
+    with pytest.raises(ValueError, match="'sex' is not a --clinical-numerical"):
+        SubjectStatisticsOptions(
+            **common,
+            **columns,
+            interactions=(("sex", "diagnosis"),),
+        )
+    with pytest.raises(ValueError, match="'sex' is not a --primary-categorical"):
+        SubjectStatisticsOptions(**common, **columns, interactions=(("age", "sex"),))
+    with pytest.raises(ValueError, match="more than once"):
+        SubjectStatisticsOptions(
+            **common,
+            **columns,
+            interactions=(("age", "diagnosis"), ("age", "diagnosis")),
+        )
+
 
 def _h5_model(path: Path, method: str) -> Path:
     with h5py.File(path, "w") as file:
