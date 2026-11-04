@@ -4,15 +4,21 @@ from pathlib import Path
 from typing import Any
 from typing import cast
 
+import h5py
 import numpy as np
 import pytest
+import tensorly as tl
+from gMRItensor.model_io import component_shares
 from gMRItensor.model_io import component_weights
+from gMRItensor.model_io import data_norm
 from gMRItensor.model_io import load_decomposition
+from gMRItensor.model_io import relative_squared_error
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import SavedDecomposition
 from gMRItensor.model_io import select_subjects
 from gMRItensor.model_io import sort_components
 from gMRItensor.model_io import subject_coefficients
+from matcouply.coupled_matrices import cmf_to_matrices
 
 
 def _common(rank: int, rng: np.random.Generator) -> dict[str, Any]:
@@ -339,3 +345,76 @@ def test_cmf_subject_coefficients_are_the_evolving_norms() -> None:
 def test_subject_coefficients_are_the_subject_mode(method: str) -> None:
     saved = _unsorted(method, np.random.default_rng(12))
     np.testing.assert_array_equal(subject_coefficients(saved), saved.subject_mode)
+
+
+def _component_norm(saved: SavedDecomposition, r: int) -> float:
+    """`||X̂_r||` of component `r` on its own: TensorLy's `cp_norm` for CP,
+    matcouply's reconstruction for PARAFAC2 and CMF (whose subject weights
+    are fixed at one in the fit)."""
+    w = np.asarray(saved.weights)[[r]]
+    A = np.asarray(saved.subject_mode)[:, [r]]
+    C = np.asarray(saved.label_mode)[:, [r]]
+    with tl.backend_context("numpy"):
+        if saved.method == "cp":
+            assert saved.time_mode is not None
+            return float(tl.cp_norm((w, [A, saved.time_mode[:, [r]], C])))
+        assert saved.evolving_states is not None
+        if saved.method == "cmf":
+            A = np.ones_like(A)
+        B = [state[:, [r]] for state in saved.evolving_states]
+        matrices = cmf_to_matrices((w, (A, B, C)))
+        return float(np.sqrt(sum(tl.norm(m, 2) ** 2 for m in matrices)))
+
+
+@pytest.mark.parametrize("method", ["cp", "parafac2", "cmf"])
+def test_component_weights_are_each_components_norm(method: str) -> None:
+    saved = _unsorted(method, np.random.default_rng(13))
+
+    expected = [_component_norm(saved, r) for r in range(saved.rank)]
+
+    np.testing.assert_allclose(component_weights(saved), expected)
+
+
+def test_data_norm_is_over_the_observed_entries() -> None:
+    slices = [np.array([[1.0, np.nan], [2.0, 2.0]]), np.array([[4.0, np.nan, 0.0]])]
+
+    assert data_norm(slices) == pytest.approx(5.0)  # sqrt(1 + 4 + 4 + 16)
+
+
+@pytest.mark.parametrize("method", ["cp", "parafac2", "cmf"])
+def test_round_trip_fit_metrics(tmp_path: Path, method: str) -> None:
+    """Saved in the file's (here unsorted) order, recomputed in the loaded
+    one."""
+    saved = replace(_unsorted(method, np.random.default_rng(14)), data_norm=250.0)
+    shares = component_weights(saved) ** 2 / 250.0**2
+
+    save_decomposition(tmp_path / "model.h5", saved)
+    loaded = load_decomposition(tmp_path / "model.h5")
+
+    with h5py.File(tmp_path / "model.h5", "r") as file:
+        assert file.attrs["relative_squared_error"] == pytest.approx(0.125**2)
+        assert file.attrs["data_norm"] == 250.0
+        np.testing.assert_allclose(
+            file["component_weights"][()],
+            component_weights(saved),
+        )
+        np.testing.assert_allclose(file["component_shares"][()], shares)
+    assert loaded.data_norm == 250.0
+    assert relative_squared_error(loaded) == pytest.approx(0.125**2)
+    np.testing.assert_allclose(component_shares(loaded), shares[[1, 2, 0]])
+
+
+def test_fit_metrics_without_data_norm(tmp_path: Path) -> None:
+    """Files from before the fit metrics load without them."""
+    path = _save_plain(tmp_path, np.random.default_rng(15))
+    with h5py.File(path, "r") as file:
+        assert "data_norm" not in file.attrs and "component_shares" not in file
+        assert "relative_squared_error" in file.attrs
+    with h5py.File(path, "a") as file:
+        del file.attrs["relative_squared_error"]
+        del file["component_weights"]
+
+    loaded = load_decomposition(path)
+
+    assert loaded.data_norm is None
+    assert component_shares(loaded) is None

@@ -57,6 +57,7 @@ from gMRItensor.jobs import run_tasks
 from gMRItensor.jobs import StoreStatus
 from gMRItensor.jobs import TaskCounts
 from gMRItensor.model_io import component_weights
+from gMRItensor.model_io import data_norm
 from gMRItensor.model_io import load_decomposition
 from gMRItensor.model_io import MODEL_FILE
 from gMRItensor.model_io import resolve_model
@@ -1219,10 +1220,12 @@ def _saved_decomposition(
     error: float,
     data: DecompositionInput,
 ) -> SavedDecomposition:
-    """A fit as a `SavedDecomposition`, components largest first."""
+    """A fit as a `SavedDecomposition`, components largest first, with the
+    norm of the data it was fitted to."""
     common: dict[str, Any] = {
         "rank": rank,
         "error": float(error),
+        "data_norm": data_norm(data_slices(data.data)),
         "subjects": data.subjects,
         "timepoints": data.timepoints,
         "labels": data.labels,

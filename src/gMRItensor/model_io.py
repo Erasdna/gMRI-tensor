@@ -8,6 +8,7 @@ from typing import Literal
 
 import h5py
 import numpy as np
+import tensorly as tl
 
 _ARRAYS = ("weights", "subject_mode", "label_mode", "labels", "label_index")
 _OPTIONAL_ARRAYS = (
@@ -55,6 +56,10 @@ class SavedDecomposition:
     Components are ordered by `component_weights`, largest first: saving
     through the pipeline sorts them and `load_decomposition` sorts again,
     so files written before sorting existed load in the same order.
+
+    `error` is the solver's `||X - X̂|| / ||X||`; `data_norm` is `||X||`,
+    the norm of the data as fitted (after centring and scaling) over its
+    observed entries, None for models saved before it was recorded.
     """
 
     method: Literal["cp", "parafac2", "cmf"]
@@ -76,6 +81,7 @@ class SavedDecomposition:
     template_shape: np.ndarray | None = None
     template_affine: np.ndarray | None = None
     template_path: str | None = None
+    data_norm: float | None = None
 
 
 def _column_norms(matrix: np.ndarray) -> np.ndarray:
@@ -108,6 +114,34 @@ def component_weights(saved: SavedDecomposition) -> np.ndarray:
         states = [B * a for B, a in zip(states, np.asarray(saved.subject_mode))]
     evolving = np.sqrt(sum((B**2).sum(axis=0) for B in states))
     return weights * evolving * label
+
+
+def data_norm(slices: Sequence[np.ndarray]) -> float:
+    """`||X||` of the data, one array per subject, over its observed (non-NaN)
+    entries: TensorLy's norm of each slice, one at a time."""
+    with tl.backend_context("numpy"):
+        squares = [
+            float(tl.norm(values[~np.isnan(values)], 2)) ** 2
+            for values in (np.asarray(x, dtype=float) for x in slices)
+        ]
+    return float(np.sqrt(sum(squares)))
+
+
+def relative_squared_error(saved: SavedDecomposition) -> float:
+    """`||X̂ - X||² / ||X||²`: the solver's relative error, squared."""
+    return saved.error**2
+
+
+def component_shares(saved: SavedDecomposition) -> np.ndarray | None:
+    """Each component's share of the data's sum of squares,
+    `component_weights² / ||X||²`; None without `data_norm`. Components
+    overlap, so the shares need not add up to `1 - relative_squared_error`:
+    the cross terms `2<X̂_r, X̂_s>` make up the difference (positive for
+    non-negative components, so their shares add up to less).
+    """
+    if saved.data_norm is None:
+        return None
+    return component_weights(saved) ** 2 / saved.data_norm**2
 
 
 def subject_coefficients(saved: SavedDecomposition) -> np.ndarray:
@@ -173,7 +207,13 @@ def _read_ragged(file: h5py.File, name: str) -> list[np.ndarray]:
 
 
 def save_decomposition(path: Path, saved: SavedDecomposition) -> None:
-    """Write `saved` to `path`, replacing it only once fully written."""
+    """Write `saved` to `path`, replacing it only once fully written.
+
+    Also writes the fit metrics, in the file's component order:
+    `relative_squared_error` and `component_weights`, and with a
+    `data_norm` also `component_shares`. They are not read back:
+    `load_decomposition` sorts, and the functions recompute them.
+    """
     if saved.method in _EVOLVING_METHODS and saved.evolving_states is None:
         raise ValueError(f"A {saved.method} decomposition needs evolving_states")
     if saved.method == "cp" and saved.time_mode is None:
@@ -187,6 +227,12 @@ def save_decomposition(path: Path, saved: SavedDecomposition) -> None:
             file.attrs["rank"] = saved.rank
             file.attrs["error"] = saved.error
             file.attrs["centered"] = saved.centered
+            file.attrs["relative_squared_error"] = relative_squared_error(saved)
+            file.create_dataset("component_weights", data=component_weights(saved))
+            shares = component_shares(saved)
+            if shares is not None:
+                file.attrs["data_norm"] = saved.data_norm
+                file.create_dataset("component_shares", data=shares)
             if saved.template_path is not None:
                 file.attrs["template_path"] = saved.template_path
             for name in _ARRAYS:
@@ -250,6 +296,9 @@ def _read_decomposition(path: Path) -> SavedDecomposition:
             rank=int(file.attrs["rank"]),
             error=float(file.attrs["error"]),
             centered=bool(file.attrs.get("centered", False)),
+            data_norm=(
+                float(file.attrs["data_norm"]) if "data_norm" in file.attrs else None
+            ),
             template_path=(
                 str(file.attrs["template_path"])
                 if "template_path" in file.attrs

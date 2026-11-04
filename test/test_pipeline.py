@@ -1,5 +1,6 @@
 import dataclasses
 import json
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any
 from typing import cast
@@ -27,6 +28,7 @@ from gMRItensor.jobs import TaskCounts
 from gMRItensor.model_io import _read_decomposition
 from gMRItensor.model_io import component_weights
 from gMRItensor.model_io import load_decomposition
+from gMRItensor.model_io import relative_squared_error
 from gMRItensor.model_io import save_decomposition
 from gMRItensor.model_io import select_subjects
 from gMRItensor.model_io import sort_components
@@ -42,6 +44,7 @@ from gMRItensor.options import PreprocessingOptions
 from gMRItensor.options import ReplicabilityOptions
 from gMRItensor.options import StatisticsPlotOptions
 from gMRItensor.options import TensorOptions
+from gMRItensor.outliers import reconstruct_slices
 from gMRItensor.pipeline import collect_decomposition
 from gMRItensor.pipeline import collect_replicability
 from gMRItensor.pipeline import format_significance_summary
@@ -65,6 +68,7 @@ from gMRItensor.plotting.evolving_mode import scaled_evolving_curves
 from gMRItensor.plotting.utils import scale_mode
 from gMRItensor.reproducibility import read_reproducibility
 from gMRItensor.reproducibility import write_reproducibility
+from tensorly.metrics.regression import R2_score
 
 QUICK_FIT = FitOptions(restarts=2, max_iter=50)
 
@@ -966,6 +970,63 @@ def test_run_decomposition_writes_each_restarts_timing(
     assert list(table.seed) == [0, 1]
     assert (table.fit_seconds > 0).all() and (table.n_iter >= 1).all()
     assert (table.peak_rss_gb > 0).all() and set(table.backend) == {"numpy"}
+
+
+def _library_fit_metrics(path: Path) -> tuple[float, float, float]:
+    """`(||X||, 1 - R², ||X - X̂||²)` of a saved model and the data it was
+    fitted to, over the observed entries, as TensorLy computes them."""
+    saved = load_decomposition(path)
+    x = np.concatenate([np.ravel(s) for s in pipeline.load_model_data(path, saved)])
+    x_hat = np.concatenate([np.ravel(s) for s in reconstruct_slices(saved)])
+    seen = ~np.isnan(x)
+    x, x_hat = x[seen].astype(float), x_hat[seen]
+    with tl.backend_context("numpy"):
+        return (
+            float(tl.norm(x, 2)),
+            float(1 - R2_score(x, x_hat)),
+            float(tl.norm(x - x_hat, 2) ** 2),
+        )
+
+
+@pytest.mark.parametrize(
+    ("method", "missing"),
+    [("cp", False), ("cp", True), ("parafac2", False), ("cmf", False)],
+)
+def test_saved_models_hold_their_fit_metrics(
+    synthetic_study: Any,
+    monkeypatch: pytest.MonkeyPatch,
+    method: str,
+    missing: bool,
+) -> None:
+    """Real fits: model.h5 holds the norm of the data as fitted and the
+    relative squared error, as TensorLy finds them from the saved model;
+    for CP with a missing scan, over the observed entries."""
+    monkeypatch.delenv(FIT_BACKEND_VARIABLE, raising=False)
+    if missing:
+        _drop_session(synthetic_study, "sub-01", 6)
+    preprocess(synthetic_study)
+    options = decomposition_options(
+        synthetic_study,
+        method=method,
+        ranks=(2,),
+        tensor=TensorOptions(min_timepoints=2),
+        fit=FitOptions(restarts=2, max_iter=2000, tolerance=1e-4),
+    )
+    with pytest.warns(
+        UserWarning,
+        match="missing session",
+    ) if missing else nullcontext():
+        (path,) = run_decomposition(options)
+
+    norm, relative, absolute = _library_fit_metrics(path)
+    saved = load_decomposition(path)
+
+    assert saved.data_norm == pytest.approx(norm, rel=1e-6)
+    assert relative_squared_error(saved) == pytest.approx(relative, rel=1e-4)
+    assert relative_squared_error(saved) * saved.data_norm**2 == pytest.approx(
+        absolute,
+        rel=1e-4,
+    )
 
 
 def test_restarts_csv_is_written_when_no_restart_converged(

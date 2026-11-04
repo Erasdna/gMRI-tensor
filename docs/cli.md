@@ -264,6 +264,16 @@ gmri decompose run --input results/data/roi_signal.parquet --output-dir results/
 
 **Outputs:**
 - `<method>_rank_<r>/model.h5` (e.g. `cmf_rank_3/model.h5`): the fitted factors, components ordered by weight, largest first (`model_io.component_weights`: the weight times each mode's L2 norm), plus the subjects, time points, label ids and scaling needed to read them. Voxel models also store each voxel's template coordinates, the template's shape and affine, and the recorded template path. Load a model with `gMRItensor.model_io.load_decomposition`.
+  - **Fit metrics.** Beside the solver's `error`, ‖X − X̂‖/‖X‖ (Frobenius norm), each model stores:
+    - `relative_squared_error`: ‖X − X̂‖²/‖X‖², the solver's error squared.
+    - `data_norm`: ‖X‖, the norm of the data as fitted (after centring and scaling), from TensorLy's `norm`. The absolute error is `relative_squared_error · data_norm²`.
+    - `component_weights`: λ_r, each component's weight as above, which is also the norm of that component's part of the model.
+    - `component_shares`: λ_r²/‖X‖², each component's share of the data's sum of squares.
+
+    The first two are attributes; the last two are datasets, one value per component in the file's order. In Python, `model_io.relative_squared_error`, `component_weights` and `component_shares` give the same values for a loaded model.
+  - The components overlap, so the shares need not add up to 1 − `relative_squared_error`: the cross terms 2⟨X̂_r, X̂_s⟩ make up the difference. Non-negative components overlap positively, so their shares add up to less (e.g. 0.74 against a fit of 0.99). Components of opposite sign can add up to more than 1.
+  - For CP with missing entries, ‖X‖ and the error cover the observed entries only, while λ_r covers every entry.
+  - Models saved before these fields were added have none of them.
 - `<method>_rank_<r>/decompose.json`: the settings that model was fitted with (input, statistic, tensor and fit options). `plot decomposition --outliers` reloads the data from it, so several methods and ranks can share one `--output-dir`.
 - `<method>_rank_<r>/excluded_subjects.csv`: `subject, reason`, every subject in the input that the model leaves out. The reason is `rejected at command line` (`--exclude-subjects`), or `too few valid time points (2 of 3; needs 3): time point 6 missing; time point 24 has 95% invalid values (more than --max-invalid-fraction 0.9)` for a subject short of valid sessions (`--min-timepoints`, by default all time points). Written with only the header when nobody is left out. `plan` writes the same file to `--output-dir`, so it can be checked before the jobs run.
 - `<method>_rank_<r>/excluded_columns.csv`: `label, n_columns, n_dropped, scans`, one row per label with columns left out of the fit. PARAFAC2 and CMF drop every column (a label for ROI input, a voxel for voxel input) that is non-finite in any kept scan; CP drops only columns never finite and imputes the rest. `scans` names the kept scans in which the label's dropped columns were non-finite or missing (the first 10, then a count), e.g. a scan whose ROI `--negative-cutoff` invalidated. Written with only the header when nothing is dropped, and by `plan` too.
