@@ -14,7 +14,6 @@ from gMRItensor.plotting.evolving_mode import group_legend
 from gMRItensor.plotting.evolving_mode import scaled_evolving_curves
 from gMRItensor.plotting.spatial_mode import percentile_vlim
 from gMRItensor.plotting.spatial_mode import plot_enhancement_with_background
-from gMRItensor.plotting.subject_mode import make_subject_boxplot
 from gMRItensor.plotting.subject_mode import prepare_plotting_dataframe
 from gMRItensor.plotting.utils import compute_figsize
 from gMRItensor.plotting.utils import create_colorbar_with_offset
@@ -31,6 +30,9 @@ plt.style.use(["science", "no-latex"])
 
 TIME_COEFFICIENT_LABEL = "Time coef. (a.u.)"
 SUBJECT_COEFFICIENT_LABEL = "Subject coef. (a.u.)"
+SUBJECT_INDEX_LABEL = "Subject"
+# Behind the subject points, and only when a coefficient is negative.
+ZERO_LINE_COLOR = "0.8"
 # The time and subject y-labels take width from the image columns: a
 # figure this much wider per height keeps the images height-limited, so
 # their colorbars (insets, outside the layout) keep their room.
@@ -79,6 +81,34 @@ def _plot_time_column_evolving(
     ax.set_xticks(timepoints)
 
 
+def plot_subject_column(
+    ax: matplotlib.axes.Axes,
+    values: np.ndarray,
+    groups: list,
+    color_by_group: dict,
+) -> None:
+    """One point per subject: `values` (in `groups` order) sorted by group,
+    in `color_by_group`'s order, and in their given order within a group,
+    at x = 1..N, coloured by group. Only 1 and N are ticked; a line marks 0
+    when a value is negative."""
+    rank = {group: k for k, group in enumerate(color_by_group)}
+    order = np.argsort([rank[group] for group in groups], kind="stable")
+    values = np.asarray(values)[order]
+    n = len(values)
+    if (values < 0).any():
+        ax.axhline(0, color=ZERO_LINE_COLOR, linewidth=0.6, zorder=0)
+    ax.scatter(
+        np.arange(1, n + 1),
+        values,
+        c=[color_by_group[groups[i]] for i in order],
+        s=12,
+        linewidths=0,
+        zorder=2,
+    )
+    ax.set_xticks([1, n])
+    ax.set_xlim(0, n + 1)
+
+
 def plot_mode_grid(
     spatial_mode: np.ndarray,
     time_mode: np.ndarray | list[np.ndarray],
@@ -95,7 +125,7 @@ def plot_mode_grid(
     page_width: float = 7.0,
     share_colorbar_scaling: bool = False,
 ) -> tuple[matplotlib.figure.Figure, np.ndarray]:
-    """Plot a component-per-row grid: time, subject boxplot, and spatial mode.
+    """Plot a component-per-row grid: time, subject and spatial mode.
 
     The time column accepts either decomposition's time mode:
 
@@ -107,7 +137,13 @@ def plot_mode_grid(
       in `subjects` order. Each subject's curves are its unit-norm `B_i`
       times its scaled `subject_mode` coefficient (`scaled_evolving_curves`),
       drawn as a per-group mean +/- SEM ribbon, as in the left column of
-      `plot_evolving_mode`, with group colors matching the subject boxplot.
+      `plot_evolving_mode`.
+
+    The subject column draws each subject's scaled coefficient as a point
+    (`plot_subject_column`), subjects sorted by `group_variable` group and
+    numbered 1 to N in that order, with no group tests (the subject-mode
+    figure has those). Groups are coloured as the ribbons, named in one
+    legend above the figure.
 
     Each row is titled "Component k"; the time and subject columns are
     labelled `TIME_COEFFICIENT_LABEL` and `SUBJECT_COEFFICIENT_LABEL`, and
@@ -136,6 +172,9 @@ def plot_mode_grid(
     scaled_subject_mode = scale_mode(subject_mode)
 
     is_evolving = isinstance(time_mode, list)
+    groups = resolve_subject_groups(subjects, subject_info, group_variable)
+    categories = sorted(set(groups))
+    color_by_group = dict(zip(categories, get_color_palette(len(categories))))
     if isinstance(time_mode, list):
         if not (len(time_mode) == len(time_points) == len(subjects)):
             raise ValueError(
@@ -143,9 +182,6 @@ def plot_mode_grid(
                 f"subjects must have the same length, got {len(time_mode)}, "
                 f"{len(time_points)}, {len(subjects)}",
             )
-        groups = resolve_subject_groups(subjects, subject_info, group_variable)
-        categories = sorted(set(groups))
-        color_by_group = dict(zip(categories, get_color_palette(len(categories))))
         # The same curves as `plot_evolving_mode`.
         scaled_factors = scaled_evolving_curves(time_mode, subject_mode)
         long_df = build_long_evolving_dataframe(
@@ -220,7 +256,8 @@ def plot_mode_grid(
         h_pad=0.02,  # Height padding between axes
     )
 
-    df = prepare_plotting_dataframe(
+    # Only for its checks: every subject has a group, and there are 2+.
+    prepare_plotting_dataframe(
         scaled_subject_mode,
         subjects,
         subject_info,
@@ -259,19 +296,15 @@ def plot_mode_grid(
 
         subject_ax = axs[component, 1]
 
-        make_subject_boxplot(
+        plot_subject_column(
             subject_ax,
-            df,
-            x_column=group_variable,
-            y_column=f"comp_{component}",
-            legend=False,
+            scaled_subject_mode[:, component],
+            groups,
+            color_by_group,
         )
-
         subject_ax.set_ylabel(SUBJECT_COEFFICIENT_LABEL)
         if component == n_components - 1:
-            subject_ax.set_xlabel(group_variable)
-        else:
-            subject_ax.set_xlabel("")
+            subject_ax.set_xlabel(SUBJECT_INDEX_LABEL)
 
         parenchyma_ax = axs[component, 2]
         csf_ax = axs[component, 3]
@@ -351,6 +384,5 @@ def plot_mode_grid(
                 ax_obj.set_title(title)
             fig.align_titles()
 
-    if is_evolving:
-        group_legend(fig, categories, color_by_group)
+    group_legend(fig, categories, color_by_group)
     return fig, axs

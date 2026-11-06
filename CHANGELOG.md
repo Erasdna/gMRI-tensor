@@ -21,6 +21,7 @@
 - **Guide for large inputs on CPU clusters:** `docs/cpu-scaling.md` covers backend, threads, restarts per node and job size, plus a scaling-test protocol.
 
 ### Changed
+- **Mode grid subject column:** one point per subject instead of a boxplot per group, subjects sorted by group and numbered 1 to N, coloured by group, with the group legend above the figure for CP too. The mode grid no longer shows group tests; the subject-mode figure keeps its boxplots and tests.
 - **CP and TensorLy's PARAFAC2 run in float64 on every backend and on the GPU**, as matcouply's fits already did, so fits are comparable wherever they ran. Before, they ran in the input's float32 on torch and on the GPU, where TF32 also applied; such stored restarts are reused as they are. `compute_CP_decomposition` returns float64.
 - **CPU pools share one float64 copy of the input:** a job casts it once, and its `--restart-procs` / `--n-procs` workers no longer each make their own (10.6 GB per worker at 30 × 4 × 11 M voxels). `/dev/shm` must hold the float64 input.
 - CP on the CPU no longer goes through `torch.compile` (GPU fits still do).

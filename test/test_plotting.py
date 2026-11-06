@@ -1484,7 +1484,14 @@ def test_plot_mode_grid_parafac2_smoke():
     plt.close(fig)
 
 
-def test_plot_mode_grid_parafac2_ribbon_matches_boxplot_colors():
+def _subject_points(ax) -> tuple[np.ndarray, list[tuple[float, float, float]]]:
+    """The mode grid subject column's one scatter: its (x, y) offsets and
+    point colours."""
+    (points,) = ax.collections
+    return points.get_offsets().data, [to_rgb(c) for c in points.get_facecolors()]
+
+
+def test_plot_mode_grid_parafac2_ribbon_matches_subject_point_colors():
     fig, axs = plot_mode_grid(**make_mode_grid_parafac2_fixture())
 
     ribbon_lines = {line.get_label(): line for line in axs[0, 0].get_lines()}
@@ -1497,15 +1504,10 @@ def test_plot_mode_grid_parafac2_ribbon_matches_boxplot_colors():
             matplotlib.colors.to_rgb(ribbon_lines[text.get_text()].get_color()),
         )
 
-    # Boxes sit at integer x-positions in `subject_info` group order (A, B).
-    boxes = sorted(
-        axs[0, 1].patches,
-        key=lambda patch: patch.get_path().vertices[:, 0].mean(),
-    )
-    for group, box in zip(["A", "B"], boxes):
-        assert matplotlib.colors.to_rgb(box.get_facecolor()) == pytest.approx(
-            matplotlib.colors.to_rgb(ribbon_lines[group].get_color()),
-        )
+    # The fixture's subjects are A, A, A, B, B, B.
+    _, colors = _subject_points(axs[0, 1])
+    for group, color in zip(["A"] * 3 + ["B"] * 3, colors):
+        assert color == pytest.approx(to_rgb(ribbon_lines[group].get_color()))
     plt.close(fig)
 
 
@@ -1643,7 +1645,7 @@ def test_plot_evolving_mode_time_axis_label():
     plt.close(fig)
 
 
-def test_plot_mode_grid_boxes_match_the_ribbon_colours():
+def test_plot_mode_grid_subject_points_match_the_ribbon_colours():
     kwargs = make_mode_grid_fixture()
     subject_info = kwargs["subject_info"]
     subject_info["group"] = subject_info["group"].map({"A": "B", "B": "A"})
@@ -1654,20 +1656,51 @@ def test_plot_mode_grid_boxes_match_the_ribbon_colours():
 
     fig, axs = plot_mode_grid(**kwargs)
 
+    # Group A (the model's last three subjects) comes first.
     palette = [to_rgb(c) for c in get_color_palette(2)]
-    assert [t.get_text() for t in axs[0, 1].get_xticklabels()] == ["A", "B"]
-    assert _box_colors(axs[0, 1]) == palette
+    _, colors = _subject_points(axs[0, 1])
+    assert colors == [palette[0]] * 3 + [palette[1]] * 3
     ribbons = {line.get_label(): to_rgb(line.get_color()) for line in axs[0, 0].lines}
     assert [ribbons["A"], ribbons["B"]] == palette
     plt.close(fig)
 
 
-def test_plot_mode_grid_subject_xlabel_uses_group_variable():
+def test_plot_mode_grid_draws_each_subject_by_group():
     kwargs = make_mode_grid_fixture()
     kwargs["subject_info"] = kwargs["subject_info"].rename(columns={"group": "cohort"})
+    kwargs["subject_info"]["cohort"] = ["B", "A", "B", "A", "A", "B"]
     kwargs["group_variable"] = "cohort"
+
     fig, axs = plot_mode_grid(**kwargs)
-    assert axs[-1, 1].get_xlabel() == "cohort"
+
+    # By group, A before B; within a group in model order.
+    order = [1, 3, 4, 0, 2, 5]
+    scaled = scale_mode(kwargs["subject_mode"])
+    palette = [to_rgb(c) for c in get_color_palette(2)]
+    for component, ax in enumerate(axs[:, 1]):
+        offsets, colors = _subject_points(ax)
+        assert offsets[:, 0].tolist() == [1, 2, 3, 4, 5, 6]
+        assert offsets[:, 1] == pytest.approx(scaled[order, component])
+        assert colors == [palette[0]] * 3 + [palette[1]] * 3
+        assert ax.get_xticks().tolist() == [1, 6]
+        assert ax.get_ylabel() == "Subject coef. (a.u.)"
+        assert not ax.patches and not ax.texts  # no boxes, no test stars
+    assert axs[-1, 1].get_xlabel() == "Subject"
+    assert axs[0, 1].get_xlabel() == ""
+    assert _figure_legend_labels(fig) == ["A", "B"]
+    plt.close(fig)
+
+
+def test_plot_mode_grid_marks_zero_only_for_negative_coefficients():
+    kwargs = make_mode_grid_parafac2_fixture()
+    kwargs["subject_mode"] = kwargs["subject_mode"].copy()
+    kwargs["subject_mode"][0, 1] = -0.5
+
+    fig, axs = plot_mode_grid(**kwargs)
+
+    assert axs[0, 1].get_lines() == []
+    (zero,) = axs[1, 1].get_lines()
+    assert zero.get_ydata() == pytest.approx([0, 0])
     plt.close(fig)
 
 
