@@ -17,6 +17,7 @@
   - `relative_squared_error` (‖X − X̂‖²/‖X‖²) and `data_norm` (‖X‖ of the data as fitted, from TensorLy's `norm`); together they give the absolute error.
   - Per component: `component_weights` (λ_r) and `component_shares` (λ_r²/‖X‖², the share of the data's sum of squares).
   - Only new fits store them; `fits.csv` and the CSVs of `plot decomposition` are unchanged.
+- **Correlation CIs in `gmri stats`:** every table gets 95% Fisher-z intervals for `partial_r` (`partial_r_ci_low`, `partial_r_ci_high`; n − 3 − the number of covariate columns) and `r_unadjusted` (`r_unadjusted_ci_low`, `r_unadjusted_ci_high`; SciPy's `pearsonr`), next to each correlation.
 - **Guide for large inputs on CPU clusters:** `docs/cpu-scaling.md` covers backend, threads, restarts per node and job size, plus a scaling-test protocol.
 
 ### Changed

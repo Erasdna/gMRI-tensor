@@ -171,6 +171,21 @@ the variable and the coefficient once the covariates are accounted for, from
 −1 to 1, with the sign of `estimate`. Its square is `partial_r2`. Empty for a
 categorical variable.
 
+### `partial_r_ci_low`
+
+Lower end of the 95% confidence interval of `partial_r`, from Fisher's z
+transform with n − 3 − (number of covariate columns) degrees of freedom; a
+categorical covariate counts one column per non-reference level. For a slope
+row of the interactions table, n is every subject in the model, not only that
+group, and the other groups' slopes count as covariates. Empty when
+`partial_r` is.
+
+### `partial_r_ci_high`
+
+Upper end of the 95% confidence interval of `partial_r` (see
+`partial_r_ci_low`). Unlike `ci_low` and `ci_high`, an interval that excludes
+0 only approximately corresponds to `p_parametric` < 0.05.
+
 ### `vif`
 
 How much the tested variable overlaps with the covariates (variance inflation
@@ -192,6 +207,18 @@ coefficient, without any adjustment, in the same subjects. Compare it with
 `partial_r` to see what the adjustment changed. Empty for a categorical
 variable. For a slope row of the interactions table, the correlation within
 that group; empty for a difference row.
+
+### `r_unadjusted_ci_low`
+
+Lower end of the 95% confidence interval of `r_unadjusted`, from Fisher's z
+transform with n − 3 degrees of freedom (SciPy's `pearsonr`), over the same
+subjects as `r_unadjusted`. With only 3 subjects the interval is −1 to 1.
+Empty when `r_unadjusted` is.
+
+### `r_unadjusted_ci_high`
+
+Upper end of the 95% confidence interval of `r_unadjusted` (see
+`r_unadjusted_ci_low`).
 
 ### `p_unadjusted`
 
@@ -256,7 +283,8 @@ Empty, or why a row is incomplete:
 | `p_unadjusted` | Only for seeing what the adjustment changed. |
 
 Report effects with `standardised` (or `estimate` with `ci_low` and
-`ci_high`) and `p_fdr`. A significant p-value with a tiny `standardised` is
+`ci_high`, or `partial_r` with `partial_r_ci_low` and `partial_r_ci_high`)
+and `p_fdr`. A significant p-value with a tiny `standardised` is
 rarely meaningful, and a large `standardised` that is not significant may be
 worth a larger study.
 

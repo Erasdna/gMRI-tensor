@@ -17,6 +17,8 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import statsmodels.api as sm
+from scipy.stats import norm
+from scipy.stats import pearsonr
 from statsmodels.stats.multitest import multipletests
 
 #: The columns of a `primary_effects` / `clinical_effects` table.
@@ -33,8 +35,12 @@ COLUMNS = (
     "std_kind",
     "partial_r2",
     "partial_r",
+    "partial_r_ci_low",
+    "partial_r_ci_high",
     "vif",
     "r_unadjusted",
+    "r_unadjusted_ci_low",
+    "r_unadjusted_ci_high",
     "p_unadjusted",
     "p_parametric",
     "p_perm",
@@ -275,6 +281,34 @@ def _block_rows(
     return rows
 
 
+def _correlations(
+    estimate: float,
+    partial_r2: float,
+    dfe: int,
+    x: np.ndarray,
+    y: np.ndarray,
+) -> dict[str, float]:
+    """`partial_r`, signed by `estimate`, and `r_unadjusted` (Pearson r of
+    `x` and `y`), each with its 95% Fisher-z interval: `partial_r`'s with
+    `dfe - 1` = n - 3 - the number of covariate columns, `dfe` being the
+    full model's residual degrees of freedom; `r_unadjusted`'s with
+    `len(x) - 3` (SciPy's; -1 to 1 for 3 subjects)."""
+    partial_r = float(np.sign(estimate) * np.sqrt(partial_r2))
+    half = norm.ppf(0.975) / np.sqrt(dfe - 1)
+    with np.errstate(divide="ignore"):
+        z = np.arctanh(partial_r)
+    unadjusted = pearsonr(x, y)
+    interval = unadjusted.confidence_interval(0.95)
+    return {
+        "partial_r": partial_r,
+        "partial_r_ci_low": float(np.tanh(z - half)),
+        "partial_r_ci_high": float(np.tanh(z + half)),
+        "r_unadjusted": float(unadjusted.statistic),
+        "r_unadjusted_ci_low": float(interval.low),
+        "r_unadjusted_ci_high": float(interval.high),
+    }
+
+
 def _term_rows(
     y: np.ndarray,
     data: pd.DataFrame,
@@ -327,8 +361,13 @@ def _term_rows(
             x = data[term].to_numpy(dtype=float)
             row["standardised"] = row["estimate"] * x.std(ddof=1) / y[:, c].std(ddof=1)
             row["std_kind"] = "beta"
-            row["partial_r"] = np.sign(row["estimate"]) * np.sqrt(row["partial_r2"])
-            row["r_unadjusted"] = np.corrcoef(x, y[:, c])[0, 1]
+            row |= _correlations(
+                row["estimate"],
+                row["partial_r2"],
+                n - n_params,
+                x,
+                y[:, c],
+            )
     return rows
 
 
@@ -503,8 +542,13 @@ def _interaction_rows(
                 * x[inside].std(ddof=1)
                 / within[:, c].std(ddof=1),
                 "std_kind": "beta",
-                "partial_r": np.sign(row["estimate"]) * np.sqrt(row["partial_r2"]),
-                "r_unadjusted": np.corrcoef(x[inside], within[:, c])[0, 1],
+                **_correlations(
+                    row["estimate"],
+                    row["partial_r2"],
+                    n - design.shape[1] - 1,
+                    x[inside],
+                    within[:, c],
+                ),
                 "p_unadjusted": p_unadjusted[c],
                 "note": note,
             }

@@ -17,12 +17,20 @@ from gMRItensor.subject_statistics import INTERACTION_COLUMNS
 from gMRItensor.subject_statistics import interaction_effects
 from gMRItensor.subject_statistics import permutations
 from gMRItensor.subject_statistics import primary_effects
+from scipy.stats import norm
+from scipy.stats import pearsonr
 from statsmodels.stats.multitest import multipletests
 from statsmodels.stats.outliers_influence import variance_inflation_factor
 
 DOCS = Path(__file__).parents[1] / "docs" / "subject-statistics.md"
 PRIMARY = ["diagnosis", "sex", "age"]
 CATEGORICAL = {"diagnosis", "sex", "apoe"}
+CORRELATION_CIS = [
+    "partial_r_ci_low",
+    "partial_r_ci_high",
+    "r_unadjusted_ci_low",
+    "r_unadjusted_ci_high",
+]
 
 
 def _study(n: int = 40, seed: int = 0) -> tuple[pd.DataFrame, np.ndarray]:
@@ -143,6 +151,48 @@ def test_planted_effects_are_found() -> None:
     )
 
 
+def _fisher_ci(r: float, dof: int) -> tuple[float, float]:
+    """95% Fisher-z interval of a correlation, `dof` = n - 3 - the number
+    of covariate columns."""
+    half = norm.ppf(0.975) / np.sqrt(dof)
+    return np.tanh(np.arctanh(r) - half), np.tanh(np.arctanh(r) + half)
+
+
+def test_correlation_cis_are_fisher_z_intervals() -> None:
+    info, coefficients = _study()
+    table = clinical_effects(coefficients, info, ["egfr"], PRIMARY, CATEGORICAL, 200)
+    covariates = "C(diagnosis) + C(sex) + age"
+    for c, row in table.set_index("component").iterrows():
+        frame = info.assign(y=coefficients[:, c - 1])
+        unadjusted = pearsonr(frame["egfr"], frame["y"]).confidence_interval(0.95)
+        assert row["r_unadjusted_ci_low"] == pytest.approx(unadjusted.low)
+        assert row["r_unadjusted_ci_high"] == pytest.approx(unadjusted.high)
+
+        partial = pearsonr(
+            smf.ols(f"egfr ~ {covariates}", frame).fit().resid,
+            smf.ols(f"y ~ {covariates}", frame).fit().resid,
+        ).statistic
+        low, high = _fisher_ci(partial, len(frame) - 3 - 3)
+        assert row["partial_r"] == pytest.approx(partial)
+        assert row["partial_r_ci_low"] == pytest.approx(low)
+        assert row["partial_r_ci_high"] == pytest.approx(high)
+        for r in ("partial_r", "r_unadjusted"):
+            assert -1 < row[f"{r}_ci_low"] < row[r] < row[f"{r}_ci_high"] < 1
+
+
+def test_partial_r_ci_without_covariates_is_pearsons() -> None:
+    info, coefficients = _study()
+    table = primary_effects(coefficients, info, ["age"], CATEGORICAL, 200)
+    for c, row in table.set_index("component").iterrows():
+        expected = pearsonr(info["age"], coefficients[:, c - 1])
+        interval = expected.confidence_interval(0.95)
+        assert row["partial_r"] == pytest.approx(expected.statistic)
+        assert row["partial_r_ci_low"] == pytest.approx(interval.low)
+        assert row["partial_r_ci_high"] == pytest.approx(interval.high)
+        assert row["partial_r_ci_low"] == pytest.approx(row["r_unadjusted_ci_low"])
+        assert row["partial_r_ci_high"] == pytest.approx(row["r_unadjusted_ci_high"])
+
+
 def test_adjustment_removes_a_confounded_association() -> None:
     info, coefficients = _study(n=60, seed=0)
     table = clinical_effects(coefficients, info, ["egfr"], PRIMARY, CATEGORICAL, 2000)
@@ -175,6 +225,7 @@ def test_factor_contrasts_share_one_test_and_count_once_in_fdr() -> None:
     assert apoe["partial_r2"].nunique() == 1
     assert apoe["std_kind"].tolist() == ["d", "d"]
     assert apoe["partial_r"].isna().all() and apoe["r_unadjusted"].isna().all()
+    assert apoe[CORRELATION_CIS].isna().all().all()
 
     terms = table.drop_duplicates(["component", "term"])
     from statsmodels.stats.multitest import multipletests
@@ -387,6 +438,13 @@ def test_slopes_per_group_match_statsmodels() -> None:
         assert row["r_unadjusted"] == pytest.approx(
             np.corrcoef(within["egfr"], within["y"])[0, 1],
         )
+        unadjusted = pearsonr(within["egfr"], within["y"]).confidence_interval(0.95)
+        assert row["r_unadjusted_ci_low"] == pytest.approx(unadjusted.low)
+        assert row["r_unadjusted_ci_high"] == pytest.approx(unadjusted.high)
+        # All 40 subjects; diagnosis, sex, age and the other slope: 4 columns.
+        low, high = _fisher_ci(row["partial_r"], 40 - 3 - 4)
+        assert row["partial_r_ci_low"] == pytest.approx(low)
+        assert row["partial_r_ci_high"] == pytest.approx(high)
         assert row["n"] == 20
     assert set(slopes["term"]) == {"egfr × diagnosis"}
     assert set(slopes["covariates"]) == {"diagnosis + sex + age"}
@@ -407,6 +465,7 @@ def test_slope_difference_matches_the_statsmodels_interaction_term() -> None:
     assert row["covariates"] == "egfr + diagnosis + sex + age"
     assert row["n"] == 40
     assert np.isnan(row["standardised"]) and np.isnan(row["r_unadjusted"])
+    assert row[CORRELATION_CIS].isna().all()
 
 
 def test_a_planted_group_specific_slope_is_found() -> None:
